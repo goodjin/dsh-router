@@ -145,4 +145,20 @@ describe('dispatchGuard：角色 / 深度 / 环', () => {
       ok: true,
     })
   })
+
+  it('parentId 链成环时祖先回溯必须终止（不挂起）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock())
+    // T-001 与 T-002 互为父任务（parentId 环；createTask 只查 dependsOn 环）
+    await ledger.createTask(taskInput({ title: 'A', parentId: 'T-002' }))
+    await ledger.createTask(taskInput({ title: 'B', parentId: 'T-001' }))
+    const sched = scheduler(ledger)
+    // 依赖不涉祖先：放行且立刻返回
+    expect(
+      sched.dispatchGuard({ sessionIdRole: 'supervisor', parentTaskId: 'T-001', depth: 1 }, { role: 'worker', dependsOn: ['T-003'] }),
+    ).toEqual({ ok: true })
+    // 依赖命中环上任一祖先：环风险
+    expect(
+      sched.dispatchGuard({ sessionIdRole: 'supervisor', parentTaskId: 'T-001', depth: 1 }, { role: 'worker', dependsOn: ['T-002'] }),
+    ).toEqual({ ok: false, code: 'cycle-risk' })
+  })
 })

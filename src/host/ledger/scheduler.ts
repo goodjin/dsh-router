@@ -71,9 +71,10 @@ export class Scheduler {
       return { ok: false, code: 'role-forbidden' }
     }
     if (target.dependsOn !== undefined && target.dependsOn.length > 0 && parent.parentTaskId !== undefined) {
+      // 祖先链回溯带 visited 防护：parentId 环（账本只在 dependsOn 上查环）下必须终止
       const ancestors = new Set<string>()
       let cursor: string | undefined = parent.parentTaskId
-      while (cursor !== undefined) {
+      while (cursor !== undefined && !ancestors.has(cursor)) {
         ancestors.add(cursor)
         cursor = this.ledger.get(cursor)?.parentId
       }
