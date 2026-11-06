@@ -22,6 +22,12 @@ export type LedgerErrorCode =
   | 'unknown-tool'
   /** 工具角色层：无法从 exec.agent 解析调用方会话 ID（宿主身份字段缺失）。 */
   | 'caller-unresolved'
+  /** 问答桥：问题 ID 不存在（HTTP 404）。 */
+  | 'question-not-found'
+  /** 问答桥：问题已应答，拒绝重复（HTTP 409）。 */
+  | 'already-answered'
+  /** 问答桥：等待中的问题被中止信号取消。 */
+  | 'question-cancelled'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

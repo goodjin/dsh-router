@@ -92,12 +92,12 @@ export interface TaskRecord {
   updatedAt: number
 }
 
-/** 待答问题记录（账本文件里占位，Part B 问题浮窗接入后启用）。 */
+/** 待答问题记录（Part B 问题浮窗在用；expired = 宿主重启后失效的孤儿问题）。 */
 export interface QuestionRecord {
   id: string
   taskId: string
   question: string
-  status: 'open' | 'answered'
+  status: 'open' | 'answered' | 'expired'
   answer?: string
   createdAt: number
   answeredAt?: number

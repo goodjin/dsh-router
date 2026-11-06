@@ -359,4 +359,40 @@ export class TaskLedger {
       return task
     })
   }
+
+  /** 记一条待答问题（问答桥认领时落库，重启后孤儿恢复的依据）。 */
+  async addQuestion(record: QuestionRecord): Promise<QuestionRecord> {
+    return this.commit(() => {
+      this.questions.push(structuredClone(record))
+      return record
+    })
+  }
+
+  /** 问题了结（answered / expired）；找不到返回 undefined。 */
+  async settleQuestion(
+    id: string,
+    status: Extract<QuestionRecord['status'], 'answered' | 'expired'>,
+    answer?: string,
+  ): Promise<QuestionRecord | undefined> {
+    return this.commit(() => {
+      const record = this.questions.find((q) => q.id === id)
+      if (record === undefined) return undefined
+      record.status = status
+      if (answer !== undefined) record.answer = answer
+      record.answeredAt = this.clock()
+      return record
+    })
+  }
+
+  /** 全部 open 状态的问题（重启孤儿恢复扫描用）。 */
+  async openQuestions(): Promise<QuestionRecord[]> {
+    await this.ensureLoaded()
+    return this.questions.filter((q) => q.status === 'open')
+  }
+
+  /** 按 ID 找问题（任意状态；应答桥区分 404/409 用）。 */
+  async findQuestion(id: string): Promise<QuestionRecord | undefined> {
+    await this.ensureLoaded()
+    return this.questions.find((q) => q.id === id)
+  }
 }
