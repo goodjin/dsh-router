@@ -172,6 +172,71 @@ describe('persona 文本与 TS 模板逐字同步', () => {
 })
 
 describe('lib/client.js 是页面能装的产物', () => {
+  /** 页面模块表的假面：只放行外置模块清单里的 react 系；其余一律抛错。 */
+  function pageRequire(): ((specifier: string) => unknown) & { required: string[] } {
+    const allowed = new Set(['react', 'react-dom', 'react/jsx-runtime'])
+    const required: string[] = []
+    const require = (specifier: string): unknown => {
+      required.push(specifier)
+      if (!allowed.has(specifier)) {
+        throw new Error(`产物请求了模块表外的模块：${specifier}`)
+      }
+      // 组件只在渲染时才调 hooks；工厂期只要对象存在即可。
+      return specifier === 'react/jsx-runtime'
+        ? { jsx: () => null, jsxs: () => null, Fragment: 'Fragment' }
+        : {
+            useState: () => [undefined, () => {}],
+            useEffect: () => {},
+            useMemo: (factory: () => unknown) => factory(),
+            useRef: () => ({ current: undefined }),
+            useCallback: (fn: unknown) => fn,
+            useSyncExternalStore: (subscribe: (listener: () => void) => () => void, getSnapshot: () => unknown) => {
+              subscribe(() => {})
+              return getSnapshot()
+            },
+          }
+    }
+    return Object.assign(require, { required })
+  }
+
+  /** 记录型假 ctx（与 entry.spec 同款，独立在此避免跨文件共享状态）。 */
+  function recordingWindowCtx() {
+    const captured = {
+      injected: [] as string[],
+      registered: [] as Array<{ name: string; id?: string }>,
+      effects: 0,
+      infos: [] as string[],
+    }
+    const ctx = {
+      logger: (_name: string) => ({
+        info: (message: string) => { captured.infos.push(message) },
+        warn: () => {},
+      }),
+      effect: (callback: () => unknown) => { captured.effects += 1; return undefined },
+      slots: {
+        inject: (key: string, prepare: () => unknown) => {
+          captured.injected.push(key)
+          return prepare()
+        },
+        register: (options: { name: string; id?: string }, _component: unknown) => {
+          captured.registered.push({ name: options.name, id: options.id })
+          return options
+        },
+      },
+      uiSession: {
+        adapter: {
+          current: {
+            subscribe: (_listener: () => void) => () => {},
+            getSnapshot: () => ({ key: 's1' }),
+          },
+        },
+      },
+      uiWorkspace: { openSession: (_id: string) => {} },
+      workspaces: { list: { getSnapshot: () => ({ items: [] }) } },
+    }
+    return { ctx, captured }
+  }
+
   it('是 ModuleLoader 工厂：登记正确的 id，factory 执行后 name/inject/apply 齐全、apply 空跑不抛', () => {
     expect(existsSync(BUNDLE_PATH), 'lib/client.js 不存在——先 npm run build').toBe(true)
     const src = readFileSync(BUNDLE_PATH, 'utf8')
@@ -184,23 +249,50 @@ describe('lib/client.js 是页面能装的产物', () => {
     const row = loadBundleRow()
     expect(row.id).toBe('@goodjin2/dsh-router')
 
-    // 占位阶段 factory 一个页面模块都不该 require：给的 require 一律抛错。
-    const loaded = row.factory((specifier: string) => {
-      throw new Error(`产物请求了模块表外的模块：${specifier}`)
-    })
+    // 页面模块表里拿得到 react 系（package.json 的 dsh.client.external 清单）；
+    // 其余模块必须是打进产物，工厂期请求即视为断链。
+    const require = pageRequire()
+    const loaded = row.factory(require)
     expect(loaded.name, '产物必须导出与包名一致的 name').toBe('@goodjin2/dsh-router')
-    expect(Array.isArray(loaded.inject), '产物必须导出 inject（占位阶段为空数组）').toBe(true)
-    expect(loaded.inject).toEqual([])
+    expect(Array.isArray(loaded.inject), '产物必须导出 inject（页面真实服务名）').toBe(true)
+    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
     expect(typeof loaded.apply, '产物必须导出 apply').toBe('function')
+    // 工厂期只允许 require 外置清单（react 系）；出现别的说明打包把页面模块打了进来。
+    for (const specifier of require.required) {
+      expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
+    }
 
-    // root 级别可运行：不挂任何 slot，给一个最小 ctx 也要能空跑。
-    const infos: string[] = []
+    // 按页面物化的方式真跑一遍 apply：四个表面注册齐、自报一行、生命周期经 effect。
+    const { ctx, captured } = recordingWindowCtx()
+    expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
+    expect([...captured.injected].sort()).toEqual([
+      'conversation.header.leading',
+      'settings.section',
+      'shell.overlay',
+      'sidebar.footer.action',
+    ].sort())
+    const ids = captured.registered.map((entry) => entry.id)
+    expect(ids).toEqual([
+      'router-workbench-tabs',
+      'router-question-overlay',
+      'router-create-entry',
+      'router-settings',
+    ])
+    expect(captured.infos.join(' ')).toMatch(/client loaded/i)
+    expect(captured.effects).toBeGreaterThanOrEqual(1)
+  })
+
+  it('服务缺失时降级：只警告不注册、不抛（页面给残缺 ctx 也不能炸）', () => {
+    const row = loadBundleRow()
+    const loaded = row.factory(pageRequire())
+    const warns: string[] = []
     const ctx = {
-      logger: () => ({ info: (message: string) => { infos.push(message) }, warn: () => {} }),
-      effect: () => () => {},
-      get: () => undefined,
+      logger: () => ({ info: () => {}, warn: (message: string) => { warns.push(message) } }),
+      effect: () => undefined,
     }
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
-    expect(infos.join(' ')).toContain('placeholder')
+    expect(() => (loaded.apply as (ctx: unknown) => void)(undefined)).not.toThrow()
+    expect(() => (loaded.apply as (ctx: unknown) => void)({})).not.toThrow()
+    expect(warns.join(' ')).toContain('slots')
   })
 })
