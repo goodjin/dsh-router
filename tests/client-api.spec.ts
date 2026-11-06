@@ -175,4 +175,21 @@ describe('错误与超时', () => {
     expect(error).toBeInstanceOf(RouterApiError)
     expect((error as RouterApiError).message).toMatch(/timeout/i)
   })
+
+  it('超时横跨响应体（审查 F8）：headers 早到但 body 悬死，同样按超时收场', async () => {
+    const api = createRouterApi({
+      fetch: (_input, init) => Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => new Promise<unknown>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+        }),
+        text: () => Promise.resolve(''),
+      } as Response),
+      timeoutMs: 10,
+    })
+    const error = await api.getState().catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(RouterApiError)
+    expect((error as RouterApiError).message).toMatch(/timeout/i)
+  })
 })

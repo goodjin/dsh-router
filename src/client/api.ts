@@ -81,25 +81,36 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
   const doFetch = deps.fetch ?? defaultFetch()
   const timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-  // 每个请求一个控制器：到时即中止；正常返回则清掉定时器。
+  // 每个请求一个控制器：到时即中止；**截止线横跨头与响应体**（审查 F8）——
+  // headers 早到、body 迟迟不来时也必须按超时收场，否则提交/关闭会悬死、
+  // 轮询会越积越多。json 的读取与中止信号赛跑，谁先到听谁的。
   async function request(path: string, init: RequestInit): Promise<unknown> {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     let response: Response
     try {
       response = await doFetch(path, { ...init, signal: controller.signal })
+      const body = await Promise.race([
+        readJson(response),
+        new Promise<never>((_resolve, reject) => {
+          controller.signal.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'))
+          }, { once: true })
+        }),
+      ])
+      if (!response.ok) {
+        throw new RouterApiError(errorMessageFromBody(body, response.status), response.status)
+      }
+      return body
     } catch (error) {
+      // 协议错误（HTTP 状态 + {error}）原样上抛，不得被包装丢掉 status。
+      if (error instanceof RouterApiError) throw error
       // 超时中止与网络错误在这里分不开太多——按调用方的可读性统一命名。
       const message = error instanceof Error ? error.message : String(error)
       throw new RouterApiError(/abort/i.test(message) ? 'router: request timeout' : `router: network error (${message})`)
     } finally {
       clearTimeout(timer)
     }
-    const body = await readJson(response)
-    if (!response.ok) {
-      throw new RouterApiError(errorMessageFromBody(body, response.status), response.status)
-    }
-    return body
   }
 
   function postJson(path: string, payload: Record<string, unknown>): Promise<unknown> {
