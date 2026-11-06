@@ -1,0 +1,172 @@
+/**
+ * 会话导航标签条（规格 §3.2 第一层导航）。
+ *
+ * 挂点 `conversation.header.leading`（single、root、当前零占用、replaceRisk
+ * none——R3 报告 §1.2/§8.1 的判定）：Router 会话固定首位，worker 标签按服务端
+ * 持久标签序随后；激活态 = uiSession 当前会话映射（store 维护）；点击
+ * uiWorkspace.openSession 切换；worker 标签 × → tabs/close，确认后本地移除。
+ * 规格铁律：新派发不抢焦点——本组件只响应点击，绝不主动切换会话；
+ * 不学 chat-power 的 MutationObserver 插 DOM，纯 slot 机制。
+ */
+
+import { useMemo, useSyncExternalStore } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
+import type { RouterState } from '../shared/view-contract.ts'
+import { activeTabIndex, buildTabList } from './tabs-model.ts'
+import type { RouterTabEntry } from './tabs-model.ts'
+import { WORKBENCH_TABS_ID, WORKBENCH_TABS_ORDER, WORKBENCH_TABS_SLOT } from './surface-ids.ts'
+import type { WorkbenchStore } from './workbench-store.ts'
+
+/** slots 服务的最小面（结构化；真实 face 由 index.ts 传入）。 */
+export interface SlotsHost {
+  inject(key: string, prepare: () => unknown): unknown
+  register(options: {
+    name: string
+    id?: string
+    order?: number
+    label?: () => string
+    locale?: string
+    inject?: () => unknown
+  }, component: unknown): unknown
+}
+
+/** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
+export interface WorkbenchTabsFace {
+  store: WorkbenchStore
+  uiWorkspace: { openSession(target: string): void }
+}
+
+/** 组件 props = face（经 registration inject 注入）。 */
+export type WorkbenchTabsProps = WorkbenchTabsFace
+
+const EMPTY_STATE: RouterState = { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }
+
+/**
+ * 把标签条注册进宿主头部。registration 的 `inject` 返回 face——渲染时
+ * 框架把它并进组件 props（R3 报告 §7「组件输入的五个来源」）。
+ */
+export function registerWorkbenchTabs(slots: SlotsHost, face: WorkbenchTabsFace): void {
+  slots.inject(WORKBENCH_TABS_SLOT, () => slots.register(
+    { name: WORKBENCH_TABS_SLOT, id: WORKBENCH_TABS_ID, order: WORKBENCH_TABS_ORDER, inject: () => face },
+    WorkbenchTabs,
+  ))
+}
+
+const ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 4,
+  minWidth: 0,
+  maxWidth: '40vw',
+  overflowX: 'auto',
+  scrollbarWidth: 'none',
+}
+
+function tabStyle(active: boolean, closing: boolean): CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '2px 8px',
+    borderRadius: 6,
+    border: '1px solid',
+    borderColor: active ? 'var(--dsh-color-primary, #4f6bed)' : 'transparent',
+    background: active ? 'color-mix(in srgb, var(--dsh-color-primary, #4f6bed) 12%, transparent)' : 'transparent',
+    color: 'inherit',
+    fontSize: 12,
+    lineHeight: '18px',
+    cursor: closing ? 'default' : 'pointer',
+    opacity: closing ? 0.55 : 1,
+    whiteSpace: 'nowrap',
+    userSelect: 'none',
+  }
+}
+
+const CLOSE_STYLE: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 14,
+  height: 14,
+  margin: 0,
+  padding: 0,
+  border: 'none',
+  borderRadius: 3,
+  background: 'transparent',
+  color: 'inherit',
+  fontSize: 11,
+  lineHeight: '14px',
+  cursor: 'pointer',
+  opacity: 0.6,
+}
+
+function statusDot(entry: RouterTabEntry): ReactNode {
+  if (entry.kind !== 'worker' || !entry.running) return null
+  return (
+    <span
+      data-router-tab-running
+      style={{
+        width: 6,
+        height: 6,
+        borderRadius: 3,
+        background: 'var(--dsh-color-success, #34a853)',
+        display: 'inline-block',
+        flex: 'none',
+      }}
+    />
+  )
+}
+
+/** 标签条组件：Router 固定首位 + worker 标签；激活 = 当前会话；点击切换。 */
+export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
+  const state = useSyncExternalStore(props.store.subscribe, props.store.get)
+  const tabs = useMemo(
+    () => buildTabList(state.routerState ?? EMPTY_STATE),
+    [state.routerState],
+  )
+  const activeIndex = activeTabIndex(tabs, state.currentSessionId)
+  // 没有任何 router/worker 标签时整条不渲染（不占头部空间）。
+  if (tabs.length === 0) return null
+  return (
+    <nav data-router-workbench-tabs style={ROW_STYLE} aria-label="Router 会话标签">
+      {tabs.map((entry, index) => {
+        const closing = state.closingSessionIds.includes(entry.sessionId)
+        return (
+          <span
+            key={`${entry.kind}:${entry.sessionId}`}
+            data-router-tab={entry.kind}
+            data-session-id={entry.sessionId}
+            role="tab"
+            aria-selected={index === activeIndex}
+            style={tabStyle(index === activeIndex, closing)}
+            onClick={() => {
+              // 只响应点击；新派发/轮询绝不主动切换（规格 §3.2 不抢焦点）。
+              if (!closing && entry.sessionId !== state.currentSessionId) {
+                props.uiWorkspace.openSession(entry.sessionId)
+              }
+            }}
+          >
+            {statusDot(entry)}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160 }}>{entry.title}</span>
+            {entry.kind === 'worker' ? (
+              <button
+                type="button"
+                data-router-tab-close
+                title="关闭标签（不停止任务）"
+                aria-label={`关闭标签 ${entry.title}`}
+                disabled={closing}
+                style={CLOSE_STYLE}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  void props.store.closeWorkerTab(entry.sessionId)
+                }}
+              >
+                ×
+              </button>
+            ) : null}
+          </span>
+        )
+      })}
+    </nav>
+  )
+}
