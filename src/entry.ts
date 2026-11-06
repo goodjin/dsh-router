@@ -302,8 +302,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
 
   // 问答瀑布：全局监听收所有会话；prepend 抢在客户端兜底 UI 之前认领 worker 提问
   //（答案走 Router 界面浮窗，见规格 §3.3）。
-  ctx.on('user-questions/request', ((request: unknown, next: () => Promise<unknown>) =>
-    relay.claimQuestion(request as never, next)) as unknown as (...args: unknown[]) => unknown, { prepend: true })
+  ctx.on('user-questions/request', (async (request: unknown, next: () => Promise<unknown>) => {
+    const outcome = await relay.claimQuestion(request as never, next)
+    // 问答变化影响活动快照的「待回答事项」，同步刷缓存（fire-and-forget）
+    void assembled.refreshSnapshot()
+    return outcome
+  }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
 
   // 启动恢复：UI 状态装载 + 账本孤儿问题清理 + 快照缓存预热。
   ctx.effect(() => {
@@ -322,7 +326,10 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     registerRouterRoutes(child as RouterRoutesContext, {
       getState: (workspaceId) => assembled.workbench.state(workspaceId),
       createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
-      answerQuestion: (questionId, answers) => assembled.workbench.answerQuestion(questionId, answers),
+      answerQuestion: async (questionId, answers) => {
+        await assembled.workbench.answerQuestion(questionId, answers)
+        void assembled.refreshSnapshot()
+      },
       closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
     })
   })

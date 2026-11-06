@@ -615,3 +615,22 @@ describe('HTTP 路由（exact + admit）', () => {
     expect(deps.calls[0]).toBe('close:ws-1:session-3')
   })
 })
+
+describe('HTTP 路由：请求校验', () => {
+  it('router-session 缺 workspaceId 回 400（不是 500）', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    const { req, res, captured } = fakeExchange('POST', '/router/router-session', JSON.stringify({ name: 'x' }))
+    await routes[1]!.handler(req, res)
+    expect(captured.status).toBe(400)
+    expect(JSON.parse(captured.body)).toMatchObject({ error: expect.stringContaining('workspaceId') })
+  })
+
+  it('answer 缺 answers 回 400', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    const { req, res, captured } = fakeExchange('POST', '/router/answer', JSON.stringify({ questionId: 'q-1' }))
+    await routes[2]!.handler(req, res)
+    expect(captured.status).toBe(400)
+  })
+})

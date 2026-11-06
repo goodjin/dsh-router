@@ -64,6 +64,7 @@ function errorStatus(error: unknown): number {
     case 'caller-unresolved':
       return 403
     case 'unknown-tool':
+    case 'bad-request':
       return 400
     default:
       return 500
@@ -151,7 +152,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   handle(ROUTER_SESSION_PATH, 'POST', async (request) => {
     const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; name?: unknown }
     if (typeof body.workspaceId !== 'string' || body.workspaceId === '') {
-      throw new Error('workspaceId 必填')
+      throw new LedgerError('bad-request', 'workspaceId 必填')
     }
     const name = typeof body.name === 'string' && body.name !== '' ? body.name : undefined
     const created = await deps.createRouterSession(body.workspaceId, name)
@@ -161,7 +162,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   handle(ROUTER_ANSWER_PATH, 'POST', async (request) => {
     const body = JSON.parse(await readBody(request)) as { questionId?: unknown; answers?: unknown }
     if (typeof body.questionId !== 'string' || !Array.isArray(body.answers)) {
-      throw new Error('questionId 与 answers 必填')
+      throw new LedgerError('bad-request', 'questionId 与 answers 必填')
     }
     await deps.answerQuestion(body.questionId, body.answers as AskUserQuestionAnswerItem[])
     return { status: 200, body: JSON.stringify({ ok: true }) }
@@ -170,7 +171,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   handle(ROUTER_TABS_CLOSE_PATH, 'POST', async (request) => {
     const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; sessionId?: unknown }
     if (typeof body.workspaceId !== 'string' || typeof body.sessionId !== 'string') {
-      throw new Error('workspaceId 与 sessionId 必填')
+      throw new LedgerError('bad-request', 'workspaceId 与 sessionId 必填')
     }
     await deps.closeTab(body.workspaceId, body.sessionId)
     return { status: 200, body: JSON.stringify({ ok: true }) }

@@ -32,6 +32,8 @@ export type LedgerErrorCode =
   | 'depth-exceeded'
   /** 调度派发被拒：依赖命中祖先链（环风险）。 */
   | 'cycle-risk'
+  /** HTTP 请求体不合法（路由参数校验）。 */
+  | 'bad-request'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {
