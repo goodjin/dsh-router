@@ -65,6 +65,17 @@ export interface RouterCoreConfig {
   templates: WorkerTemplate[]
 }
 
+/** 记忆服务面（计划 B6/B8：entry.ts 用 memory/adapter + retrieval 组装注入）。 */
+export interface RouterMemory {
+  /** search_history 的数据面（retrieval.search 直传）。 */
+  search(query: string, scope: 'project' | 'global'): Promise<{ memoryRef: string; snippet: string }[]>
+  /**
+   * 任务完成触发：写 project 层完成记录 + 任务会话增量摘要。
+   * 实现方自行容错（不阻塞完成协议、失败只 warn）。
+   */
+  onTaskCompleted(input: { taskId: string; title: string; summary: string; resultRelPath: string; sessionId?: string }): void
+}
+
 export interface RouterCoreAssemblyDeps {
   ledger: TaskLedger
   docsFor(cwd: string): TaskDocStore
@@ -80,6 +91,10 @@ export interface RouterCoreAssemblyDeps {
   isRunning(sessionId: string): boolean
   /** 活动快照卡上限（缺省 12）。 */
   maxActiveCards?: number
+  /** 任务文档目录名（缺省 '.router'；result.md 相对路径用它拼）。 */
+  tasksDir?: string
+  /** 记忆服务（缺省时 search_history 返回注记、完成不触发记忆写入）。 */
+  memory?: RouterMemory
   /** 派发失败等非致命问题的日志口（缺席静默）。 */
   logger?: { warn(message: string): void }
 }
@@ -224,6 +239,10 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const book = renderTaskBook(record, { materials: input.materials, sourceRef: `router 会话 ${callerSessionId}` })
       const docPath = await docs.initTask(record, book)
       const { sessionId } = await bridge.dispatchTask(record.id)
+      // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
+      // dispatch_task 成功后给 Router（或主管）会话打 pendingCompaction，其自身
+      // 的派发讨论段在 idle 后被压缩（裁定 5 顺延项的补齐）。
+      driver.onDispatched(callerSessionId)
       await afterDispatch(record, sessionId, workspace?.id)
       return { taskId: record.id, docPath, sessionId }
     },
@@ -238,7 +257,10 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const newVersion = await ledger.supplement(taskId, additions)
       await deps.docsFor(record.cwd).supplement(taskId, fromVersion, additions)
       const delivered = await bridge.supplementTo(taskId)
-      if (delivered.sessionId !== undefined) driver.onDispatched(delivered.sessionId)
+      if (delivered.sessionId !== undefined) {
+        driver.onDispatched(delivered.sessionId)
+        driver.onDispatched(callerSessionId)
+      }
       await refreshSnapshot()
       return { docVersion: newVersion }
     },
@@ -276,9 +298,17 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       return { status: ledger.get(taskId)?.status ?? record.status }
     },
 
-    async searchHistory() {
-      // 记忆服务是 Task B6（不在本任务）：接口先立住，返回空命中与注记。
-      return { hits: [], note: '记忆服务未接线' }
+    async searchHistory(_callerSessionId, query, scope) {
+      if (deps.memory === undefined) {
+        return { hits: [], note: '记忆服务未配置' }
+      }
+      try {
+        return { hits: await deps.memory.search(query, scope) }
+      } catch (error) {
+        // 检索失败对模型诚实降级（空命中+注记），不让一次磁盘故障变成工具报错
+        deps.logger?.warn(`记忆检索失败: ${error instanceof Error ? error.message : String(error)}`)
+        return { hits: [], note: '记忆检索失败' }
+      }
     },
 
     async reportProgress(callerSessionId, taskId, progress) {
@@ -309,7 +339,14 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         pendingFrom = completed.acceptancePolicy === 'user' ? 'user' : 'supervisor'
       }
       if (completed.status === 'completed' && !wasTerminal) {
-        // 首次完成（幂等重提不重复广播）：通知上级 + 解锁依赖自动派发
+        // 首次完成（幂等重提不重复广播）：记忆触发 + 通知上级 + 解锁依赖自动派发
+        deps.memory?.onTaskCompleted({
+          taskId,
+          title: record.title,
+          summary: input.summary,
+          resultRelPath: `${deps.tasksDir ?? '.router'}/tasks/${taskId}/result.md`,
+          sessionId: record.sessionId,
+        })
         const parent = completed.parentId !== undefined ? ledger.get(completed.parentId) : undefined
         if (parent?.sessionId !== undefined && parent.sessionId !== callerSessionId) {
           await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${input.summary}`)

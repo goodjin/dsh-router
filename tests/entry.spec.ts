@@ -16,7 +16,8 @@ import { Config as rootConfig, inject, name } from '../src/entry.ts'
 describe('宿主侧入口 src/entry.ts', () => {
   it('name 是裸包名；必需服务在 inject 里（缺席 fail loud）', () => {
     expect(name).toBe('@goodjin2/dsh-router')
-    expect(inject).toEqual(['sessionController', 'agents', 'workspaceRegistry'])
+    // B8 起 sessionQuery（压缩锚点+记忆租约）与 llm（摘要流）也是必需服务。
+    expect(inject).toEqual(['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm'])
   })
 
   it('Config 全部可缺省：空 config 也过校验（防御性解析在 apply 内）', () => {

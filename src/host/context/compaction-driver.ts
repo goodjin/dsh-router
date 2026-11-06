@@ -20,8 +20,13 @@ export interface CompactionDeps {
   balancedBefore(session: unknown, seq: number): Promise<boolean>
   /** toolPairingBalancedAfter（区域终点端）。 */
   balancedAfter(session: unknown, seq: number): Promise<boolean>
-  /** ctx.compaction.compactRegion(start, end, agent, signal)。 */
+  /** @deepseek-ai/dsh-compaction 的 compactRegion(start, end, agent, signal)。 */
   compactRegion(start: number, end: number, agent: unknown, signal?: AbortSignal): Promise<{ endSeq?: number } | unknown>
+  /**
+   * 会话是否已无排队消息（true = 无排队）。缺席视为恒真（维持既有行为）；
+   * 查询抛错按 false（还有排队）处理——保守跳过，不清标记。
+   */
+  queueEmpty?(sessionId: string): Promise<boolean>
   now(): number
 }
 
@@ -53,10 +58,17 @@ export class CompactionDriver {
     return this.checkpoints.get(sessionId) ?? -1
   }
 
-  /** 会话空闲：有 pending 标记才尝试压缩。 */
+  /** 会话空闲：有 pending 标记、无排队消息才尝试压缩。 */
   async onIdle(sessionId: string, signal?: AbortSignal): Promise<IdleOutcome> {
     if (!this.pending.has(sessionId)) return 'no-op'
     if (this.compacting.has(sessionId)) return 'no-op'
+    if (this.deps.queueEmpty !== undefined) {
+      try {
+        if (!(await this.deps.queueEmpty(sessionId))) return 'skipped'
+      } catch {
+        return 'skipped' // 排队状态查不到：保守按「还有排队」处理
+      }
+    }
     const agent = this.deps.getAgent(sessionId)
     if (agent === undefined) return 'skipped' // 会话没活着，等下次
     if (agent.status !== undefined && agent.status !== 'idle') return 'skipped'

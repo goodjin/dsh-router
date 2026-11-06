@@ -48,7 +48,7 @@ export interface RouterCore {
   queryTasks(filter?: QueryTasksFilter): Promise<{ tasks: TaskCard[] }>
   /** 暂停 / 恢复 / 取消一个任务。 */
   controlTask(callerSessionId: string, taskId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ status: TaskStatus }>
-  /** 检索记忆（v1 记忆服务未接线：返回空命中与说明注记）。 */
+  /** 检索记忆（B8 起接真实现；检索失败时返回空命中与失败注记）。 */
   searchHistory(callerSessionId: string, query: string, scope: 'project' | 'global'): Promise<{ hits: { memoryRef: string; snippet: string }[]; note?: string }>
   /** worker/主管汇报一句话进度。 */
   reportProgress(callerSessionId: string, taskId: string, progress: string): Promise<{ ok: true }>

@@ -20,6 +20,9 @@ export interface RouterRootConfig {
   supervisorPreset?: string
   workerPreset?: string
   templates?: WorkerTemplate[]
+  /** 记忆摘要的模型路由对（都非空才生效；缺省用活任务会话的最近路由）。 */
+  summarizationProvider?: string
+  summarizationModel?: string
 }
 
 import type { WorkerTemplate } from '../shared/view-contract.ts'
@@ -34,6 +37,8 @@ export const Config = Schema.object({
   routerPreset: Schema.string().default('dsh-router').volatile(),
   supervisorPreset: Schema.string().default('dsh-router-supervisor').volatile(),
   workerPreset: Schema.string().default('dsh-router-worker').volatile(),
+  summarizationProvider: Schema.string().default('').volatile(),
+  summarizationModel: Schema.string().default('').volatile(),
   templates: Schema.array(
     Schema.object({
       templateId: Schema.string().required(),

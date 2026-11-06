@@ -86,9 +86,10 @@ function coreOf(calls: string[] = []): RouterCore {
       calls.push(`control:${caller}:${taskId}:${action}`)
       return { status: action === 'cancel' ? 'cancelled' : action === 'pause' ? 'paused' : 'running' }
     },
-    async searchHistory() {
-      calls.push('search')
-      return { hits: [], note: '记忆服务未接线' }
+    async searchHistory(_caller, query, scope) {
+      calls.push(`search:${query}:${scope}`)
+      // 真实现（B8）的形状：命中直传；失败/未配置才带注记。
+      return { hits: [{ memoryRef: 'memory://project.md#e1', snippet: `命中 ${query}（${scope}）` }] }
     },
     async reportProgress(caller, taskId, progress) {
       calls.push(`progress:${caller}:${taskId}:${progress}`)
@@ -306,14 +307,16 @@ describe('buildToolDefinitions：薄壳行为', () => {
     ])
   })
 
-  it('search_history：返回空命中与说明注记（记忆未接线的红线）', async () => {
+  it('search_history：命中直传 + render 出 memoryRef 与摘要（记忆已接线的真实现）', async () => {
     const def = buildToolDefinitions(coreOf(), 'router').find((d) => d.name === 'search_history')!
     const value = (await run(def, { query: '登录', scope: 'project' }, execOf('router-s-1'))) as {
-      hits: unknown[]
+      hits: { memoryRef: string; snippet: string }[]
       note?: string
     }
-    expect(value.hits).toEqual([])
-    expect(value.note).toBe('记忆服务未接线')
+    expect(value.hits).toEqual([{ memoryRef: 'memory://project.md#e1', snippet: '命中 登录（project）' }])
+    expect(value.note).toBeUndefined()
+    const rendered = def.output.render({ query: '登录', scope: 'project' }, value)
+    expect(rendered[0]!.text).toContain('memory://project.md#e1: 命中 登录（project）')
   })
 
   it('worker 名下 report_progress / complete_task / report_blocker 全链路', async () => {

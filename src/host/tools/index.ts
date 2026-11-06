@@ -349,7 +349,7 @@ const TOOL_SPECS: Record<
     },
   },
   search_history: {
-    description: '检索历史记忆（项目/全局范围）。记忆服务未接线时返回空命中。',
+    description: '检索历史记忆（项目/全局范围）：完成的任务结果、用户决定、已验证事实都在里面。命中按时间倒序，最多 20 条；命中为空就如实告知用户。',
     parameters: {
       type: 'object',
       additionalProperties: false,

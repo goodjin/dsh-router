@@ -98,6 +98,9 @@ interface DriverHarness {
   clearCompact(): void
   holdCompact(): void
   releaseCompact(): void
+  /** true = 无排队消息；false = 还有排队。 */
+  setQueue(empty: boolean): void
+  setQueueError(error: Error): void
 }
 
 function harness(): DriverHarness {
@@ -106,6 +109,8 @@ function harness(): DriverHarness {
   let balanced: [boolean, boolean] = [true, true]
   let compactError: Error | null = null
   let gate: { promise: Promise<void>; release(): void } | null = null
+  let queueEmpty: boolean | null = null
+  let queueError: Error | null = null
   const calls = { compact: [] as [number, number, string][], balancedBefore: [] as number[], balancedAfter: [] as number[] }
   const deps: CompactionDeps = {
     getAgent(sessionId) {
@@ -127,6 +132,10 @@ function harness(): DriverHarness {
       if (gate !== null) await gate.promise
       if (compactError !== null) throw compactError
       return { endSeq: end }
+    },
+    async queueEmpty() {
+      if (queueError !== null) throw queueError
+      return queueEmpty ?? true
     },
     now: () => 1,
   }
@@ -159,6 +168,12 @@ function harness(): DriverHarness {
     releaseCompact() {
       gate?.release()
       gate = null
+    },
+    setQueue(empty) {
+      queueEmpty = empty
+    },
+    setQueueError(error) {
+      queueError = error
     },
   }
 }
@@ -269,5 +284,40 @@ describe('CompactionDriver', () => {
     h.releaseCompact()
     await expect(first).resolves.toBe('compacted')
     expect(h.driver.isPending('s-1')).toBe(false)
+  })
+
+  it('会话还有排队消息：跳过并保留 pending（无排队消息才驱动压缩）', async () => {
+    const h = harness()
+    h.driver.onDispatched('s-1')
+    h.setAgent('s-1')
+    h.setLastUserSeq(10)
+    h.setQueue(false)
+    expect(await h.driver.onIdle('s-1')).toBe('skipped')
+    expect(h.calls.compact).toHaveLength(0)
+    expect(h.driver.isPending('s-1')).toBe(true)
+    // 排队清空后的下一次 idle 才真正压缩
+    h.setQueue(true)
+    expect(await h.driver.onIdle('s-1')).toBe('compacted')
+    expect(h.calls.compact).toHaveLength(1)
+  })
+
+  it('queueEmpty 查询抛错：按跳过处理（保守，不清标记）', async () => {
+    const h = harness()
+    h.driver.onDispatched('s-1')
+    h.setAgent('s-1')
+    h.setLastUserSeq(10)
+    h.setQueueError(new Error('state unavailable'))
+    expect(await h.driver.onIdle('s-1')).toBe('skipped')
+    expect(h.calls.compact).toHaveLength(0)
+    expect(h.driver.isPending('s-1')).toBe(true)
+  })
+
+  it('未提供 queueEmpty 依赖：维持既有行为（视为无排队）', async () => {
+    const h = harness()
+    h.driver.onDispatched('s-1')
+    h.setAgent('s-1')
+    h.setLastUserSeq(6)
+    expect(await h.driver.onIdle('s-1')).toBe('compacted')
+    expect(h.calls.compact).toEqual([[0, 5, 's-1']])
   })
 })

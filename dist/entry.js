@@ -39,11 +39,14 @@ import { registerRouterRoutes } from "./host/routes.js";
 import { createRouterCore } from "./host/core.js";
 import { workerInstructions as WORKER_INSTRUCTIONS } from "./host/prompts/worker-instructions.js";
 import { BUILTIN_TEMPLATES } from "./host/templates.js";
+import { MemoryDocStore } from "./host/memory/store.js";
+import { search as searchMemory } from "./host/memory/retrieval.js";
+import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
 export { Config } from "./host/root-config.js";
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router';
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。 */
-export const inject = ['sessionController', 'agents', 'workspaceRegistry'];
+export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm'];
 /** 数值钳位：非数值回默认，负数取 0。 */
 function nonNegative(value, fallback) {
     if (typeof value !== 'number' || !Number.isFinite(value))
@@ -87,6 +90,8 @@ function resolveRootConfig(raw) {
         routerPreset: stringOr(source.routerPreset, 'dsh-router'),
         supervisorPreset: stringOr(source.supervisorPreset, 'dsh-router-supervisor'),
         workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
+        summarizationProvider: stringOr(source.summarizationProvider, ''),
+        summarizationModel: stringOr(source.summarizationModel, ''),
         templates: templatesOr(source.templates),
     };
 }
@@ -184,7 +189,60 @@ export function apply(ctx, rawConfig) {
         maxDepth: config.maxDepth,
         concurrency: { default: config.perTypeConcurrency },
     });
+    // 记忆服务接线（计划 B8）：三层文档 store 根目录 = <dataDir>/memory/；
+    // 事件读走 observeSession 租约（adapter 内 finally 释放）；摘要流走
+    // ctx.llm.stream（purpose:'compaction'）。路由对解析链：配置对 → 活任务
+    // 会话最近一次路由头（compaction-basic routedTarget 同款）→ 缺失（触发方 warn）。
+    const memoryStore = new MemoryDocStore(join(config.dataDir, 'memory'), fs);
+    const memoryQuery = {
+        observeSession: (sessionId) => ctx.sessionQuery.observeSession(sessionId),
+    };
+    const resolveSummaryTarget = async () => {
+        if (config.summarizationProvider !== '' && config.summarizationModel !== '') {
+            return { provider: config.summarizationProvider, model: config.summarizationModel };
+        }
+        const records = await ledger.listAll();
+        for (const record of records) {
+            if (record.sessionId === undefined)
+                continue;
+            const agent = ctx.agents.get(record.sessionId);
+            const routed = agent?.session?.requestHeader?.()?.config;
+            if (routed !== undefined
+                && typeof routed.provider === 'string' && routed.provider !== ''
+                && typeof routed.model === 'string' && routed.model !== '') {
+                return { provider: routed.provider, model: routed.model };
+            }
+        }
+        return undefined;
+    };
+    const summaryLlm = createSummaryLlm(ctx.llm, resolveSummaryTarget);
+    const summarizer = new BackgroundSummarizer({
+        maxSeq: (sessionId) => maxSurfaceSeq(memoryQuery, sessionId),
+        run: (sessionId) => summarizeSessionViaQuery(memoryQuery, memoryStore, sessionId, summaryLlm),
+        onError: (sessionId, error) => {
+            log.warn(`会话 ${sessionId} 记忆增量摘要失败（下次 idle 或新事件后重试）: ${error instanceof Error ? error.message : String(error)}`);
+        },
+    });
+    const recordTaskMemory = createCompletedTaskRecorder({
+        store: memoryStore,
+        query: memoryQuery,
+        llm: summaryLlm,
+        onError: (_stage, error) => {
+            log.warn(`任务完成的记忆写入失败（不阻塞完成协议）: ${error instanceof Error ? error.message : String(error)}`);
+        },
+    });
+    /** 该会话是否绑定了任务（= worker/主管会话；Router 会话不做增量摘要）。 */
+    const isTaskSession = async (sessionId) => {
+        const records = await ledger.listAll();
+        return records.some((record) => record.sessionId === sessionId);
+    };
+    /** routerCore.memory（brief 形状：search 直传 retrieval）。 */
+    const memoryFace = {
+        search: (query, scope) => searchMemory(memoryStore, query, scope),
+        onTaskCompleted: (input) => recordTaskMemory(input),
+    };
     let pairing = null;
+    const queueWarned = new Set();
     const loadPairing = async () => {
         if (pairing !== null)
             return pairing;
@@ -204,12 +262,29 @@ export function apply(ctx, rawConfig) {
     };
     const driver = new CompactionDriver({
         getAgent: (sessionId) => ctx.agents.get(sessionId),
+        // idle 且无排队消息才驱动压缩（brief 的驱动条件）：排队未清时压缩会把
+        // 等着入场的上下文压进旧区域；查询失败按「还有排队」保守跳过（driver 内处理），
+        // 这里每会话首次失败自报一声——持续失败 = 压缩永不跑，不能静默。
+        queueEmpty: async (sessionId) => {
+            try {
+                const state = (await ctx.sessionController.state({ sessionId }));
+                const queue = state?.queue;
+                return queue === undefined || queue === null || queue.length === 0;
+            }
+            catch (error) {
+                if (!queueWarned.has(sessionId)) {
+                    queueWarned.add(sessionId);
+                    log.warn(`会话 ${sessionId} 排队状态查询失败，派发后压缩将暂缓: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                throw error;
+            }
+        },
         lastUserMessageSeq: async (sessionId) => {
-            const sessionQuery = ctx.get?.('sessionQuery');
+            const sessionQuery = ctx.sessionQuery;
             if (sessionQuery === undefined)
                 return null;
             try {
-                const surface = await sessionQuery.readSurface(sessionId);
+                const surface = await sessionQuery.readSurface?.(sessionId);
                 const events = surface?.events ?? [];
                 for (let i = events.length - 1; i >= 0; i -= 1) {
                     if (events[i]?.type === 'user/message')
@@ -246,21 +321,31 @@ export function apply(ctx, rawConfig) {
         newId: () => randomUUID(),
         isRunning: (sessionId) => bridge.isRunning(sessionId),
         maxActiveCards: config.maxActiveCards,
+        tasksDir: config.tasksDir,
+        memory: memoryFace,
         logger: { warn: (message) => log.warn(message) },
     });
-    // 供预设树的工具行 / 上下文行经作用域链注入。
+    // 供预设树的工具行 / 上下文行经作用域链注入；memory 一并挂上（brief 形状）。
     ctx.provide('routerCore', {
         ...assembled.core,
         snapshotText: assembled.snapshotText,
+        memory: { search: memoryFace.search },
     });
-    // 会话空闲 → 压缩驱动（pending 只由我方投递打标；空闲边才动作）。
+    // 会话空闲：压缩驱动（pending 只由我方投递打标；idle 且无排队消息才动作）
+    // + 记忆增量摘要（worker/主管会话后台跑，同会话同增量位只跑一次）。
     bridge.watchStatus();
     bridge.onStatusChange((sessionId, running) => {
-        if (!running)
-            void driver.onIdle(sessionId).then((outcome) => {
-                if (outcome === 'compacted')
-                    log.info(`会话 ${sessionId} 派发后上下文整理完成`);
-            });
+        if (running)
+            return;
+        void driver.onIdle(sessionId).then((outcome) => {
+            if (outcome === 'compacted')
+                log.info(`会话 ${sessionId} 派发后上下文整理完成`);
+        });
+        void (async () => {
+            if (!(await isTaskSession(sessionId)))
+                return;
+            summarizer.onIdle(sessionId);
+        })();
     });
     // 问答瀑布：全局监听收所有会话；prepend 抢在客户端兜底 UI 之前认领 worker 提问
     //（答案走 Router 界面浮窗，见规格 §3.3）。

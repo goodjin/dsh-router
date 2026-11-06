@@ -137,6 +137,14 @@ describe('cordis.patch.yml 的装载行', () => {
   it('context 行只在 Router 预设（快照上下文不进主管/worker）', () => {
     expect(PATCH_TEXT.match(/name:\s*'@goodjin2\/dsh-router\/context'/g)?.length).toBe(1)
   })
+
+  it('三个预设都挂压缩组（isolate 的 cordis:group，Router 不再缺席）', () => {
+    // Router 预设必须与主管/worker 同款：压缩引擎在会话自身作用域缺席时，
+    // 驱动的 compactRegion 永远抛错空转（B2 裁定 5 的缺口在此看守）。
+    for (const id of ['router-compaction', 'supervisor-compaction', 'worker-compaction']) {
+      expect(PATCH_TEXT, `压缩组 ${id} 缺失`).toMatch(new RegExp(`-\\s+id:\\s*${id}\\n\\s+name:\\s*cordis:group\\n\\s+group:\\s*true\\n\\s+isolate:\\n\\s+compaction:\\s*true\\n\\s+toolResultPruner:\\s*true`))
+    }
+  })
 })
 
 /** 从 yml 抽 persona 前缀块（prefix: |- 下的 16 空格缩进文本），还原成原文。 */

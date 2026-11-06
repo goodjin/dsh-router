@@ -11,7 +11,7 @@ import { TaskDocStore } from '../src/host/docs/task-docs.ts'
 import { SessionBridge, type SessionBridgeHost, type WorkspaceInfo } from '../src/host/bridge/sessions.ts'
 import { AnswerRelay } from '../src/host/bridge/questions.ts'
 import { CompactionDriver, type CompactionDeps } from '../src/host/context/compaction-driver.ts'
-import { createRouterCore, type RouterCoreHosts } from '../src/host/core.ts'
+import { createRouterCore, type RouterCoreAssemblyDeps, type RouterCoreHosts, type RouterMemory } from '../src/host/core.ts'
 import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../src/host/bridge/tabs.ts'
 import type { FsAdapter } from '../src/shared/fs-adapter.ts'
 import type { TaskRecord } from '../src/shared/types.ts'
@@ -150,7 +150,37 @@ const TEMPLATES: WorkerTemplate[] = [
 
 let questionSeq = 0
 
-async function coreWith(records: TaskRecord[] = []) {
+/** 假记忆：search 可注命中/注错，onTaskCompleted 记账。 */
+function fakeMemory() {
+  const completed: Array<Parameters<RouterMemory['onTaskCompleted']>[0]> = []
+  let searchCalls = 0
+  let searchResult: { memoryRef: string; snippet: string }[] | Error = []
+  return {
+    completed,
+    calls: () => searchCalls,
+    setHits(hits: { memoryRef: string; snippet: string }[]) {
+      searchResult = hits
+    },
+    failSearch(error: Error) {
+      searchResult = error
+    },
+    memory: {
+      async search() {
+        searchCalls += 1
+        if (searchResult instanceof Error) throw searchResult
+        return searchResult
+      },
+      onTaskCompleted(input: Parameters<RouterMemory['onTaskCompleted']>[0]) {
+        completed.push(input)
+      },
+    } satisfies RouterMemory,
+  }
+}
+
+async function coreWith(
+  records: TaskRecord[] = [],
+  opts: { memory?: RouterMemory | null } = {},
+) {
   const persistence = new MemoryPersistence()
   persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
   const ledger = new TaskLedger(persistence, () => 1000)
@@ -178,7 +208,9 @@ async function coreWith(records: TaskRecord[] = []) {
   const relay = new AnswerRelay({ ledger, newId: () => `q-${++questionSeq}`, now: () => 1 })
   const driver = fakeDriver()
   const scheduler = new Scheduler(ledger, { maxDepth: 2, concurrency: { default: 3 } })
-  const assembled = createRouterCore({
+  const memoryState = fakeMemory()
+  const memory = opts.memory === undefined ? memoryState.memory : (opts.memory ?? undefined)
+  const assemblyDeps: RouterCoreAssemblyDeps = {
     ledger,
     docsFor: () => docs,
     bridge,
@@ -196,15 +228,18 @@ async function coreWith(records: TaskRecord[] = []) {
     newId: () => `q-${++questionSeq}`,
     signal: new AbortController().signal,
     isRunning: () => false,
-  })
+    memory,
+    tasksDir: '.router',
+  }
+  const assembled = createRouterCore(assemblyDeps)
   await assembled.refreshSnapshot()
-  return { ledger, docs, bridge, relay, driver, events, ui, ...assembled }
+  return { ledger, docs, bridge, relay, driver, events, ui, memoryState, ...assembled }
 }
 
 /* ────────────────────────── 派发 ────────────────────────── */
 
 describe('createRouterCore：dispatchTask', () => {
-  it('Router 会话派发：workspace 解析、任务书落盘、桥投递、驱动打标、加标签', async () => {
+  it('Router 会话派发：workspace 解析、任务书落盘、桥投递、驱动打标（调用者+执行会话）、加标签', async () => {
     const { core, workbench, events, driver, ui, docs } = await coreWith()
     const result = await core.dispatchTask('router-s-1', {
       title: '修登录',
@@ -221,7 +256,9 @@ describe('createRouterCore：dispatchTask', () => {
     expect(events.renames[0]!.title).toBe('T-001 修登录')
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')
     expect(events.prompts[0]!.text).toContain('docs/auth.md')
-    expect(driver.marked).toEqual(['session-1'])
+    // 调用者会话（Router）与执行会话都要打 pendingCompaction 标记：Router 自身
+    // 的派发讨论段在 idle 后也要被压缩（裁定 5 的补齐，规格 §4）
+    expect(driver.marked).toEqual(['router-s-1', 'session-1'])
     expect(ui.tabs('ws-1').map((t) => t.sessionId)).toEqual(['session-1'])
     expect(docs.files.get('/proj/.router/tasks/T-001/task.v1.md')).toContain('# 任务书 T-001')
     void workbench
@@ -309,7 +346,7 @@ describe('createRouterCore：dispatchTask', () => {
 /* ────────────────────────── 补充 / 查询 / 控制 ────────────────────────── */
 
 describe('createRouterCore：supplement / query / control', () => {
-  it('supplementTask：账本升版 + 文档升版 + 重投原会话 + 驱动打标', async () => {
+  it('supplementTask：账本升版 + 文档升版 + 重投原会话 + 驱动打标（执行会话+调用者）', async () => {
     const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' })]
     const { core, ledger, docs, events, driver } = await coreWith(records)
     await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
@@ -317,7 +354,8 @@ describe('createRouterCore：supplement / query / control', () => {
     expect(result.docVersion).toBe(2)
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v2')
     expect(events.prompts[0]!.sessionId).toBe('session-9')
-    expect(driver.marked).toEqual(['session-9'])
+    // 补充也是一次成功转交：执行会话与调用者（Router）都打标
+    expect(driver.marked).toEqual(['session-9', 'router-s-1'])
     expect(ledger.get('T-001')?.constraints).toContain('补充：用 PostgreSQL')
   })
 
@@ -423,6 +461,39 @@ describe('createRouterCore：completeTask', () => {
       code: 'not-task-owner',
     })
   })
+
+  it('完成触发记忆：project 层拿到 taskId/标题/摘要/result.md 相对路径/执行会话', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', title: '修登录', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, memoryState } = await coreWith(records)
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '登录 500 已修复' })
+    expect(memoryState.completed).toEqual([
+      {
+        taskId: 'T-001',
+        title: '修登录',
+        summary: '登录 500 已修复',
+        resultRelPath: '.router/tasks/T-001/result.md',
+        sessionId: 'session-9',
+      },
+    ])
+  })
+
+  it('review-pending 与幂等重提不触发记忆（只有首次 completed 才写）', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'supervisor', sessionId: 'sup-s-1', status: 'running' }),
+      task({ id: 'T-002', role: 'worker', sessionId: 'session-2', status: 'running' }),
+      task({ id: 'T-003', role: 'worker', sessionId: 'session-3', status: 'running', parentId: 'T-001' }),
+    ]
+    const { core, memoryState } = await coreWith(records)
+    // 有未结子任务 → review-pending：不触发
+    await core.completeTask('sup-s-1', 'T-001', { docVersion: 1, summary: '主体完成' })
+    expect(memoryState.completed).toEqual([])
+    // 首次完成：触发一次
+    await core.completeTask('session-2', 'T-002', { docVersion: 1, summary: '全部完成' })
+    expect(memoryState.completed).toHaveLength(1)
+    // 幂等重提：不重复触发
+    await core.completeTask('session-2', 'T-002', { docVersion: 1, summary: '全部完成' })
+    expect(memoryState.completed).toHaveLength(1)
+  })
 })
 
 /* ────────────────────────── 进度 / 阻塞 / 记忆 ────────────────────────── */
@@ -444,11 +515,26 @@ describe('createRouterCore：progress / blocker / search', () => {
     expect(ledger.get('T-001')?.progress).toBe('缺凭据')
   })
 
-  it('searchHistory：记忆未接线返回空命中与注记', async () => {
-    const { core } = await coreWith()
+  it('searchHistory：接真记忆检索，命中与查询词直传', async () => {
+    const { core, memoryState } = await coreWith()
+    memoryState.setHits([{ memoryRef: 'memory://project.md#e1', snippet: '登录 500 已修复' }])
+    const result = await core.searchHistory('router-s-1', '登录', 'project')
+    expect(result).toEqual({ hits: [{ memoryRef: 'memory://project.md#e1', snippet: '登录 500 已修复' }] })
+    expect(memoryState.calls()).toBe(1)
+  })
+
+  it('searchHistory：记忆检索抛错不外抛——空命中+失败注记（模型可见的诚实降级）', async () => {
+    const { core, memoryState } = await coreWith()
+    memoryState.failSearch(new Error('disk on fire'))
+    const result = await core.searchHistory('router-s-1', '任意', 'global')
+    expect(result).toEqual({ hits: [], note: '记忆检索失败' })
+  })
+
+  it('searchHistory：未装配记忆服务时返回注记（防御性，不伪装成功）', async () => {
+    const { core } = await coreWith([], { memory: null })
     expect(await core.searchHistory('router-s-1', '任意', 'project')).toEqual({
       hits: [],
-      note: '记忆服务未接线',
+      note: '记忆服务未配置',
     })
   })
 })
