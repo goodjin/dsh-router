@@ -54,3 +54,26 @@ tests/entry.spec.ts   sanity 测试（两个入口源文件可加载、空跑不
 ```
 
 宿主路由 / 工具 / 预设行尚未接入，等契约研究返回后在 `cordis.patch.yml` 补行；补完必须跑容器核查脚本：`node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router`。
+
+## 记忆文档布局
+
+三层记忆（`src/host/memory/`，规格 §6）各是一份 Markdown，同一个形状：YAML 头 +「## 摘要」+「## 条目」。rootDir 由宿主集成层配置（默认插件状态目录）。
+
+| 层 | 文档 | 说明 |
+| --- | --- | --- |
+| 会话摘要 | `sessions/<sessionId>.md` | 头部记 `lastSummarizedSeq`（增量位）与 `title`；「## 摘要」存最近一次增量总结的条目化文本 |
+| 项目记忆 | `project.md` | 项目约定、已确认事实、重要交付物 |
+| 全局记忆 | `global.md` | 明确长期偏好、跨项目约定 |
+
+条目（`## 条目` 节，追加式，锚点 `e1`、`e2`……单调递增）：
+
+```text
+- [决定] 条目正文（[决定]=用户决定 / [建议]=worker 建议 / [事实]=已验证事实）
+  anchor: e1
+  key: <主题>
+  sources: <来源会话#消息范围>; …
+  at: <写入时间>
+  conflicts-with: e0    ← 同主题重复时指向旧条目锚（冲突保留不合成）
+```
+
+规则：结论带来源引用；三类分别标记；冲突保留不合成；增量位记录摘要已处理到的事件 seq（`summarizeIncremental` 只喂其后的事件，空增量跳过，llm 失败不推进）；正文去空白后不足 20 字符的条目拒绝写入（低信息门）。检索 `search(query, scope)`：关键词扫描（大小写不敏感、中文包含匹配、多词 AND），按条目写入时间倒序最多 20 条，`memoryRef` = `memory://<文档>#<锚>`。摘要用注入式 `llm.stream(messages, signal)`（宿主集成接 `ctx.llm.stream`，样板见 `docs/research/r2-sessions.md` §7.3），记忆模块不 import 任何宿主包。
