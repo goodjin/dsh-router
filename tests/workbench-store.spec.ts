@@ -218,12 +218,12 @@ describe('submitAnswer：提交 → answer 路由', () => {
     return store
   }
 
-  it('提交成功：卡片移除，answers 按官方词汇逐问构造', async () => {
+  it('提交成功：卡片移除，answers 按官方词汇逐问构造（单选+custom → selected 置空）', async () => {
     const api = fakeApi([emptyState({ questions: [card('QA')] })])
     const store = await seeded(api)
     store.setAnswer('QA', 'q1', { selected: ['A'], custom: '都行' })
     await store.submitAnswer('QA')
-    expect(api.answerCalls).toEqual([['QA', [{ id: 'q1', selected: ['A'], custom: '都行' }]]])
+    expect(api.answerCalls).toEqual([['QA', [{ id: 'q1', selected: [], custom: '都行' }]]])
     expect(store.get().board.cards).toHaveLength(0)
   })
 

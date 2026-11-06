@@ -146,7 +146,12 @@ export function chipSummary(card: QuestionCard, maxChars = 20): string {
   return first.length > maxChars ? `${first.slice(0, maxChars)}…` : first
 }
 
-/** 草稿 → 官方答案词汇：逐问生成 {id, selected, custom?}；custom 空串省略。 */
+/**
+ * 草稿 → 官方答案词汇（user-questions 编码规则，逐字）：
+ * - 单选题带 custom：custom 覆盖选中项 → selected 置空、custom 承载回答；
+ * - 多选题带 custom：custom 补充 selected，两者并存；
+ * - 无 custom：selected 原样（空 selected 且无 custom = 跳过的问题，保留在批次里）。
+ */
 export function buildAnswerItems(
   card: QuestionCard,
   draft: Record<string, QuestionDraftItem>,
@@ -154,8 +159,11 @@ export function buildAnswerItems(
   return card.questions.map((item) => {
     const entry = draft[item.id] ?? { selected: [] }
     const custom = typeof entry.custom === 'string' && entry.custom.length > 0 ? entry.custom : undefined
-    return custom === undefined
-      ? { id: item.id, selected: entry.selected }
-      : { id: item.id, selected: entry.selected, custom }
+    if (custom === undefined) {
+      return { id: item.id, selected: entry.selected }
+    }
+    return item.multiSelect === true
+      ? { id: item.id, selected: entry.selected, custom }
+      : { id: item.id, selected: [], custom }
   })
 }

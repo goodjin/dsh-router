@@ -8,6 +8,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  buildAnswerItems,
   chipSummary,
   cardsReceived,
   emptyBoard,
@@ -164,6 +165,29 @@ describe('与服务端同步、容量上限', () => {
   it('pruneToCap 上限内原样保留', () => {
     let board = cardsReceived(emptyBoard(), [card('Q1'), card('Q2')])
     expect(pruneToCap(board, 5).cards).toHaveLength(2)
+  })
+})
+
+describe('buildAnswerItems：草稿 → 官方答案词汇（user-questions 编码规则）', () => {
+  it('多选带 custom：selected 与 custom 并存', () => {
+    const multi = card('QA', { questions: [item('q1', '带谁？', { multiSelect: true })] })
+    expect(buildAnswerItems(multi, { q1: { selected: ['A'], custom: '还有临时工' } }))
+      .toEqual([{ id: 'q1', selected: ['A'], custom: '还有临时工' }])
+  })
+
+  it('单选带 custom：按官方语义 selected 置空、custom 承载回答', () => {
+    const single = card('QA')
+    expect(buildAnswerItems(single, { q1: { selected: ['A'], custom: '走 MIT' } }))
+      .toEqual([{ id: 'q1', selected: [], custom: '走 MIT' }])
+  })
+
+  it('无 custom：selected 原样携带（含空 selected = 跳过的问题）', () => {
+    const qa = card('QA', { questions: [item('q1', '一'), item('q2', '二')] })
+    expect(buildAnswerItems(qa, { q1: { selected: ['B'] }, q2: { selected: [] } }))
+      .toEqual([
+        { id: 'q1', selected: ['B'] },
+        { id: 'q2', selected: [] },
+      ])
   })
 })
 
