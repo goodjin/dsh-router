@@ -130,6 +130,13 @@ describe('收起与草稿', () => {
     expect(board.cards[0]?.draft['q1']).toEqual({ selected: ['B'], custom: '都不要' })
   })
 
+  it('custom 传 null：清掉自定义文本（单选换选即清，避免旧 custom 覆盖新选中项）', () => {
+    let board = cardsReceived(emptyBoard(), [card('QA')])
+    board = setAnswer(board, 'QA', 'q1', { selected: ['A'], custom: '备注' })
+    board = setAnswer(board, 'QA', 'q1', { selected: ['B'], custom: null })
+    expect(board.cards[0]?.draft['q1']).toEqual({ selected: ['B'] })
+  })
+
   it('未知 questionId 的操作是无操作（不抛、不改）', () => {
     const board = cardsReceived(emptyBoard(), [card('QA')])
     expect(toggleCollapsed(board, 'NOPE').cards).toEqual(board.cards)

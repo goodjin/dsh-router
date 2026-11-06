@@ -84,18 +84,24 @@ export function toggleCollapsed(state: QuestionBoardState, questionId: string): 
   return mapCard(state, questionId, (entry) => ({ ...entry, collapsed: !entry.collapsed }))
 }
 
-/** 写一问的草稿：给定字段覆盖（selected 整体替换），未给字段保留。 */
+/**
+ * 写一问的草稿：selected 整体替换；custom——string 覆盖、null 清除、
+ * undefined 保持不变（单选换选即传 null，避免旧 custom 覆盖新选中项）。
+ */
 export function setAnswer(
   state: QuestionBoardState,
   questionId: string,
   itemId: string,
-  patch: { selected?: string[]; custom?: string },
+  patch: { selected?: string[]; custom?: string | null },
 ): QuestionBoardState {
   return mapCard(state, questionId, (entry) => {
     const current = entry.draft[itemId] ?? { selected: [] }
+    const custom = patch.custom === null
+      ? undefined
+      : patch.custom !== undefined ? patch.custom : current.custom
     const next: QuestionDraftItem = {
       selected: patch.selected ?? current.selected,
-      custom: patch.custom !== undefined ? patch.custom : current.custom,
+      custom,
     }
     const draft = { ...entry.draft, [itemId]: next }
     return { ...entry, draft }

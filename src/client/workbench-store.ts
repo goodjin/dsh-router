@@ -79,7 +79,7 @@ export interface WorkbenchStore {
   currentWorkspaceId(): string | undefined
   closeWorkerTab(sessionId: string): Promise<void>
   toggleCollapsed(questionId: string): void
-  setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string }): void
+  setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void
   submitAnswer(questionId: string): Promise<void>
 }
 
@@ -215,7 +215,7 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
       apply(() => ({ ...state, board: toggleCollapsed(state.board, questionId) }))
     },
 
-    setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string }): void {
+    setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void {
       apply(() => ({ ...state, board: setAnswer(state.board, questionId, itemId, patch) }))
     },
 
