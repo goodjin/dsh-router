@@ -52,6 +52,13 @@ function fakeApi(states: RouterState[], overrides: Partial<RouterApi> = {}): Rou
   return impl as RouterApi & typeof impl
 }
 
+/** 可手动放行的 promise（竞态测试用）。 */
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((given) => { resolve = given })
+  return { promise, resolve }
+}
+
 function emptyState(overrides: Partial<RouterState> = {}): RouterState {
   return { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [], ...overrides }
 }
@@ -145,12 +152,82 @@ describe('pollOnce：轮询门控', () => {
     expect(api.stateCalls).toHaveLength(0)
   })
 
-  it('请求失败：保留旧 state，lastError 记录原因', async () => {
-    const api = fakeApi([], { getState: async () => { throw new Error('boom') } })
+  it('请求失败：保留旧 state（先成功后失败，界面不闪空），lastError 记录原因', async () => {
+    const good = emptyState({ routerSessions: [{ sessionId: 'router-1', title: 'R' }], tabs: [{ sessionId: 'w-a', title: 'A', running: false }] })
+    let calls = 0
+    const api = fakeApi([], {
+      getState: async () => {
+        calls += 1
+        if (calls === 1) return good
+        throw new Error('boom')
+      },
+    })
     const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([]) })
     await store.pollOnce()
-    expect(store.get().routerState).toBeNull()
+    expect(store.get().routerState).toEqual(good)
+    await store.pollOnce()
+    expect(store.get().routerState).toEqual(good)
     expect(store.get().lastError).toContain('boom')
+  })
+
+  it('门控重开（审查 F2）：创建首个 Router 后显式失效，下一次 tick 立即拉取', async () => {
+    const api = fakeApi([emptyState()])
+    const ws = workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }])
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: ws })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    await store.pollOnce()
+    expect(api.stateCalls).toHaveLength(1) // 门控已关
+    store.invalidateGate()
+    await store.pollOnce()
+    expect(api.stateCalls).toHaveLength(2)
+    expect(api.stateCalls[1]).toBe('ws-1')
+  })
+
+  it('迟到响应不覆盖现状（审查 F3）：旧 workspace 的响应被丢弃', async () => {
+    const stale = emptyState({ routerSessions: [{ sessionId: 'router-old', title: '旧工作区的 Router' }] })
+    const fresh = emptyState({ routerSessions: [{ sessionId: 'router-new', title: '新工作区的 Router' }] })
+    const pending = deferred<RouterState>()
+    const api = fakeApi([], {
+      getState: (workspaceId) => workspaceId === 'ws-1' ? pending.promise : Promise.resolve(fresh),
+    })
+    const ws = workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }, { workspaceId: 'ws-2', sessionIds: ['s3'] }])
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: ws })
+    store.setCurrentSession('s1')
+    const first = store.pollOnce() // 挂在 ws-1 上
+    await Promise.resolve()
+    store.setCurrentSession('s3') // → ws-2
+    await store.pollOnce() // ws-2 立即完成
+    expect(store.get().routerState).toEqual(fresh)
+    pending.resolve(stale) // ws-1 的迟到响应
+    await first
+    expect(store.get().routerState).toEqual(fresh)
+  })
+
+  it('变更之后完成的旧响应不复活已删除项（审查 F3）：关标签后丢弃在途快照', async () => {
+    const withTab = emptyState({ routerSessions: [{ sessionId: 'router-1', title: 'R' }], tabs: [{ sessionId: 'w-a', title: 'A', running: false }] })
+    const pending = deferred<RouterState>()
+    let calls = 0
+    const api = fakeApi([], {
+      getState: () => {
+        calls += 1
+        if (calls === 1) return Promise.resolve(withTab) // 首拍正常落地
+        return pending.promise // 第二拍悬着（快照里仍带 w-a）
+      },
+    })
+    const ws = workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }])
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: ws })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    expect(store.get().routerState?.tabs.map((tab) => tab.sessionId)).toEqual(['w-a'])
+    const second = store.pollOnce() // 在途快照（还带着 w-a）
+    await Promise.resolve()
+    await store.closeWorkerTab('w-a') // 本地移除 + 记一次变更
+    expect(store.get().routerState?.tabs).toEqual([])
+    pending.resolve(withTab) // 在途响应这时才回来（带着 w-a）
+    await second
+    // 快照被竞态防线丢弃：w-a 不得复活。
+    expect(store.get().routerState?.tabs).toEqual([])
   })
 
   it('轮询间隔读偏好（供定时器使用）', () => {
@@ -249,6 +326,56 @@ describe('submitAnswer：提交 → answer 路由', () => {
     await store.submitAnswer('QA')
     expect(store.get().board.cards[0]?.phase).toBe('failed')
     expect(store.get().board.cards[0]?.draft['q1']?.selected).toEqual(['B'])
+  })
+
+  it('结算落在当前账本上（审查 F1）：提交 A 期间编辑 B，不被旧快照覆盖；结算后 C 正常进账', async () => {
+    let releaseAnswer: (() => void) | undefined
+    const withCards = emptyState({
+      routerSessions: [{ sessionId: 'router-1', title: 'R' }],
+      questions: [card('QA'), card('QB')],
+    })
+    const afterSettle = emptyState({
+      routerSessions: [{ sessionId: 'router-1', title: 'R' }],
+      questions: [card('QB'), card('QC')],
+    })
+    const api = fakeApi([withCards, afterSettle], {
+      postAnswer: () => new Promise<void>((resolve) => { releaseAnswer = resolve }),
+    })
+    const store = await seeded(api)
+    store.setAnswer('QA', 'q1', { selected: ['A'] })
+    const inFlight = store.submitAnswer('QA') // A 提交中
+    await Promise.resolve()
+    store.setAnswer('QB', 'q1', { selected: ['B'] }) // 期间编辑 B
+    releaseAnswer?.()
+    await inFlight
+    expect(store.get().board.cards.map((entry) => entry.card.questionId)).toEqual(['QB'])
+    expect(store.get().board.cards[0]?.draft['q1']?.selected).toEqual(['B'])
+    // 结算后下一拍轮询把 C 带进来，B 的草稿必须原样。
+    await store.pollOnce()
+    expect(store.get().board.cards.map((entry) => entry.card.questionId)).toEqual(['QB', 'QC'])
+    expect(store.get().board.cards[0]?.draft['q1']?.selected).toEqual(['B'])
+  })
+
+  it('并发提交各自结算：A 成功不移除 B（审查 F1）', async () => {
+    const both = emptyState({ routerSessions: [{ sessionId: 'router-1', title: 'R' }], questions: [card('QA'), card('QB')] })
+    const api = fakeApi([both])
+    const store = await seeded(api)
+    await Promise.all([store.submitAnswer('QA'), store.submitAnswer('QB')])
+    expect(store.get().board.cards).toHaveLength(0)
+  })
+
+  it('提交中的卡二次提交是无操作（审查 F9）：只发一次请求', async () => {
+    let releaseAnswer: (() => void) | undefined
+    const api = fakeApi([emptyState({ questions: [card('QA')] })], {
+      postAnswer: () => new Promise<void>((resolve) => { releaseAnswer = resolve }),
+    })
+    const store = await seeded(api)
+    const first = store.submitAnswer('QA')
+    await Promise.resolve()
+    await store.submitAnswer('QA') // 第二次点击/调用：在途，必须不发
+    releaseAnswer?.()
+    await first
+    expect(api.answerCalls).toHaveLength(1)
   })
 })
 

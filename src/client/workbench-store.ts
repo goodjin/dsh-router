@@ -14,8 +14,6 @@ import type { RouterApi, RouterApiError } from './api.ts'
 import type { ClientPrefsStore } from './client-prefs.ts'
 import {
   buildAnswerItems,
-  cardsReceived,
-  pruneToCap,
   setAnswer,
   submitAccepted,
   submitRejected,
@@ -77,6 +75,11 @@ export interface WorkbenchStore {
   pollIntervalMs(): number
   /** 当前解析出的 workspaceId（创建 Router 表单也用它）。 */
   currentWorkspaceId(): string | undefined
+  /**
+   * 门控重开 + 在途快照作废（审查 F2）：本工作区刚发生了会让服务端状态
+   * 变化的动作（如创建了第一个 Router）时调用，下一拍立即拉真。
+   */
+  invalidateGate(): void
   closeWorkerTab(sessionId: string): Promise<void>
   toggleCollapsed(questionId: string): void
   setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void
@@ -118,6 +121,11 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
   // 门控记忆：上次拉取的 workspace 与「该 workspace 是否有 router 会话」。
   let lastGateKey: string | undefined
   let gateHasRouterSession = false
+  // 竞态防线（审查 F3）：每次轮询带序号，本地变更再推进变更号；只有
+  // 「请求发起时的两个号都仍是当前号」的响应才允许落地——迟到的旧
+  // workspace 快照、关标签/提交完成前发出的快照一律丢弃。
+  let pollSeq = 0
+  let mutationSeq = 0
   const listeners = new Set<() => void>()
 
   function emit(): void {
@@ -129,10 +137,6 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     if (next === state) return
     state = next
     emit()
-  }
-
-  function updateBoard(board: QuestionBoardState): QuestionBoardState {
-    return pruneToCap(board, prefs.get().maxActiveCards)
   }
 
   function workspaceItems(): ReadonlyArray<{ workspaceId: string; sessionIds: readonly string[] }> {
@@ -156,13 +160,23 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
 
     currentWorkspaceId: () => currentWorkspaceIdOf(workspaceItems(), state.currentSessionId),
 
+    invalidateGate(): void {
+      // 本工作区发生了服务端会关心的变化（如创建了首个 Router）：
+      // 门控重开 + 在途快照作废，下一次 tick 立即拉真。
+      mutationSeq += 1
+      lastGateKey = undefined
+    },
+
     async pollOnce(): Promise<void> {
       if (isHidden()) return
       const workspaceId = currentWorkspaceIdOf(workspaceItems(), state.currentSessionId)
       const gateKey = workspaceId ?? ''
       if (lastGateKey === gateKey && !gateHasRouterSession) return
+      const seq = ++pollSeq
+      const mutAtStart = mutationSeq
       try {
         const next: RouterState = await api.getState(workspaceId) ?? emptyState()
+        if (seq !== pollSeq || mutAtStart !== mutationSeq) return // 迟到快照：丢弃
         gateHasRouterSession = next.routerSessions.length > 0
         lastGateKey = gateKey
         apply(() => ({
@@ -170,9 +184,10 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
           ready: true,
           routerState: next,
           lastError: null,
-          board: updateBoard(syncedWithServer(state.board, next.questions)),
+          board: syncedWithServer(state.board, next.questions),
         }))
       } catch (error) {
+        if (seq !== pollSeq || mutAtStart !== mutationSeq) return // 迟到失败：不打扰当前态
         // 失败保留旧 state（界面不闪空），错误可读；门控记忆不动，下次照常试。
         report(`router state poll failed: ${errorMessage(error)}`)
         apply(() => ({ ...state, ready: true, lastError: errorMessage(error) }))
@@ -187,6 +202,7 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
         apply(() => ({ ...state, lastError: message }))
         return
       }
+      mutationSeq += 1 // 在途的轮询快照从此作废（不得复活被关的标签）
       apply(() => ({
         ...state,
         closingSessionIds: state.closingSessionIds.includes(sessionId)
@@ -222,22 +238,25 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     async submitAnswer(questionId: string): Promise<void> {
       const entry = state.board.cards.find((candidate) => candidate.card.questionId === questionId)
       if (entry === undefined) return
-      const started = submitStarted(state.board, questionId)
-      if (started === state.board) return // 不在可提交阶段（含已在途）：防重复提交
-      apply(() => ({ ...state, board: started }))
+      // 显式阶段守卫（审查 F9/F1）：只有 received | failed 可发起提交；
+      // 在途（submitting）二次触发是无操作，不发第二个请求。
+      if (entry.phase !== 'received' && entry.phase !== 'failed') return
+      mutationSeq += 1 // 在途的轮询快照作废（不得覆盖提交窗口内的本地变更）
+      apply(() => ({ ...state, board: submitStarted(state.board, questionId) }))
       const answers = buildAnswerItems(entry.card, entry.draft as Record<string, QuestionDraftItem>)
       try {
         await api.postAnswer(questionId, answers)
-        // 成功（或 409 已答过 = 视为已完成）：卡片出队。
-        apply(() => ({ ...state, lastError: null, board: updateBoard(submitAccepted(started, questionId)) }))
+        // 成功（或 409 已答过 = 视为已完成）：在【当前】账本上出队（审查 F1——
+        // 提交窗口内其他卡的草稿/新卡不动）。
+        apply(() => ({ ...state, lastError: null, board: submitAccepted(state.board, questionId) }))
       } catch (error) {
         if (errorStatus(error) === 409) {
-          apply(() => ({ ...state, lastError: null, board: updateBoard(submitAccepted(started, questionId)) }))
+          apply(() => ({ ...state, lastError: null, board: submitAccepted(state.board, questionId) }))
           return
         }
-        // 其他失败：卡片保留、已填内容保留、可改后重试。
+        // 其他失败：卡片保留、已填内容保留、可改后重试（同样落在当前账本上）。
         report(`router answer failed: ${errorMessage(error)}`)
-        apply(() => ({ ...state, lastError: `回答送达失败：${errorMessage(error)}`, board: submitRejected(started, questionId) }))
+        apply(() => ({ ...state, lastError: `回答送达失败：${errorMessage(error)}`, board: submitRejected(state.board, questionId) }))
       }
     },
   }

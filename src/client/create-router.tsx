@@ -160,6 +160,10 @@ export function CreateRouterButton(props: CreateRouterProps): ReactNode {
       setOpen(false)
       setName('')
       setTemplateId('')
+      // 本工作区刚长出第一个 Router（审查 F2）：门控重开 + 立即拉真，
+      // 否则「空工作区不再轮询」会把新 Router 的标签/问题藏到下一次换区。
+      props.store.invalidateGate()
+      void props.store.pollOnce()
       // 创建成功即打开新 Router 会话（这是唯一一次程序化切换，来自用户点击）。
       props.uiWorkspace.openSession(result.sessionId)
     } catch (caught) {
