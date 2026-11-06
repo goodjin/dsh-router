@@ -42,7 +42,8 @@ export interface WorkspaceFace {
 
 export interface SessionBridgeDeps {
   ledger: Pick<TaskLedger, 'get' | 'transition' | 'attachSession'>
-  docs: TaskDocStore
+  /** 任务文档存储按任务工作目录取（每项目一个根：<cwd>/<tasksDir>）。 */
+  docsFor(cwd: string): TaskDocStore
   /** registry 可选缺席（缺席即全部回退 cwd 创建）。 */
   workspaces?: WorkspaceFace
   host: SessionBridgeHost
@@ -59,7 +60,7 @@ const PROMPT_TIMEOUT_MS = 120_000
 
 export class SessionBridge {
   private ledger: SessionBridgeDeps['ledger']
-  private docs: TaskDocStore
+  private docsFor: (cwd: string) => TaskDocStore
   private workspaces: WorkspaceFace | undefined
   private host: SessionBridgeHost
   private presets: SessionBridgeDeps['presets']
@@ -70,7 +71,7 @@ export class SessionBridge {
 
   constructor(deps: SessionBridgeDeps) {
     this.ledger = deps.ledger
-    this.docs = deps.docs
+    this.docsFor = deps.docsFor
     this.workspaces = deps.workspaces
     this.host = deps.host
     this.presets = deps.presets
@@ -110,7 +111,7 @@ export class SessionBridge {
   async dispatchTask(taskId: string): Promise<{ sessionId: string | undefined }> {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
-    const book = await this.docs.readDoc(taskId, 'task', record.docVersion)
+    const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     let sessionId = record.sessionId
     if (sessionId === undefined) {
       const workspace = this.resolveWorkspace(record)
@@ -145,7 +146,7 @@ export class SessionBridge {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     if (record.sessionId === undefined) return { sessionId: undefined }
-    const book = await this.docs.readDoc(taskId, 'task', record.docVersion)
+    const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     await this.host.prompt(
       {
         requestId: `dispatch-${taskId}-v${record.docVersion}`,
@@ -163,15 +164,21 @@ export class SessionBridge {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     if (record.sessionId === undefined) return
-    await this.host.prompt(
-      {
-        requestId: `cancel-${taskId}`,
-        sessionId: record.sessionId,
-        mode: 'steer',
-        content: [{ type: 'text', text: `任务 ${record.id}「${record.title}」已被取消。请立即停止相关工作，不要继续提交；已产生的中间产物留在原地。` }],
-      },
-      this.hostSignal(),
+    await this.notify(
+      record.sessionId,
+      `cancel-${taskId}`,
+      `任务 ${record.id}「${record.title}」已被取消。请立即停止相关工作，不要继续提交；已产生的中间产物留在原地。`,
     )
+  }
+
+  /** 通用投递通道（完成通知、暂停通知等；默认 steer 立即插到最近一步）。 */
+  async notify(
+    sessionId: string,
+    requestId: string,
+    text: string,
+    mode: 'queue' | 'steer' = 'steer',
+  ): Promise<void> {
+    await this.host.prompt({ requestId, sessionId, mode, content: [{ type: 'text', text }] }, this.hostSignal())
   }
 
   /** 订阅 api-session/status：记录运行标志（标签条 running 字段）并转发监听者。 */

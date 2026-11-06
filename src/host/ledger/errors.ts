@@ -28,6 +28,10 @@ export type LedgerErrorCode =
   | 'already-answered'
   /** 问答桥：等待中的问题被中止信号取消。 */
   | 'question-cancelled'
+  /** 调度派发被拒：递归深度超限。 */
+  | 'depth-exceeded'
+  /** 调度派发被拒：依赖命中祖先链（环风险）。 */
+  | 'cycle-risk'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

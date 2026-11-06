@@ -10,6 +10,14 @@
       "types": "./src/entry.ts",
       "default": "./dist/entry.js"
     },
+    "./tools": {
+      "types": "./src/tools.ts",
+      "default": "./dist/tools.js"
+    },
+    "./context": {
+      "types": "./src/context.ts",
+      "default": "./dist/context.js"
+    },
     "./client": {
       "types": "./src/client/index.ts",
       "default": "./lib/client.js"

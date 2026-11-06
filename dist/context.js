@@ -1,0 +1,28 @@
+/**
+ * 预设树上下文行入口（`@goodjin2/dsh-router/context`，计划 B5）。
+ *
+ * 只挂 Router 预设：在预设作用域内注册 systemPrompt 动态上下文
+ * 「router-task-ledger」，text 是同步回调读根服务缓存的快照（systemPrompt 组装
+ * 是同步的，账本读是异步的，所以走缓存——根服务在启动与每次账本写后刷新）。
+ * 注意宿主 SystemPrompt.context() 对非有限 order 直接 TypeError，order 必须给。
+ */
+import Schema from '@deepseek-ai/schemastery';
+/** 本入口的插件名（诊断显示用）。 */
+export const name = 'router-context';
+export const inject = ['systemPrompt', 'routerCore'];
+export const Config = Schema.object({
+    order: Schema.number().default(100).volatile(),
+});
+/** 注册快照上下文；返回注销器交给宿主 effect 生命周期。 */
+export function apply(ctx, config) {
+    const order = typeof config.order === 'number' && Number.isFinite(config.order) ? config.order : 100;
+    const dispose = ctx.systemPrompt.context({
+        name: 'router-task-ledger',
+        order,
+        text: () => ctx.routerCore.snapshotText(),
+    });
+    return () => {
+        dispose?.();
+    };
+}
+//# sourceMappingURL=context.js.map

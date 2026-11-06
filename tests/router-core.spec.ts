@@ -1,0 +1,525 @@
+/**
+ * RouterCore 装配测试（计划 B2 根服务组装的核心逻辑，全部假件不启宿主）。
+ */
+
+import { describe, expect, it } from 'vitest'
+
+import { LedgerError } from '../src/host/ledger/errors.ts'
+import { TaskLedger, type LedgerPersistence, type LedgerFile } from '../src/host/ledger/store.ts'
+import { Scheduler } from '../src/host/ledger/scheduler.ts'
+import { TaskDocStore } from '../src/host/docs/task-docs.ts'
+import { SessionBridge, type SessionBridgeHost, type WorkspaceInfo } from '../src/host/bridge/sessions.ts'
+import { AnswerRelay } from '../src/host/bridge/questions.ts'
+import { CompactionDriver, type CompactionDeps } from '../src/host/context/compaction-driver.ts'
+import { createRouterCore, type RouterCoreHosts } from '../src/host/core.ts'
+import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../src/host/bridge/tabs.ts'
+import type { FsAdapter } from '../src/shared/fs-adapter.ts'
+import type { TaskRecord } from '../src/shared/types.ts'
+import type { QuestionCard, WorkerTemplate } from '../src/shared/view-contract.ts'
+import { task } from './helpers/task-builder.ts'
+
+/* ────────────────────────── 假件 ────────────────────────── */
+
+class MemoryPersistence implements LedgerPersistence {
+  file: LedgerFile | null = null
+  async load() {
+    return this.file
+  }
+  async save(f: LedgerFile) {
+    this.file = JSON.parse(JSON.stringify(f)) as LedgerFile
+  }
+}
+
+function memoryDocs(): TaskDocStore & { files: Map<string, string> } {
+  const files = new Map<string, string>()
+  const fs: FsAdapter = {
+    async readFile(p) {
+      const content = files.get(p)
+      if (content === undefined) throw new LedgerError('doc-not-found', `文档不存在: ${p}`)
+      return content
+    },
+    async writeFile(p, content) {
+      files.set(p, content)
+    },
+    async mkdirp() {},
+    async exists(p) {
+      return files.has(p)
+    },
+    async readdir() {
+      return [...files.keys()]
+    },
+  }
+  return Object.assign(new TaskDocStore('/proj/.router', fs), { files })
+}
+
+interface HostEvents {
+  created: { opts: Record<string, unknown> }[]
+  prompts: { requestId: string; sessionId: string; mode: string; text: string }[]
+  renames: { sessionId: string; title: string }[]
+}
+
+function fakeHosts() {
+  const events: HostEvents = { created: [], prompts: [], renames: [] }
+  const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
+  let count = 0
+  const hosts: RouterCoreHosts = {
+    sessionController: {
+      async create(opts) {
+        count += 1
+        events.created.push({ opts: opts as Record<string, unknown> })
+        return { sessionId: `session-${count}` }
+      },
+      async prompt(request) {
+        events.prompts.push({
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          mode: request.mode,
+          text: request.content.map((block) => block.text).join('\n'),
+        })
+        return { accepted: true }
+      },
+      async rename(request) {
+        events.renames.push({ sessionId: request.sessionId, title: request.title })
+        return {}
+      },
+    },
+    agents: { get: () => undefined },
+    workspaceRegistry: {
+      list: () => [{ id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] }] as WorkspaceInfo[],
+      get: (id: string) => (id === 'ws-1' ? { id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] } : undefined),
+    },
+    onSessionStatus(callback) {
+      statusCbs.push(callback)
+    },
+  }
+  return { hosts, events, statusCbs }
+}
+
+function fakeDriver(): CompactionDriver & { marked: string[] } {
+  const marked: string[] = []
+  const deps: CompactionDeps = {
+    getAgent: () => undefined,
+    async lastUserMessageSeq() {
+      return null
+    },
+    async balancedBefore() {
+      return true
+    },
+    async balancedAfter() {
+      return true
+    },
+    async compactRegion() {
+      return {}
+    },
+    now: () => 1,
+  }
+  const driver = new CompactionDriver(deps)
+  const wrapped = new CompactionDriver({
+    ...deps,
+    getAgent(sessionId) {
+      void sessionId
+      return undefined
+    },
+  })
+  void wrapped
+  return Object.assign(driver, {
+    marked,
+    onDispatched(sessionId: string) {
+      marked.push(sessionId)
+    },
+  }) as CompactionDriver & { marked: string[] }
+}
+
+function fakeUi(): UiStateStore {
+  const persistence: UiStatePersistence & { file: UiStateFile } = {
+    file: { schemaVersion: 1, routerSessions: [], tabs: [] },
+    async load() {
+      return this.file
+    },
+    async save(f) {
+      this.file = JSON.parse(JSON.stringify(f)) as UiStateFile
+    },
+  }
+  return new UiStateStore(persistence, () => 1)
+}
+
+const TEMPLATES: WorkerTemplate[] = [
+  { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' },
+  { templateId: 'lead', name: '主管', description: '再拆分', role: 'supervisor' },
+]
+
+let questionSeq = 0
+
+async function coreWith(records: TaskRecord[] = []) {
+  const persistence = new MemoryPersistence()
+  persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
+  const ledger = new TaskLedger(persistence, () => 1000)
+  await ledger.listAll()
+  const docs = memoryDocs()
+  const { hosts, events } = fakeHosts()
+  const ui = fakeUi()
+  await ui.load()
+  const bridge = new SessionBridge({
+    ledger,
+    docsFor: () => docs,
+    workspaces: hosts.workspaceRegistry,
+    host: {
+      create: async (opts) => (await hosts.sessionController.create(opts)).sessionId,
+      prompt: (request, signal) => hosts.sessionController.prompt(request, signal),
+      onStatus: (cb) => hosts.onSessionStatus(cb),
+      rename: async (sessionId, title) => {
+        await hosts.sessionController.rename({ sessionId, title })
+      },
+    },
+    presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
+    workerInstructions: () => '【执行指引】',
+    signal: new AbortController().signal,
+  })
+  const relay = new AnswerRelay({ ledger, newId: () => `q-${++questionSeq}`, now: () => 1 })
+  const driver = fakeDriver()
+  const scheduler = new Scheduler(ledger, { maxDepth: 2, concurrency: { default: 3 } })
+  const assembled = createRouterCore({
+    ledger,
+    docsFor: () => docs,
+    bridge,
+    relay,
+    driver,
+    scheduler,
+    hosts,
+    ui,
+    config: {
+      routerPreset: 'dsh-router',
+      supervisorPreset: 'dsh-router-supervisor',
+      workerPreset: 'dsh-router-worker',
+      templates: TEMPLATES,
+    },
+    newId: () => `q-${++questionSeq}`,
+    signal: new AbortController().signal,
+    isRunning: () => false,
+  })
+  await assembled.refreshSnapshot()
+  return { ledger, docs, bridge, relay, driver, events, ui, ...assembled }
+}
+
+/* ────────────────────────── 派发 ────────────────────────── */
+
+describe('createRouterCore：dispatchTask', () => {
+  it('Router 会话派发：workspace 解析、任务书落盘、桥投递、驱动打标、加标签', async () => {
+    const { core, workbench, events, driver, ui, docs } = await coreWith()
+    const result = await core.dispatchTask('router-s-1', {
+      title: '修登录',
+      goal: '登录不再 500',
+      acceptance: ['回归通过'],
+      role: 'worker',
+      templateId: 'coder',
+      materials: ['docs/auth.md'],
+    })
+    expect(result.taskId).toBe('T-001')
+    expect(result.docPath).toBe('/proj/.router/tasks/T-001/task.v1.md')
+    expect(result.sessionId).toBe('session-1')
+    expect(events.created[0]!.opts).toEqual({ workspaceId: 'ws-1', agentPreset: 'dsh-router-worker' })
+    expect(events.renames[0]!.title).toBe('T-001 修登录')
+    expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')
+    expect(events.prompts[0]!.text).toContain('docs/auth.md')
+    expect(driver.marked).toEqual(['session-1'])
+    expect(ui.tabs('ws-1').map((t) => t.sessionId)).toEqual(['session-1'])
+    expect(docs.files.get('/proj/.router/tasks/T-001/task.v1.md')).toContain('# 任务书 T-001')
+    void workbench
+  })
+
+  it('未知模板拒绝', async () => {
+    const { core } = await coreWith()
+    await expect(
+      core.dispatchTask('router-s-1', {
+        title: 'x',
+        goal: 'y',
+        acceptance: [],
+        role: 'worker',
+        templateId: 'nope',
+      }),
+    ).rejects.toMatchObject({ message: expect.stringContaining('nope') })
+  })
+
+  it('worker 角色调用派发被拒（role-forbidden）', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'worker-s-1', status: 'running' })]
+    const { core } = await coreWith(records)
+    await expect(
+      core.dispatchTask('worker-s-1', {
+        title: 'x',
+        goal: 'y',
+        acceptance: [],
+        role: 'worker',
+        templateId: 'coder',
+      }),
+    ).rejects.toMatchObject({ code: 'role-forbidden' })
+  })
+
+  it('深度超限被拒：maxDepth=2 时主管的第二层子任务被拒', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'supervisor', sessionId: 'sup-s-1', status: 'running', parentId: undefined }),
+      task({ id: 'T-002', role: 'supervisor', sessionId: 'sup-s-2', status: 'running', parentId: 'T-001' }),
+    ]
+    const { core } = await coreWith(records)
+    // T-002 已在深度 2，再派第三层被拒
+    await expect(
+      core.dispatchTask('sup-s-2', {
+        title: '第三层',
+        goal: 'g',
+        acceptance: [],
+        role: 'worker',
+        templateId: 'coder',
+        parentTaskId: 'T-002',
+      }),
+    ).rejects.toMatchObject({ code: 'depth-exceeded' })
+  })
+
+  it('依赖命中祖先链被拒（cycle-risk）', async () => {
+    const records = [task({ id: 'T-001', role: 'supervisor', sessionId: 'sup-s-1', status: 'running' })]
+    const { core } = await coreWith(records)
+    await expect(
+      core.dispatchTask('sup-s-1', {
+        title: '环任务',
+        goal: 'g',
+        acceptance: [],
+        role: 'worker',
+        templateId: 'coder',
+        parentTaskId: 'T-001',
+        dependsOn: [{ taskId: 'T-001' }],
+      }),
+    ).rejects.toMatchObject({ code: 'cycle-risk' })
+  })
+
+  it('未解析到 workspace 时回退 cwd 伪项目', async () => {
+    const { core, ledger } = await coreWith()
+    const result = await core.dispatchTask('stranger-s', {
+      title: 't',
+      goal: 'g',
+      acceptance: [],
+      role: 'worker',
+      templateId: 'coder',
+    })
+    expect(result.sessionId).toBe('session-1')
+    const record = ledger.get(result.taskId)
+    expect(record?.cwd).toBe(process.cwd())
+    expect(record?.projectId).toContain('cwd:')
+    expect(ledger.get(result.taskId)?.status).toBe('dispatched')
+  })
+})
+
+/* ────────────────────────── 补充 / 查询 / 控制 ────────────────────────── */
+
+describe('createRouterCore：supplement / query / control', () => {
+  it('supplementTask：账本升版 + 文档升版 + 重投原会话 + 驱动打标', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events, driver } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    const result = await core.supplementTask('router-s-1', 'T-001', ['补充：用 PostgreSQL'])
+    expect(result.docVersion).toBe(2)
+    expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v2')
+    expect(events.prompts[0]!.sessionId).toBe('session-9')
+    expect(driver.marked).toEqual(['session-9'])
+    expect(ledger.get('T-001')?.constraints).toContain('补充：用 PostgreSQL')
+  })
+
+  it('queryTasks：卡映射 + 待答计数 + 状态过滤', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'worker', sessionId: 's1', status: 'running', title: '一号' }),
+      task({ id: 'T-002', role: 'worker', sessionId: 's2', status: 'completed', title: '二号' }),
+    ]
+    const { core, ledger, relay } = await coreWith(records)
+    await ledger.addQuestion({ id: 'q-1', taskId: 'T-001', question: '？', status: 'open', createdAt: 1 })
+    const all = await core.queryTasks()
+    expect(all.tasks.map((t) => t.taskId)).toEqual(['T-001', 'T-002'])
+    expect(all.tasks[0]!.waitingQuestions).toBe(1)
+    const running = await core.queryTasks({ status: ['running'] })
+    expect(running.tasks.map((t) => t.taskId)).toEqual(['T-001'])
+    const cards = relay.pendingCards()
+    expect(cards).toHaveLength(0)
+  })
+
+  it('controlTask pause/resume：走状态机并 steer 通知执行会话', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { core, ledger, events } = await coreWith(records)
+    const paused = await core.controlTask('router-s-1', 'T-001', 'pause')
+    expect(paused.status).toBe('paused')
+    expect(ledger.get('T-001')?.status).toBe('paused')
+    expect(events.prompts[0]!.mode).toBe('steer')
+    expect(events.prompts[0]!.text).toContain('暂停')
+    const resumed = await core.controlTask('router-s-1', 'T-001', 'resume')
+    expect(resumed.status).toBe('running')
+    expect(events.prompts[1]!.text).toContain('继续')
+  })
+
+  it('controlTask cancel：cancelled + 取消通知', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { core, ledger, events } = await coreWith(records)
+    const result = await core.controlTask('router-s-1', 'T-001', 'cancel')
+    expect(result.status).toBe('cancelled')
+    expect(ledger.get('T-001')?.status).toBe('cancelled')
+    expect(events.prompts[0]!.requestId).toBe('cancel-T-001')
+  })
+
+  it('controlTask 非法迁移照抛（queued 不能 pause）', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'queued' })]
+    const { core } = await coreWith(records)
+    await expect(core.controlTask('router-s-1', 'T-001', 'pause')).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+})
+
+/* ────────────────────────── 完成协议 ────────────────────────── */
+
+describe('createRouterCore：completeTask', () => {
+  it('auto 策略：完成 + result.md + 解锁依赖自动派发 + 通知上级', async () => {
+    const records = [
+      task({ id: 'T-000', role: 'supervisor', sessionId: 'sup-s-1', status: 'running', title: '父任务' }),
+      task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', parentId: 'T-000' }),
+      task({ id: 'T-002', role: 'worker', status: 'queued', dependsOn: ['T-001'], projectId: 'ws-1', cwd: '/proj', title: '解锁后可派' }),
+    ]
+    const { core, ledger, docs, events, driver } = await coreWith(records)
+    // 解锁目标 T-002 的任务书（生产路径：任务创建时即落盘）
+    await docs.initTask(ledger.get('T-002')!, `# 任务书 T-002`)
+    const result = await core.completeTask('session-9', 'T-001', {
+      docVersion: 1,
+      summary: '做完了',
+      deliverables: ['/proj/a.txt'],
+      acceptanceEvidence: '测试绿',
+    })
+    expect(result.accepted).toBe(true)
+    expect(result.status).toBe('completed')
+    expect(docs.files.get('/proj/.router/tasks/T-001/result.md')).toContain('做完了')
+    // 依赖解锁的 T-002 自动派发（无会话 → 建会话投递）
+    expect(ledger.get('T-002')?.status).toBe('dispatched')
+    expect(ledger.get('T-002')?.sessionId).toBe('session-1')
+    expect(driver.marked).toContain('session-1')
+    // 通知上级会话
+    const notice = events.prompts.find((p) => p.requestId === 'notice-T-001-completed')
+    expect(notice?.sessionId).toBe('sup-s-1')
+    expect(notice?.text).toContain('T-001')
+  })
+
+  it('有未结子任务 → review-pending（accepted=false，pendingFrom=supervisor）', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'supervisor', sessionId: 'sup-s-1', status: 'running' }),
+      task({ id: 'T-002', role: 'worker', sessionId: 'session-2', status: 'running', parentId: 'T-001' }),
+    ]
+    const { core, ledger } = await coreWith(records)
+    const result = await core.completeTask('sup-s-1', 'T-001', { docVersion: 1, summary: '主体完成' })
+    expect(result).toEqual({ accepted: false, status: 'review-pending', pendingFrom: 'supervisor' })
+    expect(ledger.get('T-001')?.status).toBe('review-pending')
+  })
+
+  it('旧 worker 迟到提交：stale-version 照抛', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', docVersion: 2 })]
+    const { core } = await coreWith(records)
+    await expect(core.completeTask('session-9', 'T-001', { docVersion: 1, summary: 'x' })).rejects.toMatchObject({
+      code: 'stale-version',
+    })
+  })
+
+  it('非本会话的执行者提交被拒（not-task-owner）', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { core } = await coreWith(records)
+    await expect(core.completeTask('stranger-s', 'T-001', { docVersion: 1, summary: 'x' })).rejects.toMatchObject({
+      code: 'not-task-owner',
+    })
+  })
+})
+
+/* ────────────────────────── 进度 / 阻塞 / 记忆 ────────────────────────── */
+
+describe('createRouterCore：progress / blocker / search', () => {
+  it('reportProgress：账本进度 + progress.md', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, docs, ledger } = await coreWith(records)
+    await core.reportProgress('session-9', 'T-001', '完成一半')
+    expect(ledger.get('T-001')?.progress).toBe('完成一半')
+    expect(docs.files.get('/proj/.router/tasks/T-001/progress.md')).toContain('完成一半')
+  })
+
+  it('reportBlocker：blocked + 原因落进度', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { core, ledger } = await coreWith(records)
+    const result = await core.reportBlocker('session-9', 'T-001', '缺凭据')
+    expect(result.status).toBe('blocked')
+    expect(ledger.get('T-001')?.progress).toBe('缺凭据')
+  })
+
+  it('searchHistory：记忆未接线返回空命中与注记', async () => {
+    const { core } = await coreWith()
+    expect(await core.searchHistory('router-s-1', '任意', 'project')).toEqual({
+      hits: [],
+      note: '记忆服务未接线',
+    })
+  })
+})
+
+/* ────────────────────────── 工作台面 ────────────────────────── */
+
+describe('createRouterCore：workbench', () => {
+  it('createRouterSession：按 Router 预设建会话、改名、登记', async () => {
+    const { workbench, events, ui } = await coreWith()
+    const created = await workbench.createRouterSession('ws-1', '我的 Router')
+    expect(created.sessionId).toBe('session-1')
+    expect(events.created[0]!.opts).toEqual({ workspaceId: 'ws-1', agentPreset: 'dsh-router' })
+    expect(events.renames[0]!.title).toBe('我的 Router')
+    expect(ui.routerSessions()).toEqual([{ sessionId: 'session-1', title: '我的 Router' }])
+  })
+
+  it('state：routerSessions/tasks/questions/tabs/templates 全拼装；tabs 按 workspace 过滤', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', title: '一号' })]
+    const { workbench, ui, ledger } = await coreWith(records)
+    await ledger.addQuestion({ id: 'q-1', taskId: 'T-001', question: '？', status: 'open', createdAt: 1 })
+    await ui.addTab('ws-1', 'session-9', 'T-001')
+    await ui.addRouterSession('router-s-1', 'ws-1', 'Router')
+    const state = await workbench.state('ws-1')
+    expect(state.routerSessions).toEqual([{ sessionId: 'router-s-1', title: 'Router' }])
+    expect(state.tasks.map((t) => t.taskId)).toEqual(['T-001'])
+    expect(state.tabs).toHaveLength(1)
+    expect(state.tabs[0]!.taskId).toBe('T-001')
+    expect(state.tabs[0]!.running).toBe(false)
+    expect(state.templates).toEqual(TEMPLATES)
+    // 其它 workspace 没有标签
+    const other = await workbench.state('ws-other')
+    expect(other.tabs).toEqual([])
+  })
+
+  it('closeTab 移除标签；answerQuestion 走问答桥', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { workbench, ui, relay, ledger } = await coreWith(records)
+    await ui.addTab('ws-1', 'session-9', 'T-001')
+    expect(await workbench.closeTab('ws-1', 'session-9')).toBe(true)
+    expect(ui.tabs('ws-1')).toEqual([])
+    const claim = relay.claimQuestion({ questions: [{ id: 'a1', question: '？' }], agent: { id: 'session-9' } }, async () => 'next')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const questionId = relay.pendingCards()[0]!.questionId
+    await workbench.answerQuestion(questionId, [{ id: 'a1', selected: ['x'] }])
+    await expect(claim).resolves.toEqual({ answers: [{ id: 'a1', selected: ['x'] }] })
+    const record = await ledger.findQuestion(questionId)
+    expect(record?.status).toBe('answered')
+  })
+
+  it('pendingQuestions 暴露浮窗数据', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running' })]
+    const { workbench, relay } = await coreWith(records)
+    const claim = relay.claimQuestion({ questions: [{ id: 'a1', question: '？' }], agent: { id: 'session-9' } }, async () => 'next')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    const cards: QuestionCard[] = workbench.pendingQuestions()
+    expect(cards).toHaveLength(1)
+    await relay.answerQuestion(cards[0]!.questionId, [{ id: 'a1', selected: [] }])
+    await claim
+  })
+})
+
+/* ────────────────────────── 快照 ────────────────────────── */
+
+describe('createRouterCore：快照缓存', () => {
+  it('refreshSnapshot 后 snapshotText 同步可读；账本变化后刷新即更新', async () => {
+    const { core, ledger, snapshotText, refreshSnapshot } = await coreWith()
+    expect(snapshotText()).toContain('没有未结束任务')
+    await ledger.createTask({ title: '新任务', goal: 'g', projectId: 'ws-1', cwd: '/proj', role: 'worker', templateId: 'coder' })
+    await refreshSnapshot()
+    expect(snapshotText()).toContain('新任务')
+    expect(snapshotText()).not.toContain('没有未结束任务')
+    void core
+  })
+})

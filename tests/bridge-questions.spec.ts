@@ -290,7 +290,7 @@ async function bridgeWith(taskPatch: Partial<TaskRecord> = {}) {
   const instructions = '【执行指引】完成必须用 complete_task。'
   const bridge = new SessionBridge({
     ledger,
-    docs,
+    docsFor: () => docs,
     workspaces: fakeWorkspaces([{ id: 'ws-1', path: '/tmp/proj' }]),
     host,
     presets,
@@ -345,7 +345,7 @@ describe('SessionBridge：派发', () => {
     const { host, events, presets } = fakeHost()
     const bare = new SessionBridge({
       ledger,
-      docs,
+      docsFor: () => docs,
       workspaces: undefined,
       host,
       presets,
@@ -409,6 +409,19 @@ describe('SessionBridge：运行状态观察', () => {
     for (const callback of statusCallbacks) callback('session-9', true)
     expect(bridge.isRunning('session-9')).toBe(true)
     expect(seen).toEqual([['session-9', true]])
+  })
+})
+
+describe('SessionBridge：notify 通用投递', () => {
+  it('按给定 requestId/mode/文本投递（完成通知、暂停通知等共用通道）', async () => {
+    const { bridge, events } = await bridgeWith({ sessionId: 'session-9', status: 'running' })
+    await bridge.notify('session-9', 'notice-T-001-completed', '子任务 T-001 已完成', 'steer')
+    expect(events.prompts[0]).toEqual({
+      requestId: 'notice-T-001-completed',
+      sessionId: 'session-9',
+      mode: 'steer',
+      text: '子任务 T-001 已完成',
+    })
   })
 })
 

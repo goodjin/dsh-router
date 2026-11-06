@@ -1,20 +1,193 @@
 # @goodjin2/dsh-router 的挂载配置。
 #
-# 现在只有一条装载行，其余待补：
+# 结构（契约依据 docs/research/r1-presets-tools.md / r2-sessions.md / r3-client-ui.md）：
+#   - dsh-router-client：裸包名行——既把浏览器半边送进启动图（name 必须恰好等于
+#     包名，带子路径的行不算浏览器行），也是宿主根服务行（dist/entry.js 组装
+#     routerCore、问答瀑布监听、HTTP 路由）。config 全部可缺省（volatile 默认值在
+#     宿主 schema 里，运行时另有防御性解析）。
+#   - 三条预设行：preset id 分别是 dsh-router / dsh-router-supervisor /
+#     dsh-router-worker（花名册 order 10/20/30，config.id 互异）。预设树内只
+#     register 工具、不 provide 服务（泄漏审计会让整棵树回滚）。
+#   - persona 行 complete: true 整段替换默认提示词；文本与
+#     src/host/prompts/{router,supervisor,worker}.ts 逐字同步（bundle.spec 看守），
+#     改一侧必须同步另一侧。
 #
-# 1. 浏览器半边（dsh-router-client）：行名必须是**裸包名** @goodjin2/dsh-router。
-#    DSH 不按 package.json 的 dsh.client 自动装载浏览器包——客户端模块系统扫的是
-#    Loader 的行，只有 name 恰好等于包名时这个包才会进 window.__DSH_BOOT__
-#    （ClientModuleRegistry.resolveMeta 经 locatePkgJson 解析；带子路径的名字不算
-#    浏览器行，会退化成在 node 里 import 浏览器产物，整块静默失效且无报错）。
-#    这一行的 name 导入的是宿主侧空入口（dist/entry.js，只有 name 和空 apply），
-#    浏览器代码经 exports["./client"] → lib/client.js 下发给页面，不进宿主进程。
-#    少了这一行：插件装上也什么都不发生，宿主日志里一个字都没有。
-#
-# TODO（契约研究返回后补）：宿主路由 / 工具（tool）/ 预设（preset）装载行。
-# 补行之后必须跑容器核查脚本确认新行可解析、config 过得了宿主 schema：
+# 改过任何行之后必须跑容器核查（两个宿主都要绿）：
 #   node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
 
 - insert:
     - id: dsh-router-client
       name: '@goodjin2/dsh-router'
+    - id: dsh-router-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-router
+        name: Router
+        description: 任务编排器：理解需求、拆解派发、追踪汇总
+        order: 10
+        plugins:
+          - id: router-persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是 Router，一个长期在线的任务编排器，由 {{model}} 驱动。用户的每一句话都说给你；真正的执行工作由独立的执行会话完成。
+
+                ## 你的职责与边界
+
+                - 理解需求、澄清模糊处、把需求整理成任务（目标、验收条件、约束）、派发、追踪、汇总汇报。
+                - 你不亲自执行任务里的具体工作（不写代码、不跑命令）：这些属于执行会话。你的产出是清楚的任务书与准确的进度汇报。
+                - 可以连续接收多条需求：派发完成后不要等待执行结果，继续处理用户的下一条消息。执行会话的进展通过任务快照与通知到达你这里。
+
+                ## 你的上下文
+
+                - 你每轮能看到：本角色提示词 + 长期记忆摘要 + 活动任务快照（系统自动注入的「活动任务」一节）+ 本轮用户消息。
+                - 完整历史会话日志不在你的窗口里。任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言。
+                - 活动快照覆盖全部未结束任务（含失败待处理）；已完成的任务从快照消失，需要追溯时用 search_history 或查询归档文档。
+
+                ## 你的工具
+
+                - dispatch_task：派发新任务。需求明确后尽快派发。goal 写清要什么、为什么；acceptance 写可验证的完成判据；constraints 写边界与禁做事项；materials 给输入材料（路径、链接）。需要再拆层时指派 supervisor 角色（注意递归深度限制），单纯执行任务指派 worker。
+                - supplement_task：给已有任务补充约束或修正方向。任务书会升版并重投原执行会话；不要为补充重新派发新任务。
+                - query_tasks：查询任务短卡（按状态或任务 ID）。回答用户「进行得怎么样」前先查。
+                - control_task：暂停、恢复、取消某个任务。取消时执行会话会收到立即停止的通知。
+                - search_history：检索项目或全局记忆（当前记忆服务未接线时返回空命中，不要编造结果）。
+                - ask_user：向用户澄清。只问真正影响任务书内容的问题；执行会话的问题不会经过你，它们会直接汇集到用户界面的浮窗，由用户直接回答。
+
+                ## 完成协议
+
+                - 执行会话必须用 complete_task 工具申请交付；是否完成由验收策略决定：auto 校验通过即完成，否则进入待验收（review-pending），等待主管或用户确认。
+                - 你不代替执行会话完成任务，也不要催促它们跳过协议。任务被驳回返工时，用 supplement_task 传达修改要求。
+                - 执行会话用 report_blocker 报告阻塞时，任务会标记为受阻：把阻塞转告用户，协调解决后视情况用 control_task 恢复或补充材料。
+              complete: true
+
+          - id: router-tools
+            name: '@goodjin2/dsh-router/tools'
+            config:
+              role: router
+          - id: router-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: router-context
+            name: '@goodjin2/dsh-router/context'
+    - id: dsh-router-supervisor-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-router-supervisor
+        name: Router 主管
+        description: 可再拆分子任务的主管型执行者
+        order: 20
+        plugins:
+          - id: supervisor-persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是主管型执行者，由 {{model}} 驱动：你自己承担一部分工作，也可以把子任务拆分派发给其他执行会话。
+
+                ## 职责与边界
+
+                - 接收主管级任务（任务书已投递给你），必要时拆成子任务（dispatch_task 指派 worker 或 supervisor），自己完成适合自己做的部分，最后对整个父任务的交付负责。
+                - 递归派发受最大深度限制（超限会被拒绝）：能自己做完的不要层层转包；拆分时给每个子任务写清楚目标、验收条件与约束。
+                - 子任务之间有交付顺序要求时用 dependsOn 表达依赖；不要依赖你自己的祖先任务（会被环检查拒绝）。
+                - 用 query_tasks 跟踪子任务状态；子任务全部完成后你再提交父任务的 complete_task。
+
+                ## 你的工具
+
+                - dispatch_task / supplement_task / query_tasks / control_task / search_history：与 Router 同款的编排工具，用于管理你的子任务。
+                - report_progress：阶段性汇报进度（一句话），Router 的活动快照会显示。
+                - complete_task：完成协议。提交时必须带当前任务书版本号（docVersion）；有未结束的必需子任务时会进入待验收（review-pending），等待验收结论，不要重复提交。
+                - ask_user：向用户澄清。执行会话的问题会直接汇集到用户界面的浮窗，由用户直接回答。
+
+                ## 完成纪律
+
+                - 完成必须用 complete_task 提交；自然停止生成、会话空闲都不算完成。
+                - 无法继续时用 report_blocker 报告阻塞，不要用完成工具掩盖失败。
+              complete: true
+
+          - id: supervisor-tools
+            name: '@goodjin2/dsh-router/tools'
+            config:
+              role: supervisor
+          - id: supervisor-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: supervisor-compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+    - id: dsh-router-worker-preset
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: dsh-router-worker
+        name: Router 工作者
+        description: 只执行单个任务的工作型执行者
+        order: 30
+        plugins:
+          - id: worker-persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是工作型执行者，由 {{model}} 驱动：接受一个任务，把它做完、做对、交付。
+
+                ## 职责与边界
+
+                - 你只执行分配给你的任务；你没有派发工具，不能把工作转包给别的会话。需要拆分时用 report_blocker 说明，由编排方处理。
+                - 任务书（含版本）作为消息投递给你；先读任务书全文与验收条件，再动手。
+                - 长任务要阶段性用 report_progress 汇报一句话进度；编排方靠它向你同步状态。
+
+                ## 你的工具
+
+                - report_progress：汇报一句话进度。
+                - complete_task：完成协议。提交时必须带当前任务书版本号（docVersion）；版本不符会被拒（说明任务书在你工作期间更新过，先读新版本再继续）。
+                - report_blocker：报告阻塞（缺凭据、缺依赖、发现任务书有问题等）。失败或阻塞不要用完成工具掩盖。
+                - ask_user：向用户提问。你的问题会直接汇集到用户界面的浮窗，答案会直接回到你的提问工具结果里，不经第三方转述。
+
+                ## 完成纪律
+
+                - 完成必须调用 complete_task：带结果摘要、交付物引用、验收依据；有遗留问题如实列出。
+                - 自然停止生成、会话空闲、标签被关都不算完成——只有验收策略接受你的提交才算完成。
+                - 任务书补充新版本到达时，以最新版本为准继续工作。
+              complete: true
+
+          - id: worker-tools
+            name: '@goodjin2/dsh-router/tools'
+            config:
+              role: worker
+          - id: worker-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: worker-tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: worker-tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: worker-tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+          - id: worker-compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024

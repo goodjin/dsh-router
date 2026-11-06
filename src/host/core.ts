@@ -1,0 +1,407 @@
+/**
+ * RouterCore 的根服务实现（计划 B2/B3/B4/B5 的组装点，纯逻辑、宿主面全注入）。
+ *
+ * 工具薄壳（src/host/tools）调用的每个方法都在这里落地：派发前的模板校验与
+ * dispatchGuard（角色/深度/环）、任务书渲染落盘、会话桥投递、驱动打标、标签
+ * 登记；完成协议的存结果、通知上级、解锁自动派发；以及 Router 工作台面
+ * （state / createRouterSession / answer / closeTab）与同步快照缓存。
+ * entry.ts 把宿主服务接进 deps；本文件不 import 任何宿主专有包。
+ */
+
+import { LedgerError } from './ledger/errors.ts'
+import type { TaskLedger } from './ledger/store.ts'
+import type { TaskDocStore } from './docs/task-docs.ts'
+import { renderTaskBook } from './docs/render.ts'
+import type { Scheduler } from './ledger/scheduler.ts'
+import type { SessionBridge, WorkspaceInfo } from './bridge/sessions.ts'
+import type { AnswerRelay } from './bridge/questions.ts'
+import type { UiStateStore } from './bridge/tabs.ts'
+import type { CompactionDriver } from './context/compaction-driver.ts'
+import { renderLedgerSnapshot } from './context/snapshot.ts'
+import { assertCallerRole } from './tools/index.ts'
+import type {
+  CompleteTaskInput,
+  DispatchTaskInput,
+  QueryTasksFilter,
+  RouterCore,
+} from './core-types.ts'
+import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
+import type {
+  AskUserQuestionAnswerItem,
+  QuestionCard,
+  RouterState,
+  TaskCard,
+  WorkerTemplate,
+} from '../shared/view-contract.ts'
+
+/** 宿主服务的最小面（entry.ts 接真实服务；测试给假件）。 */
+export interface RouterCoreHosts {
+  sessionController: {
+    create(opts: { workspaceId?: string; cwd?: string; agentPreset?: string }, signal?: AbortSignal): Promise<{ sessionId: string }>
+    prompt(request: {
+      requestId: string
+      sessionId: string
+      mode: 'queue' | 'steer'
+      content: { type: 'text'; text: string }[]
+    }, signal?: AbortSignal): Promise<unknown>
+    rename(request: { sessionId: string; title: string }, signal?: AbortSignal): Promise<unknown>
+  }
+  /** 只在装配层用（压缩驱动取存活 agent）；核心逻辑不消费。 */
+  agents: { get(sessionId: string): unknown }
+  workspaceRegistry: {
+    /** 同步投影（r2 §5：list/get 都是同步方法，sessionIds 已按 cwd 过滤）。 */
+    list(): WorkspaceInfo[]
+    get(id: string): WorkspaceInfo | undefined
+  }
+  /** api-session/status 订阅口（会话桥 watchStatus 的落点）。 */
+  onSessionStatus(callback: (sessionId: string, running: boolean) => void): void
+}
+
+/** 预设与模板配置。 */
+export interface RouterCoreConfig {
+  routerPreset: string
+  supervisorPreset: string
+  workerPreset: string
+  templates: WorkerTemplate[]
+}
+
+export interface RouterCoreAssemblyDeps {
+  ledger: TaskLedger
+  docsFor(cwd: string): TaskDocStore
+  bridge: SessionBridge
+  relay: AnswerRelay
+  driver: CompactionDriver
+  scheduler: Scheduler
+  ui: UiStateStore
+  hosts: RouterCoreHosts
+  config: RouterCoreConfig
+  newId(): string
+  signal?: AbortSignal
+  isRunning(sessionId: string): boolean
+  /** 活动快照卡上限（缺省 12）。 */
+  maxActiveCards?: number
+  /** 派发失败等非致命问题的日志口（缺席静默）。 */
+  logger?: { warn(message: string): void }
+}
+
+/** Router 工作台面（HTTP 路由消费）。 */
+export interface RouterWorkbench {
+  state(workspaceId?: string): Promise<RouterState>
+  createRouterSession(workspaceId: string | undefined, name?: string): Promise<{ sessionId: string }>
+  answerQuestion(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
+  closeTab(workspaceId: string, sessionId: string): Promise<boolean>
+  pendingQuestions(): QuestionCard[]
+}
+
+/** 深度：根任务 1，子任务 +1；parentId 链带 visited 防护。 */
+function depthOf(ledger: TaskLedger, taskId: string | undefined): number {
+  let depth = 0
+  const visited = new Set<string>()
+  let cursor: string | undefined = taskId
+  while (cursor !== undefined && !visited.has(cursor)) {
+    visited.add(cursor)
+    depth += 1
+    cursor = ledger.get(cursor)?.parentId
+  }
+  return depth
+}
+
+/** TaskRecord → TaskCard（role 字段：任务只会以 supervisor/worker 创建）。 */
+function toCard(record: TaskRecord, waiting: number): TaskCard {
+  return {
+    taskId: record.id,
+    title: record.title,
+    goal: record.goal,
+    status: record.status,
+    role: record.role as 'supervisor' | 'worker',
+    templateId: record.templateId ?? '',
+    progress: record.progress,
+    sessionId: record.sessionId,
+    waitingQuestions: waiting,
+    parentId: record.parentId,
+    docVersion: record.docVersion,
+  }
+}
+
+export interface RouterCoreAssembly {
+  core: RouterCore
+  workbench: RouterWorkbench
+  /** 最近一次刷新的快照文本（systemPrompt.context 的同步读缓存）。 */
+  snapshotText(): string
+  refreshSnapshot(): Promise<void>
+  recoverOrphans(): Promise<string[]>
+}
+
+export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssembly {
+  const { ledger, bridge, relay, driver, scheduler, ui, hosts, config } = deps
+
+  /** 待答问题计数（taskId → open 数）。 */
+  const waitingCounts = async (): Promise<Record<string, number>> => {
+    const open = await ledger.openQuestions()
+    const counts: Record<string, number> = {}
+    for (const question of open) {
+      if (question.taskId !== undefined) counts[question.taskId] = (counts[question.taskId] ?? 0) + 1
+    }
+    return counts
+  }
+
+  /** 调用方会话绑定的任务（决定 caller 的角色与项目归属）。 */
+  const taskBySession = async (sessionId: string): Promise<TaskRecord | undefined> => {
+    const records = await ledger.listAll()
+    return records.find((record) => record.sessionId === sessionId)
+  }
+
+  /** Router 会话所在 workspace（sessionIds 成员扫描；registry 是同步投影）。 */
+  const workspaceOfSession = (sessionId: string): WorkspaceInfo | undefined =>
+    hosts.workspaceRegistry.list().find((workspace) => workspace.sessionIds?.includes(sessionId))
+
+  /** 派发后的公共收尾：打标、加标签、刷快照。 */
+  const afterDispatch = async (record: TaskRecord, sessionId: string | undefined, workspaceId: string | undefined): Promise<void> => {
+    if (sessionId !== undefined) {
+      driver.onDispatched(sessionId)
+      if (workspaceId !== undefined && !workspaceId.startsWith('cwd:')) {
+        await ui.addTab(workspaceId, sessionId, record.id)
+      }
+    }
+    await refreshSnapshot()
+  }
+
+  let snapshotCache = ''
+
+  /**
+   * 执行类工具（report_progress/complete_task/report_blocker）的归属复核：
+   * 调用方必须是任务绑定的会话（纵深防御——assertCallerRole 已在工具层查过
+   * 一次，这里用核心的账本再拦一道）。
+   */
+  const mustOwn = (callerSessionId: string, taskId: string): TaskRecord => {
+    const record = ledger.get(taskId)
+    if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
+    assertCallerRole(record.role, 'report_progress', callerSessionId, { get: (id) => ledger.get(id) }, taskId)
+    return record
+  }
+
+  const refreshSnapshot = async (): Promise<void> => {
+    const records = await ledger.listAll()
+    snapshotCache = renderLedgerSnapshot(records, {
+      maxCards: deps.maxActiveCards ?? 12,
+      openQuestions: await waitingCounts(),
+    })
+  }
+
+  const core: RouterCore = {
+    async dispatchTask(callerSessionId, input) {
+      const template = config.templates.find((entry) => entry.templateId === input.templateId)
+      if (template === undefined) {
+        throw new Error(`未知的 worker 模板: ${input.templateId}（可用：${config.templates.map((t) => t.templateId).join('、')}）`)
+      }
+      const callerTask = await taskBySession(callerSessionId)
+      const callerRole: RoleKind = callerTask?.role ?? 'router'
+      const parentTaskId = input.parentTaskId
+      const verdict = scheduler.dispatchGuard(
+        { sessionIdRole: callerRole, parentTaskId, depth: parentTaskId !== undefined ? depthOf(ledger, parentTaskId) : 0 },
+        { role: input.role, dependsOn: input.dependsOn?.map((ref) => ref.taskId) },
+      )
+      if (!verdict.ok) {
+        throw new LedgerError(verdict.code, `派发被拒（${verdict.code}）：${dispatchRejectionText(verdict.code, callerRole)}`)
+      }
+      const workspace = workspaceOfSession(callerSessionId)
+      const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd()
+      const projectId = workspace?.id ?? `cwd:${cwd}`
+      const record = await ledger.createTask({
+        title: input.title,
+        goal: input.goal,
+        acceptance: input.acceptance,
+        constraints: input.constraints ?? [],
+        projectId,
+        cwd,
+        role: input.role,
+        templateId: input.templateId,
+        parentId: parentTaskId,
+        dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
+        acceptancePolicy: 'auto',
+      })
+      const docs = deps.docsFor(record.cwd)
+      const book = renderTaskBook(record, { materials: input.materials, sourceRef: `router 会话 ${callerSessionId}` })
+      const docPath = await docs.initTask(record, book)
+      const { sessionId } = await bridge.dispatchTask(record.id)
+      await afterDispatch(record, sessionId, workspace?.id)
+      return { taskId: record.id, docPath, sessionId }
+    },
+
+    async supplementTask(callerSessionId, taskId, additions) {
+      const record = ledger.get(taskId)
+      if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
+      if (isTerminal(record.status)) {
+        throw new LedgerError('illegal-transition', `终态任务不可补充: ${taskId}（${record.status}）`)
+      }
+      const fromVersion = record.docVersion
+      const newVersion = await ledger.supplement(taskId, additions)
+      await deps.docsFor(record.cwd).supplement(taskId, fromVersion, additions)
+      const delivered = await bridge.supplementTo(taskId)
+      if (delivered.sessionId !== undefined) driver.onDispatched(delivered.sessionId)
+      await refreshSnapshot()
+      return { docVersion: newVersion }
+    },
+
+    async queryTasks(filter) {
+      const records = await ledger.listAll()
+      const counts = await waitingCounts()
+      let cards = records.map((record) => toCard(record, counts[record.id] ?? 0))
+      if (filter?.status !== undefined && filter.status.length > 0) {
+        const wanted = new Set<TaskStatus>(filter.status)
+        cards = cards.filter((card) => wanted.has(card.status))
+      }
+      if (filter?.taskId !== undefined) cards = cards.filter((card) => card.taskId === filter.taskId)
+      return { tasks: cards }
+    },
+
+    async controlTask(callerSessionId, taskId, action) {
+      const record = ledger.get(taskId)
+      if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
+      if (action === 'pause') {
+        await ledger.transition(taskId, 'paused')
+        if (record.sessionId !== undefined) {
+          await bridge.notify(record.sessionId, `pause-${taskId}`, `任务 ${taskId}「${record.title}」已暂停。请停止推进，等待恢复指示；不要提交完成。`)
+        }
+      } else if (action === 'resume') {
+        await ledger.transition(taskId, 'running')
+        if (record.sessionId !== undefined) {
+          await bridge.notify(record.sessionId, `resume-${taskId}`, `任务 ${taskId}「${record.title}」已恢复，请继续按任务书当前版本推进。`)
+        }
+      } else {
+        await ledger.cancel(taskId, `cancelled by ${callerSessionId}`)
+        await bridge.notifyCancel(taskId)
+      }
+      await refreshSnapshot()
+      return { status: ledger.get(taskId)?.status ?? record.status }
+    },
+
+    async searchHistory() {
+      // 记忆服务是 Task B6（不在本任务）：接口先立住，返回空命中与注记。
+      return { hits: [], note: '记忆服务未接线' }
+    },
+
+    async reportProgress(callerSessionId, taskId, progress) {
+      const record = mustOwn(callerSessionId, taskId)
+      await ledger.updateProgress(taskId, progress)
+      await deps.docsFor(record.cwd).writeProgress(taskId, progress)
+      await refreshSnapshot()
+      return { ok: true as const }
+    },
+
+    async completeTask(callerSessionId, taskId, input) {
+      const record = mustOwn(callerSessionId, taskId)
+      // 账本方法返回活引用：record.status 会在 complete 后被原地改写，
+      // 「是否首次完成」必须在调用前取证。
+      const wasTerminal = isTerminal(record.status)
+      const completed = await ledger.complete(taskId, {
+        docVersion: input.docVersion,
+        summary: input.summary,
+        deliverables: input.deliverables,
+        acceptanceEvidence: input.acceptanceEvidence,
+        openIssues: input.leftovers,
+      })
+      if (completed.result !== undefined) {
+        await deps.docsFor(record.cwd).writeResult(taskId, completed.result)
+      }
+      let pendingFrom: 'supervisor' | 'user' | undefined
+      if (completed.status === 'review-pending') {
+        pendingFrom = completed.acceptancePolicy === 'user' ? 'user' : 'supervisor'
+      }
+      if (completed.status === 'completed' && !wasTerminal) {
+        // 首次完成（幂等重提不重复广播）：通知上级 + 解锁依赖自动派发
+        const parent = completed.parentId !== undefined ? ledger.get(completed.parentId) : undefined
+        if (parent?.sessionId !== undefined && parent.sessionId !== callerSessionId) {
+          await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${input.summary}`)
+        }
+        const unlocked = await scheduler.onCompleted(taskId)
+        for (const nextTask of unlocked) {
+          try {
+            const delivered = await bridge.dispatchTask(nextTask.id)
+            const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
+            await afterDispatch(nextTask, delivered.sessionId, workspace)
+          } catch (error) {
+            // 单个解锁任务的派发失败不拖垮完成本身：任务保持 queued，留待下次派发
+            deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败，保持排队: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+      }
+      await refreshSnapshot()
+      return { accepted: completed.status === 'completed', status: completed.status, pendingFrom }
+    },
+
+    async reportBlocker(callerSessionId, taskId, reason) {
+      mustOwn(callerSessionId, taskId)
+      await ledger.reportBlocker(taskId, reason)
+      await refreshSnapshot()
+      return { status: 'blocked' as const }
+    },
+
+    getTask(taskId: string): TaskRecord | undefined {
+      return ledger.get(taskId)
+    },
+  }
+
+  const workbench: RouterWorkbench = {
+    async state(workspaceId) {
+      const records = await ledger.listAll()
+      const counts = await waitingCounts()
+      const bySession = new Map(records.filter((r) => r.sessionId !== undefined).map((r) => [r.sessionId as string, r]))
+      const tabRows = workspaceId !== undefined ? ui.tabs(workspaceId) : ui.allTabs()
+      return {
+        routerSessions: ui.routerSessions(),
+        tasks: records.map((record) => toCard(record, counts[record.id] ?? 0)),
+        questions: relay.pendingCards(),
+        tabs: tabRows.map((row) => {
+          const taskRecord = bySession.get(row.sessionId)
+          return {
+            sessionId: row.sessionId,
+            title: taskRecord !== undefined ? `${taskRecord.id} ${taskRecord.title}` : row.sessionId,
+            taskId: taskRecord?.id ?? row.taskId,
+            taskStatus: taskRecord?.status,
+            running: deps.isRunning(row.sessionId),
+          }
+        }),
+        templates: config.templates,
+      }
+    },
+
+    async createRouterSession(workspaceId, name) {
+      const title = name ?? 'Router'
+      const created = await hosts.sessionController.create(
+        { workspaceId, agentPreset: config.routerPreset },
+        deps.signal,
+      )
+      await hosts.sessionController.rename({ sessionId: created.sessionId, title }, deps.signal)
+      await ui.addRouterSession(created.sessionId, workspaceId, title)
+      return { sessionId: created.sessionId }
+    },
+
+    async answerQuestion(questionId, answers) {
+      await relay.answerQuestion(questionId, answers)
+    },
+
+    async closeTab(workspaceId, sessionId) {
+      return ui.removeTab(workspaceId, sessionId)
+    },
+
+    pendingQuestions(): QuestionCard[] {
+      return relay.pendingCards()
+    },
+  }
+
+  return {
+    core,
+    workbench,
+    snapshotText: () => snapshotCache,
+    refreshSnapshot,
+    recoverOrphans: () => relay.recoverOrphans(),
+  }
+}
+
+/** 派发拒绝的补充说明（给模型看得懂的下一步）。 */
+function dispatchRejectionText(code: 'depth-exceeded' | 'role-forbidden' | 'cycle-risk', callerRole: RoleKind): string {
+  if (code === 'role-forbidden' && callerRole === 'worker') return '工作型角色无权派发任务'
+  if (code === 'depth-exceeded') return '超过最大递归深度，请把工作合并进当前任务或改派 supervisor'
+  return '依赖命中了自身的祖先任务（环），请换依赖对象'
+}

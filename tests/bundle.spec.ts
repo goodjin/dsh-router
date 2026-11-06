@@ -3,29 +3,29 @@
  *
  * 这是**唯一**能提前发现致命错误的地方。DSH 浏览器半边有三条死规矩，少一条
  * 就是「装上也不生效、宿主日志一个字都没有」（2026-11 在 dsh-rightbar-overlay
- * 上踩过整组坑）；另有两条形状规矩与一条入口规矩：
+ * 上踩过整组坑）；另有两条形状规矩与入口规矩：
  *
  *  1. package.json 声明 `dsh.bundle.patch` 指向 cordis.patch.yml——没有这段，
  *     宿主读 profile 时整层跳过（启动日志里只有一句 "skipping profile bundle"）；
  *  2. package.json 声明 `dsh.client.platform = "web"`——客户端模块注册表
  *     （ClientModuleRegistry.resolveMeta）靠它把行认成浏览器行；
- *  3. patch 里装载行的 name 是**裸包名**——带子路径的行会退化成在 node 里
- *     import 浏览器产物，整块静默失效；
+ *  3. patch 里装载行的 name 是**裸包名**——浏览器行只在 name 恰好等于包名时被认；
  *  4. exports["./client"] 只能是字符串或 { default: 字符串 }——宿主
- *     clientExportOf 只认这两种，只写 import/require 会被当场判错；
- *  5. lib/client.js 必须是「单文件 CJS 工厂」：window.__ModuleLoader__.load({ id, factory })
- *     包裹、factory 里挂 apply/name/inject、顶层不得有 import/export——
- *     顶层 ESM 语法在页面里是语法错误，包根本进不了启动图；
- *  6. exports["."] 指向宿主侧空入口 dist/entry.js——浏览器代码不许混进宿主进程。
+ *     clientExportOf 只认这两种；
+ *  5. lib/client.js 必须是「单文件 CJS 工厂」，顶层不得有 import/export；
+ *  6. exports["."] 指向宿主侧入口 dist/entry.js——浏览器代码不许混进宿主进程。
  *
- * 这里逐条断言，并按页面的方式真跑一遍产物：把 lib/client.js 当文本读进来、
- * 在只给了 `window` 的沙箱里求值（不走 vitest 模块图，免得它去解析产物里对
- * 页面模块的 require），取出 factory → 调 apply → 看占位行不抛。
+ * Part B 起 patch 还有三条预设行（工具/上下文子路径导出、persona 文本与 TS 模板
+ * 逐字同步），一并在这里断言。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
+
+import { routerPrompt } from '../src/host/prompts/router.ts'
+import { supervisorPrompt } from '../src/host/prompts/supervisor.ts'
+import { workerPrompt } from '../src/host/prompts/worker.ts'
 
 const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
   name: string
@@ -38,6 +38,8 @@ const PATCH_TEXT = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', imp
 
 const BUNDLE_PATH = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const ENTRY_PATH = fileURLToPath(new URL('../dist/entry.js', import.meta.url))
+const TOOLS_PATH = fileURLToPath(new URL('../dist/tools.js', import.meta.url))
+const CONTEXT_PATH = fileURLToPath(new URL('../dist/context.js', import.meta.url))
 
 type Factory = (require: (specifier: string) => unknown) => Record<string, unknown>
 type Row = { id: string; factory: Factory }
@@ -71,32 +73,101 @@ describe('package.json 满足浏览器半边的接线条件', () => {
     expect(target).toBe('./lib/client.js')
   })
 
-  it('exports["."] 与 main 指向宿主侧产物 dist/entry.js，且不指向浏览器半边', () => {
+  it('exports["."] 与 main 指向宿主侧产物 dist/entry.js，不混浏览器代码', () => {
     const dotExport = PKG.exports['.'] as { types?: string; default?: string }
     expect(typeof dotExport?.default, 'exports["."] 必须有字符串 default').toBe('string')
     expect(dotExport.default).toBe('./dist/entry.js')
     expect(PKG.main).toBe('./dist/entry.js')
-    // 宿主进程加载的入口不得混入浏览器代码：路径不许指到 client 产物。
     expect(dotExport.default).not.toContain('client')
     expect(PKG.main).not.toContain('client')
-    // 宿主入口产物已构建，且确实是空壳：剥掉注释后不得再引用 window / document
-    // （注释里提到这些词没关系），也不得 import 任何东西——浏览器代码只住在
-    // lib/client.js，绝不混进宿主进程。
+    // 宿主入口已构建，且确实没有浏览器半边：剥掉注释后不得引用 window / document /
+    // lib/client（Part B 起入口有宿主侧 import，属于正常；这三样才是浏览器线）。
     expect(existsSync(ENTRY_PATH), 'dist/entry.js 不存在——先 npm run build').toBe(true)
     const entryCode = readFileSync(ENTRY_PATH, 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
       .replace(/\/\/[^\n]*/g, '')
     expect(entryCode).not.toMatch(/\b(window|document)\b/)
-    expect(entryCode).not.toMatch(/^\s*import\s/m)
+    expect(entryCode).not.toContain('lib/client')
+  })
+
+  it('子路径导出 ./tools 与 ./context 存在且指向构建产物，产物可加载', async () => {
+    for (const [key, file] of [['./tools', TOOLS_PATH], ['./context', CONTEXT_PATH]] as const) {
+      const exportEntry = PKG.exports[key] as { types?: string; default?: string } | undefined
+      expect(exportEntry, `${key} 导出缺失：预设树里的行会 never started → 整预设回滚`).toBeDefined()
+      expect(exportEntry?.default).toBe(`./dist/${key === './tools' ? 'tools' : 'context'}.js`)
+      expect(existsSync(file), `${key} 的构建产物不存在——先 npm run build`).toBe(true)
+      const mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>
+      expect(typeof mod.name, `${key} 产物缺 name`).toBe('string')
+      expect(Array.isArray(mod.inject), `${key} 产物缺 inject`).toBe(true)
+      expect(typeof mod.Config, `${key} 产物缺 Config（check-host-rows 要校验）`).toBe('function')
+      expect(typeof mod.apply, `${key} 产物缺 apply`).toBe('function')
+    }
+    // Config 真能校验：role 必填；context 默认 order
+    const toolsMod = (await import(pathToFileURL(TOOLS_PATH).href)) as { Config: (config: unknown) => unknown; name: string }
+    expect(() => toolsMod.Config({ role: 'router' })).not.toThrow()
+    expect(() => toolsMod.Config({})).toThrow()
+    const contextMod = (await import(pathToFileURL(CONTEXT_PATH).href)) as { Config: (config: unknown) => unknown }
+    expect(() => contextMod.Config({})).not.toThrow()
   })
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行，且没有子路径行', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools 与 ./context', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
-    // 带子路径的行会被当成宿主行：在 node 里 import 浏览器产物，整块静默失效。
-    expect(PATCH_TEXT).not.toMatch(/name:\s*['"]@goodjin2\/dsh-router\//)
+    // 子路径行是宿主行（node 里 import 构建产物）；浏览器半边只有裸包名一条。
+    // tools 行每个预设各一条（×3）、context 只在 Router 预设（×1）；其它任何
+    // 子路径（尤其指向浏览器产物的）都会静默失效，直接禁止。
+    const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
+    expect(subpathRows.sort()).toEqual(['context', 'tools', 'tools', 'tools'])
+  })
+
+  it('有三条预设行，config.id 互异且即三个预设 id', () => {
+    const presetRows = [...PATCH_TEXT.matchAll(/- id:\s*(dsh-router-[\w-]*)\n\s*name:\s*'@deepseek-ai\/dsh-agent-preset'\n\s*config:\n\s*id:\s*([\w-]+)/g)]
+    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router', 'dsh-router-supervisor', 'dsh-router-worker'])
+    expect(new Set(presetRows.map((m) => m[2])).size).toBe(3)
+  })
+
+  it('预设树内的工具行按角色分流（role: router/supervisor/worker 各一次）', () => {
+    for (const role of ['router', 'supervisor', 'worker']) {
+      expect(PATCH_TEXT, `role: ${role} 行缺失`).toMatch(new RegExp(`name:\\s*'@goodjin2/dsh-router/tools'\\n\\s+config:\\n\\s+role: ${role}`))
+    }
+  })
+
+  it('context 行只在 Router 预设（快照上下文不进主管/worker）', () => {
+    expect(PATCH_TEXT.match(/name:\s*'@goodjin2\/dsh-router\/context'/g)?.length).toBe(1)
+  })
+})
+
+/** 从 yml 抽 persona 前缀块（prefix: |- 下的 16 空格缩进文本），还原成原文。 */
+function personaPrefix(yml: string, personaRowId: string): string {
+  const anchor = `- id: ${personaRowId}`
+  const at = yml.indexOf(anchor)
+  expect(at, `yml 里找不到 persona 行 ${personaRowId}`).toBeGreaterThan(-1)
+  const prefixAt = yml.indexOf('prefix: |-', at)
+  const lines = yml.slice(prefixAt).split('\n').slice(1)
+  const body: string[] = []
+  for (const line of lines) {
+    if (line.trim() === '') {
+      body.push('')
+      continue
+    }
+    if (!line.startsWith(' '.repeat(16))) break
+    body.push(line.slice(16))
+  }
+  while (body.length > 0 && body[body.length - 1] === '') body.pop()
+  return `${body.join('\n')}\n`
+}
+
+describe('persona 文本与 TS 模板逐字同步', () => {
+  it('router-persona === routerPrompt', () => {
+    expect(personaPrefix(PATCH_TEXT, 'router-persona')).toBe(routerPrompt)
+  })
+  it('supervisor-persona === supervisorPrompt', () => {
+    expect(personaPrefix(PATCH_TEXT, 'supervisor-persona')).toBe(supervisorPrompt)
+  })
+  it('worker-persona === workerPrompt', () => {
+    expect(personaPrefix(PATCH_TEXT, 'worker-persona')).toBe(workerPrompt)
   })
 })
 
