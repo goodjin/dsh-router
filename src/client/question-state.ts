@@ -9,7 +9,7 @@
  * - 收起不是回答：折叠只翻转 collapsed，phase 与草稿分毫不动；
  * - 轮询重放同一 questionId 不得重置用户已填内容；
  * - 服务端已不在的卡（他端已答/已撤）在同步时移除，submitting 中的除外；
- * - 容量上限 pruneToCap：丢最旧的，submitting 中的永不丢。
+ * - 容量上限只裁渲染（visibleCards），账本与草稿永不因上限丢失。
  * 全部纯函数：入参不改，返回新状态。
  */
 
@@ -46,7 +46,7 @@ function indexOfCard(state: QuestionBoardState, questionId: string): number {
   return state.cards.findIndex((entry) => entry.card.questionId === questionId)
 }
 
-/** 通用映射：只改指定卡，其余原样（不可变）。 */
+/** 通用映射：只改指定卡，其余原样（不可变）；变换是无操作时保持整块状态同一性。 */
 function mapCard(
   state: QuestionBoardState,
   questionId: string,
@@ -54,17 +54,20 @@ function mapCard(
 ): QuestionBoardState {
   const index = indexOfCard(state, questionId)
   if (index < 0) return state
+  const current = state.cards[index]!
+  const next = transform(current)
+  if (next === current) return state
   const cards = state.cards.slice()
-  cards[index] = transform(cards[index]!)
+  cards[index] = next
   return { cards }
 }
 
-/** 新问题按到达顺序入队；已有同 id 的卡保持原 UI 状态（重放不重置草稿）。 */
+/** 新问题按到达顺序入队；默认收起（规格 §3.3：收起 chip）；已有同 id 的卡保持原 UI 状态（重放不重置草稿）。 */
 export function cardsReceived(state: QuestionBoardState, cards: QuestionCard[]): QuestionBoardState {
   const known = new Set(state.cards.map((entry) => entry.card.questionId))
   const additions = cards
     .filter((card) => !known.has(card.questionId))
-    .map((card): QuestionCardView => ({ card, phase: 'received', collapsed: false, draft: {} }))
+    .map((card): QuestionCardView => ({ card, phase: 'received', collapsed: true, draft: {} }))
   if (additions.length === 0) return state
   return { cards: [...state.cards, ...additions] }
 }
@@ -132,15 +135,13 @@ export function submitRejected(state: QuestionBoardState, questionId: string): Q
 }
 
 /**
- * 容量上限：超过 cap 时从最旧开始丢，submitting 中的永不丢；cap 内原样。
- * 活动卡上限来自本包设置段（client-prefs）。
+ * 展示容量（审查 F4）：上限只裁「渲染」，不删账本——超出的最旧卡离开视野，
+ * 但草稿与折叠状态原样保留；前面的卡出队后它们带着状态回到视野。
+ * 这避免「同一批 13 张卡、上限 12」时反复轮换、丢用户已填内容。
  */
-export function pruneToCap(state: QuestionBoardState, cap: number): QuestionBoardState {
-  if (state.cards.length <= cap) return state
-  const removable = state.cards.filter((entry) => entry.phase !== 'submitting')
-  const overflow = state.cards.length - cap
-  const doomed = new Set(removable.slice(0, overflow).map((entry) => entry.card.questionId))
-  return { cards: state.cards.filter((entry) => !doomed.has(entry.card.questionId)) }
+export function visibleCards(cards: QuestionCardView[], cap: number): QuestionCardView[] {
+  if (cards.length <= cap) return cards
+  return cards.slice(cards.length - cap)
 }
 
 /** 收起 chip 的摘要行：任务名 → 会话标题 → 首问截断；全缺时给占位。 */

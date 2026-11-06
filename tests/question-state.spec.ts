@@ -12,13 +12,13 @@ import {
   chipSummary,
   cardsReceived,
   emptyBoard,
-  pruneToCap,
   setAnswer,
   submitAccepted,
   submitRejected,
   submitStarted,
   syncedWithServer,
   toggleCollapsed,
+  visibleCards,
 } from '../src/client/question-state.ts'
 import type { AskUserQuestionItem, QuestionCard } from '../src/shared/view-contract.ts'
 
@@ -40,11 +40,12 @@ function card(questionId: string, overrides: Partial<QuestionCard> = {}): Questi
 }
 
 describe('received：入队与重放', () => {
-  it('新问题按到达顺序入队，phase=received', () => {
+  it('新问题按到达顺序入队，phase=received、默认收起（规格 §3.3：默认收起 chip）', () => {
     let board = emptyBoard()
     board = cardsReceived(board, [card('QA'), card('QB')])
     expect(board.cards.map((entry) => entry.card.questionId)).toEqual(['QA', 'QB'])
     expect(board.cards.every((entry) => entry.phase === 'received')).toBe(true)
+    expect(board.cards.every((entry) => entry.collapsed === true)).toBe(true)
   })
 
   it('轮询重放同一 questionId：保留已填草稿与 phase，不重复入队', () => {
@@ -113,12 +114,13 @@ describe('收起与草稿', () => {
   it('收起/展开只翻转 collapsed，不改变 phase 与草稿', () => {
     let board = cardsReceived(emptyBoard(), [card('QA')])
     board = setAnswer(board, 'QA', 'q1', { selected: ['A'] })
+    expect(board.cards[0]?.collapsed).toBe(true) // 默认收起
     board = toggleCollapsed(board, 'QA')
-    expect(board.cards[0]?.collapsed).toBe(true)
+    expect(board.cards[0]?.collapsed).toBe(false)
     expect(board.cards[0]?.phase).toBe('received')
     expect(board.cards[0]?.draft['q1']?.selected).toEqual(['A'])
     board = toggleCollapsed(board, 'QA')
-    expect(board.cards[0]?.collapsed).toBe(false)
+    expect(board.cards[0]?.collapsed).toBe(true)
   })
 
   it('setAnswer 写草稿：多选累积 labels，custom 覆盖自由文本', () => {
@@ -145,7 +147,7 @@ describe('收起与草稿', () => {
   })
 })
 
-describe('与服务端同步、容量上限', () => {
+describe('与服务端同步、展示容量', () => {
   it('syncedWithServer：服务端已不在的卡（他端已答/已撤）移除；submitting 中的保留', () => {
     let board = cardsReceived(emptyBoard(), [card('QA'), card('QB')])
     board = submitStarted(board, 'QA')
@@ -162,16 +164,28 @@ describe('与服务端同步、容量上限', () => {
     expect(board.cards.map((entry) => entry.card.questionId)).toEqual(['QA', 'QC'])
   })
 
-  it('pruneToCap：超上限时丢最旧的，submitting 中的永不丢', () => {
-    let board = cardsReceived(emptyBoard(), [card('Q1'), card('Q2'), card('Q3')])
-    board = submitStarted(board, board.cards[1]!.card.questionId)
-    const pruned = pruneToCap(board, 2)
-    expect(pruned.cards.map((entry) => entry.card.questionId)).toEqual(['Q2', 'Q3'])
+  it('超容量的同一批问题反复同步：账本保留全部卡与草稿，不发生轮换丢失（审查 F4）', () => {
+    const many = Array.from({ length: 13 }, (_, index) => card(`Q${index + 1}`))
+    let board = cardsReceived(emptyBoard(), many)
+    board = setAnswer(board, 'Q1', 'q1', { selected: ['A'] })
+    for (let round = 0; round < 5; round += 1) {
+      board = syncedWithServer(board, many)
+    }
+    expect(board.cards).toHaveLength(13)
+    expect(board.cards[0]?.draft['q1']?.selected).toEqual(['A'])
+    expect(board.cards.map((entry) => entry.card.questionId)).toEqual(many.map((entry) => entry.questionId))
   })
 
-  it('pruneToCap 上限内原样保留', () => {
-    let board = cardsReceived(emptyBoard(), [card('Q1'), card('Q2')])
-    expect(pruneToCap(board, 5).cards).toHaveLength(2)
+  it('visibleCards：容量只裁「展示」，最旧的先离开视野、状态保留在账本里', () => {
+    const many = Array.from({ length: 13 }, (_, index) => card(`Q${index + 1}`))
+    let board = cardsReceived(emptyBoard(), many)
+    board = setAnswer(board, 'Q1', 'q1', { selected: ['A'] }) // 最旧卡的草稿
+    const shown = visibleCards(board.cards, 12)
+    expect(shown.map((entry) => entry.card.questionId)).toEqual(many.slice(1).map((entry) => entry.questionId))
+    // 账本不动：Q1 的草稿还在，等前面的卡出队它会带着草稿回来。
+    expect(board.cards[0]?.draft['q1']?.selected).toEqual(['A'])
+    expect(visibleCards(board.cards, 20)).toHaveLength(13)
+    expect(visibleCards([], 12)).toEqual([])
   })
 })
 

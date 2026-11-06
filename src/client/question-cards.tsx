@@ -6,13 +6,14 @@
  * chip（任务名 + 问题计数），点击展开，逐问渲染单选/多选/自由文本；
  * 提交 → POST /router/answer，先「正在送达」，成功移除、失败保留已填内容、
  * 409 视为已完成；多卡垂直排队互不覆盖；收起不是回答。
- * 层本身 click-through：容器不恢复 pointer events，chip/卡自己恢复。
+ * 层本身 click-through：滚动列只占住自己那一窄条指针事件，列外不挡；
+ * 默认收起（chip），点击展开；多卡垂直排队互不覆盖；收起不是回答。
  */
 
 import { useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { ClientPrefsStore } from './client-prefs.ts'
-import { chipSummary } from './question-state.ts'
+import { chipSummary, visibleCards } from './question-state.ts'
 import type { QuestionCardView } from './question-state.ts'
 import type { WorkbenchStore } from './workbench-store.ts'
 import { QUESTION_OVERLAY_ID, QUESTION_OVERLAY_ORDER, QUESTION_OVERLAY_SLOT } from './surface-ids.ts'
@@ -44,8 +45,12 @@ const STACK_STYLE: CSSProperties = {
   gap: 8,
   alignItems: 'stretch',
   maxWidth: 320,
-  // 层本身 click-through：容器穿透，交互元素自己恢复（R3 报告 §1.6）。
-  pointerEvents: 'none',
+  // 有界滚动列（审查 F7）：卡片再多也不把提交按钮推出视口；列本身就是
+  // 交互内容，占住这一窄条指针事件，列外仍是 click-through。
+  maxHeight: 'calc(100vh - 72px)',
+  overflowY: 'auto',
+  overscrollBehavior: 'contain',
+  pointerEvents: 'auto',
   zIndex: 40,
 }
 
@@ -183,7 +188,9 @@ function QuestionItem(props: { entry: QuestionCardView; item: AskUserQuestionIte
       <input
         data-question-custom
         placeholder="其他（自由填写）"
-        defaultValue={draft.custom ?? ''}
+        // 受控输入（审查 F6）：草稿是唯一事实——单选换选清掉 custom 时，
+        // 输入框里的字必须同时消失，不能留着「看得见但不会提交」的回答。
+        value={draft.custom ?? ''}
         disabled={disabled}
         style={INPUT_STYLE}
         onChange={(event) => {
@@ -261,15 +268,16 @@ function QuestionCardEntry(props: { entry: QuestionCardView; store: WorkbenchSto
   )
 }
 
-/** 浮窗组件：多卡垂直排队互不覆盖；浮窗开关读偏好；状态机在 question-state。 */
+/** 浮窗组件：多卡垂直排队互不覆盖；展示量按偏好封顶（账本不删，审查 F4）；状态机在 question-state。 */
 export function QuestionCards(props: QuestionOverlayProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
   const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
   if (!prefs.overlayEnabled) return null
-  if (state.board.cards.length === 0) return null
+  const cards = visibleCards(state.board.cards, prefs.maxActiveCards)
+  if (cards.length === 0) return null
   return (
     <div data-router-question-overlay style={STACK_STYLE}>
-      {state.board.cards.map((entry) => (
+      {cards.map((entry) => (
         <QuestionCardEntry key={entry.card.questionId} entry={entry} store={props.store} />
       ))}
     </div>
