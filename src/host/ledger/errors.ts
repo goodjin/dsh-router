@@ -5,13 +5,15 @@
  * 都抛 LedgerError，调用方按 code 分流，不解析消息文本。
  */
 
-/** 账本域错误码（Task 3 的文档错误码后续并入）。 */
+/** 账本域错误码（账本与任务文档共用一套）。 */
 export type LedgerErrorCode =
   | 'illegal-transition'
   | 'dependency-cycle'
   | 'stale-version'
   | 'persistence-failed'
   | 'task-not-found'
+  | 'doc-exists'
+  | 'doc-not-found'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {
