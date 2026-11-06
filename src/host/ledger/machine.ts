@@ -2,25 +2,13 @@
  * 任务状态机（计划 Task 1）。
  *
  * 迁移表是闭包集合：表内为合法，表外一律非法并抛 LedgerError。终态无出边。
- * LedgerError 暂住本文件——计划把它收敛到 errors.ts 排在 Task 2，届时搬移。
+ * LedgerError 本体在 errors.ts（计划 Task 2 收敛点），此处转载以保既有导入路径。
  */
 
 import type { TaskStatus } from '../../shared/types.ts'
+import { LedgerError } from './errors.ts'
 
-/** 账本域错误码（随实现逐步扩充）。 */
-export type LedgerErrorCode = 'illegal-transition'
-
-/** 账本域统一错误：业务校验失败全部抛它，调用方按 code 分流。 */
-export class LedgerError extends Error {
-  /** 错误码，调用方以此分流而不是解析消息文本。 */
-  code: LedgerErrorCode
-
-  constructor(code: LedgerErrorCode, message: string) {
-    super(message)
-    this.name = 'LedgerError'
-    this.code = code
-  }
-}
+export { LedgerError } from './errors.ts'
 
 /** 合法迁移表：from → 允许的 to 闭包集合（照计划逐条列出）。 */
 const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {

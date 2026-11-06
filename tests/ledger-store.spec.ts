@@ -1,0 +1,367 @@
+/**
+ * 任务账本 TaskLedger 测试（计划 Task 2）。
+ *
+ * 覆盖计划「步骤」列出的断言集合：ID 单调、环检测（A→B→A 抛错含路径）、
+ * 非法迁移拒绝、complete 幂等、stale-version 拒绝、persistence 失败回滚、
+ * listActive 过滤终态；另加边角：初始状态落点（draft/queued）、
+ * supplement 升版、accept/reject/reportBlocker、updatedAt 单调、task-not-found。
+ * 持久化用内存实现（照计划：IO 走注入式适配器）。
+ */
+
+import { describe, expect, it } from 'vitest'
+import { LedgerError } from '../src/host/ledger/errors.ts'
+import { TaskLedger } from '../src/host/ledger/store.ts'
+import type { LedgerFile, LedgerPersistence, TaskStatus } from '../src/host/ledger/store.ts'
+import type { TaskRecord } from '../src/shared/types.ts'
+
+/** 内存持久化：save 深拷贝落"盘"，可注入保存失败。 */
+class MemoryPersistence implements LedgerPersistence {
+  file: LedgerFile | null = null
+  saveCalls = 0
+  failNextSave = false
+
+  async load(): Promise<LedgerFile | null> {
+    return this.file === null ? null : structuredClone(this.file)
+  }
+
+  async save(f: LedgerFile): Promise<void> {
+    if (this.failNextSave) {
+      this.failNextSave = false
+      throw new Error('disk full')
+    }
+    this.saveCalls += 1
+    this.file = structuredClone(f)
+  }
+}
+
+/** 步进时钟：每次调用前进 1000，保证 updatedAt 可观察地单调。 */
+function stepClock(): { now: () => number } {
+  let t = 1000
+  return { now: () => (t += 1000) }
+}
+
+/** 新任务入参（最小必填）。 */
+function taskInput(overrides: Partial<Parameters<TaskLedger['createTask']>[0]> = {}) {
+  return {
+    title: '任务',
+    goal: '达成某目标',
+    projectId: 'proj-1',
+    cwd: '/tmp/proj',
+    role: 'worker' as const,
+    ...overrides,
+  }
+}
+
+/** 把任务从 draft 推到 running（draft→queued→dispatched→running）。 */
+async function driveToRunning(ledger: TaskLedger, id: string): Promise<void> {
+  await ledger.transition(id, 'queued')
+  await ledger.transition(id, 'dispatched')
+  await ledger.transition(id, 'running')
+}
+
+/** 完成一个 draft 任务的最短路径：推到 running 后按 auto 策略完成。 */
+async function completeFromDraft(ledger: TaskLedger, id: string, docVersion = 1): Promise<TaskRecord> {
+  await driveToRunning(ledger, id)
+  return ledger.complete(id, { docVersion, summary: '完成' })
+}
+
+describe('ID 分配：T-%03d 单调', () => {
+  it('同一账本内 T-001、T-002 依次分配', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const a = await ledger.createTask(taskInput({ title: 'A' }))
+    const b = await ledger.createTask(taskInput({ title: 'B' }))
+    expect(a.id).toBe('T-001')
+    expect(b.id).toBe('T-002')
+  })
+
+  it('nextTaskNumber 持久化：重启（新账本同 persistence）后继续单调', async () => {
+    const p = new MemoryPersistence()
+    const first = new TaskLedger(p, stepClock().now)
+    await first.createTask(taskInput())
+    await first.createTask(taskInput())
+    const second = new TaskLedger(p, stepClock().now)
+    const next = await second.createTask(taskInput())
+    expect(next.id).toBe('T-003')
+  })
+})
+
+describe('createTask 初始状态落点', () => {
+  it('无依赖或依赖全部完成 → draft', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput())
+    expect(a.status).toBe('draft')
+    expect(a.docVersion).toBe(1)
+  })
+
+  it('依赖存在但未完成 → queued（依赖未满足落 queued）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput())
+    const b = await ledger.createTask(taskInput({ dependsOn: [a.id] }))
+    expect(b.status).toBe('queued')
+  })
+
+  it('依赖已全部 completed → draft', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput())
+    await completeFromDraft(ledger, a.id)
+    const b = await ledger.createTask(taskInput({ dependsOn: [a.id] }))
+    expect(b.status).toBe('draft')
+  })
+})
+
+describe('依赖环检测', () => {
+  it('A→B→A 抛 dependency-cycle 且消息含环路径', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    // A 前向引用尚未创建的 T-002，创建 T-002 时成环
+    await ledger.createTask(taskInput({ title: 'A', dependsOn: ['T-002'] }))
+    try {
+      await ledger.createTask(taskInput({ title: 'B', dependsOn: ['T-001'] }))
+      expect.fail('应抛 dependency-cycle')
+    } catch (err) {
+      expect(err).toBeInstanceOf(LedgerError)
+      expect((err as LedgerError).code).toBe('dependency-cycle')
+      expect((err as Error).message).toContain('T-001')
+      expect((err as Error).message).toContain('T-002')
+      expect((err as Error).message).toContain('→')
+    }
+  })
+
+  it('环检测失败后账本状态不变：任务未落库、ID 计数器回滚', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    await ledger.createTask(taskInput({ title: 'A', dependsOn: ['T-002'] }))
+    await expect(ledger.createTask(taskInput({ title: 'B', dependsOn: ['T-001'] }))).rejects.toBeInstanceOf(LedgerError)
+    expect(ledger.get('T-002')).toBeUndefined()
+    const next = await ledger.createTask(taskInput({ title: 'C' }))
+    expect(next.id).toBe('T-002')
+  })
+})
+
+describe('transition：非法迁移拒绝、合法链通过', () => {
+  it('draft→running 抛 illegal-transition；合法链 draft→queued→dispatched→running 可过', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await expect(ledger.transition(t.id, 'running')).rejects.toMatchObject({ code: 'illegal-transition' })
+    await driveToRunning(ledger, t.id)
+    expect(ledger.get(t.id)?.status).toBe('running')
+  })
+
+  it('终态后任何迁移非法：completed→running 抛', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await completeFromDraft(ledger, t.id)
+    await expect(ledger.transition(t.id, 'running')).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('不存在的任务：get 返回 undefined，transition 抛 task-not-found', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    expect(ledger.get('T-999')).toBeUndefined()
+    await expect(ledger.transition('T-999', 'queued')).rejects.toMatchObject({ code: 'task-not-found' })
+  })
+})
+
+describe('complete：auto 策略、幂等、stale-version', () => {
+  it('policy auto 且无未结子任务 → completed，result 落库带完成时间', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'auto' }))
+    const done = await completeFromDraft(ledger, t.id)
+    expect(done.status).toBe('completed')
+    expect(done.result?.summary).toBe('完成')
+    expect(typeof done.result?.completedAt).toBe('number')
+  })
+
+  it('重复完成（同任务同 docVersion）幂等返回首次完成记录，不再触发 save', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    const first = await completeFromDraft(ledger, t.id)
+    const saves = p.saveCalls
+    const again = await ledger.complete(t.id, { docVersion: 1, summary: '再交一次' })
+    expect(again).toBe(first)
+    expect(again.result?.summary).toBe('完成')
+    expect(again.result?.completedAt).toBe(first.result?.completedAt)
+    expect(p.saveCalls).toBe(saves)
+  })
+
+  it('completed 后旧版本提交抛 stale-version', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await completeFromDraft(ledger, t.id)
+    await expect(ledger.complete(t.id, { docVersion: 2, summary: '迟到提交' })).rejects.toMatchObject({ code: 'stale-version' })
+  })
+
+  it('draft 上直接 complete 抛 illegal-transition（状态机守住）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await expect(ledger.complete(t.id, { docVersion: 1, summary: '没派发就交' })).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('子任务未结时 policy auto 也只到 review-pending；子任务结后 complete 幂等返回原记录', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const parent = await ledger.createTask(taskInput({ acceptancePolicy: 'auto' }))
+    await driveToRunning(ledger, parent.id)
+    const child = await ledger.createTask(taskInput({ parentId: parent.id }))
+    const first = await ledger.complete(parent.id, { docVersion: 1, summary: '父完成申请' })
+    expect(first.status).toBe('review-pending')
+    // review-pending 态的重复提交（同版本）同样幂等
+    expect(await ledger.complete(parent.id, { docVersion: 1, summary: '重复' })).toBe(first)
+    // 子任务完成后 complete 仍幂等（首次记录不重建）
+    await completeFromDraft(ledger, child.id)
+    expect(await ledger.complete(parent.id, { docVersion: 1, summary: '再交' })).toBe(first)
+  })
+})
+
+describe('accept / reject：验收协议', () => {
+  it('policy supervisor：complete → review-pending，accept → completed', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'supervisor' }))
+    await driveToRunning(ledger, t.id)
+    const submitted = await ledger.complete(t.id, { docVersion: 1, summary: '待验收' })
+    expect(submitted.status).toBe('review-pending')
+    const accepted = await ledger.accept(t.id, 'supervisor')
+    expect(accepted.status).toBe('completed')
+    expect(accepted.result?.summary).toBe('待验收')
+  })
+
+  it('reject：review-pending → running，note 落 progress；再 complete 重新进 review-pending', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'user' }))
+    await driveToRunning(ledger, t.id)
+    await ledger.complete(t.id, { docVersion: 1, summary: '第一版' })
+    const rejected = await ledger.reject(t.id, '验收不过，重做')
+    expect(rejected.status).toBe('running')
+    expect(rejected.progress).toBe('验收不过，重做')
+    // 驳回仅适用于 review-pending：running 上直接驳回抛非法迁移
+    await expect(ledger.reject(t.id, '再驳一次')).rejects.toMatchObject({ code: 'illegal-transition' })
+    const resubmitted = await ledger.complete(t.id, { docVersion: 1, summary: '第二版' })
+    expect(resubmitted.status).toBe('review-pending')
+  })
+})
+
+describe('supplement：升版与约束追加', () => {
+  it('docVersion+1、追加约束、updatedAt 前进', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ constraints: ['只用标准库'] }))
+    const before = t.updatedAt
+    const v2 = await ledger.supplement(t.id, ['补：禁用网络'])
+    expect(v2).toBe(2)
+    const after = ledger.get(t.id)
+    expect(after?.docVersion).toBe(2)
+    expect(after?.constraints).toEqual(['只用标准库', '补：禁用网络'])
+    expect(after!.updatedAt).toBeGreaterThan(before)
+  })
+
+  it('升版后旧版本 complete 提交抛 stale-version', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await driveToRunning(ledger, t.id)
+    await ledger.supplement(t.id, ['新约束'])
+    await expect(ledger.complete(t.id, { docVersion: 1, summary: '旧 worker 迟到' })).rejects.toMatchObject({ code: 'stale-version' })
+    const done = await ledger.complete(t.id, { docVersion: 2, summary: '按新版完成' })
+    expect(done.status).toBe('completed')
+  })
+
+  it('终态任务不可 supplement', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await completeFromDraft(ledger, t.id)
+    await expect(ledger.supplement(t.id, ['迟来的约束'])).rejects.toBeInstanceOf(LedgerError)
+  })
+})
+
+describe('reportBlocker / cancel / fail / attachSession / updateProgress', () => {
+  it('reportBlocker：running → blocked，reason 落 progress', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await driveToRunning(ledger, t.id)
+    const blocked = await ledger.reportBlocker(t.id, '缺凭据')
+    expect(blocked.status).toBe('blocked')
+    expect(blocked.progress).toBe('缺凭据')
+    const resumed = await ledger.transition(t.id, 'running')
+    expect(resumed.status).toBe('running')
+  })
+
+  it('cancel：running → cancelled 进终态；fail：blocked → failed', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput())
+    await driveToRunning(ledger, a.id)
+    expect((await ledger.cancel(a.id, '不要了')).status).toBe('cancelled')
+    const b = await ledger.createTask(taskInput())
+    await driveToRunning(ledger, b.id)
+    await ledger.reportBlocker(b.id, '卡住')
+    expect((await ledger.fail(b.id, '修不好')).status).toBe('failed')
+  })
+
+  it('attachSession / updateProgress 落库，updatedAt 单调前进', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    const created = t.updatedAt
+    const withSession = await ledger.attachSession(t.id, 'sess-1')
+    expect(withSession.sessionId).toBe('sess-1')
+    expect(withSession.updatedAt).toBeGreaterThan(created)
+    // 记录是活引用：先快照数值，再做单调比较
+    const sessionUpdatedAt = withSession.updatedAt
+    const progressed = await ledger.updateProgress(t.id, '跑了一半')
+    expect(progressed.progress).toBe('跑了一半')
+    expect(progressed.updatedAt).toBeGreaterThan(sessionUpdatedAt)
+  })
+})
+
+describe('listActive / listAll / 持久化形状', () => {
+  it('listActive 过滤终态并按创建序，listAll 全量', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput({ title: 'A' }))
+    const b = await ledger.createTask(taskInput({ title: 'B' }))
+    const c = await ledger.createTask(taskInput({ title: 'C' }))
+    await completeFromDraft(ledger, b.id)
+    await ledger.cancel(c.id, '取消')
+    const active = await ledger.listActive()
+    expect(active.map((t: TaskRecord) => t.id)).toEqual([a.id])
+    const all = await ledger.listAll()
+    expect(all.map((t: TaskRecord) => t.id)).toEqual(['T-001', 'T-002', 'T-003'])
+  })
+
+  it('保存的 LedgerFile 带 schemaVersion=1、tasks、nextTaskNumber、questions', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    await ledger.createTask(taskInput())
+    expect(p.file?.schemaVersion).toBe(1)
+    expect(p.file?.tasks).toHaveLength(1)
+    expect(p.file?.nextTaskNumber).toBe(2)
+    expect(Array.isArray(p.file?.questions)).toBe(true)
+  })
+})
+
+describe('persistence 失败：内存回滚', () => {
+  it('createTask 保存失败抛 persistence-failed，内存与 ID 计数器回滚', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    p.failNextSave = true
+    await expect(ledger.createTask(taskInput())).rejects.toMatchObject({ code: 'persistence-failed' })
+    expect(await ledger.listAll()).toEqual([])
+    expect(ledger.get('T-001')).toBeUndefined()
+    const retry = await ledger.createTask(taskInput())
+    expect(retry.id).toBe('T-001')
+  })
+
+  it('transition 保存失败抛 persistence-failed，状态回滚', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.transition(t.id, 'queued')
+    p.failNextSave = true
+    await expect(ledger.transition(t.id, 'dispatched')).rejects.toMatchObject({ code: 'persistence-failed' })
+    expect(ledger.get(t.id)?.status).toBe('queued')
+    await ledger.transition(t.id, 'dispatched')
+    expect(ledger.get(t.id)?.status).toBe('dispatched')
+  })
+
+  it('校验失败（非法迁移）根本不触发 save', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    const saves = p.saveCalls
+    await expect(ledger.transition(t.id, 'completed')).rejects.toBeInstanceOf(LedgerError)
+    expect(p.saveCalls).toBe(saves)
+  })
+})
