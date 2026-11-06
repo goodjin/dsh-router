@@ -88,7 +88,11 @@ function flattenText(input: string): string {
   return input.replace(/\r\n/g, '\n').replace(/[\n\r]/g, ' ').trim()
 }
 
-function docFileName(scope: MemoryScope, key?: string): string {
+/**
+ * 文档相对 rootDir 的路径（POSIX 形状，供 memoryRef 引用与落盘共用）：
+ * sessions/<enc(sessionId)>.md | project.md | global.md
+ */
+export function memoryDocRelPath(scope: MemoryScope, key?: string): string {
   if (scope === 'session') {
     if (!key) throw new Error('MemoryDocStore: session 作用域需要 key=sessionId')
     return `sessions/${encodeURIComponent(key)}.md`
@@ -230,9 +234,9 @@ export class MemoryDocStore {
     this.now = options.now ?? Date.now
   }
 
-  /** 文档路径（相对 rootDir）：sessions/<enc(sessionId)>.md | project.md | global.md。 */
+  /** 文档绝对路径：rootDir + memoryDocRelPath。 */
   private docPath(scope: MemoryScope, key?: string): string {
-    return join(this.rootDir, docFileName(scope, key))
+    return join(this.rootDir, memoryDocRelPath(scope, key))
   }
 
   async readDoc(scope: MemoryScope, key?: string): Promise<MemoryDoc | null> {
@@ -308,6 +312,24 @@ export class MemoryDocStore {
     else doc.summary = trimmed
     doc.updatedAt = at
     await this.writeDoc('session', sessionId, doc)
+  }
+
+  /** 列出已有会话文档的 sessionId（文件名解码回原值）；sessions 目录不存在返回空数组。 */
+  async listSessionIds(): Promise<string[]> {
+    const dir = join(this.rootDir, 'sessions')
+    if (!(await this.fs.exists(dir))) return []
+    const names = await this.fs.readdir(dir)
+    const ids: string[] = []
+    for (const name of names) {
+      if (!name.endsWith('.md')) continue
+      const bare = name.slice(0, -'.md'.length)
+      try {
+        ids.push(decodeURIComponent(bare))
+      } catch {
+        ids.push(bare)
+      }
+    }
+    return ids
   }
 
   private emptyDoc(scope: MemoryScope, key: string | undefined, at: number): MemoryDoc {

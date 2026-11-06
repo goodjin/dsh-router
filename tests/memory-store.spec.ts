@@ -94,6 +94,25 @@ describe('MemoryDocStore 头部读写', () => {
   })
 })
 
+describe('MemoryDocStore 会话清点', () => {
+  it('listSessionIds 列出已有会话文档的 sessionId（解码回原值）；目录不存在返回空数组', async () => {
+    const { fs } = makeMemFs()
+    const store = new MemoryDocStore('/mem-root', fs)
+    expect(await store.listSessionIds()).toEqual([])
+    await store.appendSummary('session', 'a/b', {
+      sourceRefs: [],
+      kind: 'verified-fact',
+      text: '第一条事实：任务验收策略采用宿主 auto 验收策略。',
+    })
+    await store.appendSummary('session', 'plain', {
+      sourceRefs: [],
+      kind: 'verified-fact',
+      text: '第二条事实：合并主干前重跑三门禁全绿再合并。',
+    })
+    expect((await store.listSessionIds()).sort()).toEqual(['a/b', 'plain'])
+  })
+})
+
 describe('MemoryDocStore 写入规则', () => {
   it('低信息门：text 少于 20 字符的条目拒绝写入并返回 skipped=low-info；满 20 字符可写入', async () => {
     const { fs, files } = makeMemFs()
