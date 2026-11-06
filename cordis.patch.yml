@@ -1,0 +1,20 @@
+# @goodjin2/dsh-router 的挂载配置。
+#
+# 现在只有一条装载行，其余待补：
+#
+# 1. 浏览器半边（dsh-router-client）：行名必须是**裸包名** @goodjin2/dsh-router。
+#    DSH 不按 package.json 的 dsh.client 自动装载浏览器包——客户端模块系统扫的是
+#    Loader 的行，只有 name 恰好等于包名时这个包才会进 window.__DSH_BOOT__
+#    （ClientModuleRegistry.resolveMeta 经 locatePkgJson 解析；带子路径的名字不算
+#    浏览器行，会退化成在 node 里 import 浏览器产物，整块静默失效且无报错）。
+#    这一行的 name 导入的是宿主侧空入口（dist/entry.js，只有 name 和空 apply），
+#    浏览器代码经 exports["./client"] → lib/client.js 下发给页面，不进宿主进程。
+#    少了这一行：插件装上也什么都不发生，宿主日志里一个字都没有。
+#
+# TODO（契约研究返回后补）：宿主路由 / 工具（tool）/ 预设（preset）装载行。
+# 补行之后必须跑容器核查脚本确认新行可解析、config 过得了宿主 schema：
+#   node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
+
+- insert:
+    - id: dsh-router-client
+      name: '@goodjin2/dsh-router'

@@ -1,0 +1,12 @@
+node_modules
+package-lock.json
+
+# 产物入库策略（照 dsh-chat-power：浏览器产物与宿主入口产物入库，中间产物不入库）：
+#   lib/client.js(+.map)      浏览器产物，提交
+#   dist/entry.js(+.map)      宿主入口产物，提交
+#   dist/client/ dist/*.d.ts*  tsc 中间产物，只喂 tsdown，不入库——改产物必须重建
+dist/client/
+dist/*.d.ts
+dist/*.d.ts.map
+
+.worktrees/

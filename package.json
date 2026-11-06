@@ -1,0 +1,76 @@
+{
+  "name": "@goodjin2/dsh-router",
+  "version": "0.1.0",
+  "description": "DSH Router：主管 / 工作型 worker 的会话任务编排插件（开发中，当前为可构建骨架）",
+  "type": "module",
+  "main": "./dist/entry.js",
+  "types": "./src/entry.ts",
+  "exports": {
+    ".": {
+      "types": "./src/entry.ts",
+      "default": "./dist/entry.js"
+    },
+    "./client": {
+      "types": "./src/client/index.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "dist",
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsdown",
+    "build:client": "npm run build",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "external": [
+        "@deepseek-ai/dsh-client-ui-sidebar-files",
+        "@deepseek-ai/dsh-client-ui-sidebar-browser",
+        "@deepseek-ai/dsh-client-ui-sidebar-terminal",
+        "@deepseek-ai/dsh-client-ui-sidebar-documentpreview",
+        "react",
+        "react-dom",
+        "react/jsx-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.0-rc.2",
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.2.0",
+    "clsx": "^2.1.1",
+    "lightningcss": "^1.30.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.15.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/goodjin/dsh-router.git"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.2 <0.3"
+  }
+}
