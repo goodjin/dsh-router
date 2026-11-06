@@ -37,7 +37,11 @@ export interface RouterApiDeps {
 /** 四条路由的封装面。 */
 export interface RouterApi {
   getState(workspaceId?: string): Promise<RouterState>
-  createRouterSession(workspaceId: string, name?: string): Promise<{ sessionId: string }>
+  /**
+   * 契约体是 { workspaceId, name? }；templateId 是可选扩展键（模板偏好，
+   * 宿主不识别时忽略）——只在显式给出时上送。
+   */
+  createRouterSession(workspaceId: string, name?: string, templateId?: string): Promise<{ sessionId: string }>
   /** 已答 409 会以 RouterApiError(status=409) 抛出——调用方视为已完成。 */
   postAnswer(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
@@ -115,9 +119,10 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       return body as RouterState
     },
 
-    async createRouterSession(workspaceId: string, name?: string): Promise<{ sessionId: string }> {
+    async createRouterSession(workspaceId: string, name?: string, templateId?: string): Promise<{ sessionId: string }> {
       const payload: Record<string, unknown> = { workspaceId }
       if (typeof name === 'string' && name.length > 0) payload['name'] = name
+      if (typeof templateId === 'string' && templateId.length > 0) payload['templateId'] = templateId
       const body = await postJson(ROUTER_SESSION_PATH, payload)
       const sessionId = (body as { sessionId?: unknown }).sessionId
       if (typeof sessionId !== 'string' || sessionId.length === 0) {

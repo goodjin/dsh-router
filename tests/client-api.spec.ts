@@ -92,6 +92,16 @@ describe('POST /router/router-session', () => {
     })
     await api.createRouterSession('ws-1')
   })
+
+  it('模板偏好是可选扩展键：给了才带 templateId（宿主可忽略）', async () => {
+    const api = createRouterApi({
+      fetch: jsonFetch((_input, init) => {
+        expect(JSON.parse(String(init?.body))).toEqual({ workspaceId: 'ws-1', templateId: 'docs' })
+        return jsonResponse(200, { sessionId: 'r2' })
+      }),
+    })
+    await expect(api.createRouterSession('ws-1', undefined, 'docs')).resolves.toEqual({ sessionId: 'r2' })
+  })
 })
 
 describe('POST /router/answer', () => {
