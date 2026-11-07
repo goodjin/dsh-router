@@ -615,6 +615,10 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async ackRedirect(workspaceId, supersededSessionId) {
       calls.push(`ack:${workspaceId}:${supersededSessionId}`)
     },
+    // v1.2 B3 通知确认桩：本文件用例不触达，仅为满足 deps 形状。
+    async ackNotification() {
+      return false
+    },
     // C3 类型/默认值路由的桩：本文件用例只打工作台五条，桩只为满足 deps 形状。
     async listWorkerTypes() {
       return { types: [] }
