@@ -182,6 +182,40 @@ export interface RouterRedirect {
   supersededSessionId: string
 }
 
+/* ── 统一通知卡（v1.2 Task B3/C1，规格 §5） ── */
+
+/** 通知卡动作集（C1 动作映射的唯一来源；rework = 回 running + 自动 supplement 判定意见）。 */
+export type NotificationActionKind =
+  | 'open-session'
+  | 'view-result'
+  | 'rework'
+  | 'cancel'
+  | 'redispatch'
+  | 'unfreeze'
+  | 'ack'
+
+/** 通知卡上的一个动作按钮。 */
+export interface NotificationAction {
+  action: NotificationActionKind
+  /** 按钮文案（完成/异常卡与问题卡同语言）。 */
+  label: string
+}
+
+/** 一张非阻塞通知卡（完成卡 / 异常卡；kind 区分色彩与动作集）。 */
+export interface NotificationCard {
+  cardId: string
+  kind: 'completion' | 'anomaly'
+  taskId?: string
+  title: string
+  summary: string
+  actions: NotificationAction[]
+  /** 交付来源（规格 §4）：worker 主动提交或系统判定交付；缺省 = worker。 */
+  deliveryOrigin?: 'worker' | 'system-judged'
+  at: number
+  /** 是否已确认（ack 后客户端不再展示，宿主保留供审计）。 */
+  ack: boolean
+}
+
 /** 会话级 Router 系统提示词（v1.1 Task C5，规格 §7）：GET /router/prompt 的返回。 */
 export interface SessionPromptResponse {
   /** 当前生效文本：会话覆盖，无覆盖时 = defaults.routerSystemPrompt。 */
@@ -211,4 +245,9 @@ export interface RouterState {
    * 前每次 state 都带同一条（轮询幂等）；无指令时该键不出现。
    */
   redirect?: RouterRedirect
+  /**
+   * 未确认通知卡投影（v1.2 Task B3/C1）：ack 后从投影消失（宿主保留记录）。
+   * 无未读卡时该键不出现。
+   */
+  notifications?: NotificationCard[]
 }

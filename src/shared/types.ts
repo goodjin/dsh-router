@@ -53,6 +53,11 @@ export interface TaskResult {
   openIssues?: string[]
   /** 首次完成时间（幂等去重的锚点，由账本写入）。 */
   completedAt?: number
+  /**
+   * 交付来源（v1.2 规格 §4）：'worker' = 执行者主动 complete_task（缺省，可省）；
+   * 'system-judged' = 判定器以独立总结落的结果（完成卡可退回重做）。
+   */
+  deliveryOrigin?: 'worker' | 'system-judged'
 }
 
 /** 任务记录（字段清单照计划 Task 1：规格 §2/§7）。 */

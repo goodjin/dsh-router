@@ -29,6 +29,7 @@ import {
   type SummarizeResult,
   type SummaryEvent,
   type SummaryLlm,
+  type SummaryPromptMessage,
 } from './summarizer.ts'
 import type { AppendSummaryResult, MemoryDocStore, MemoryEntryKind } from './store.ts'
 
@@ -228,6 +229,88 @@ export class BackgroundSummarizer {
   scheduledThrough(sessionId: string): number | undefined {
     return this.scheduled.get(sessionId)
   }
+}
+
+/* ────────────────────────── 结果判定（v1.2 规格 §4 第二级） ────────────────────────── */
+
+/** 判定三态：completed=活已干完（没调交付工具）、partial=部分完成、failed=失败/受阻。 */
+export type OutcomeVerdict = 'completed' | 'partial' | 'failed'
+
+/** 一次判定的输出（判定摘要作为 system-judged 交付的 result.summary）。 */
+export interface OutcomeJudgement {
+  verdict: OutcomeVerdict
+  summary: string
+}
+
+export const JUDGE_OUTCOME_SYSTEM_PROMPT = [
+  '你是任务结果判定员。给你一个 worker 会话最近一轮的事件流（用户消息、助手输出），',
+  '判断该任务的实际交付状态。只输出一行 JSON，不要解释：',
+  '{"verdict":"completed|partial|failed","summary":"<不超过 200 字的判定摘要>"}',
+  '三态定义：',
+  '- completed：任务目标已实际完成（即使执行者没有调用完成工具提交）；',
+  '- partial：部分完成——summary 必须说明剩余工作；',
+  '- failed：失败或受阻——summary 必须说明原因；',
+  '- 摘要只写事件流里有依据的结论，不添加事件里没有的内容，不写代码块。',
+].join('\n')
+
+/** 判定提示词（事件提取复用 eventsToSummaryEvents 的形状与截断规则）。 */
+export function buildJudgeOutcomeMessages(events: SummaryEvent[]): SummaryPromptMessage[] {
+  const lines = ['待判定的会话事件（seq 升序，最近一轮）：']
+  for (const event of events) {
+    lines.push(`#${event.seq} [${event.type}] ${event.textExcerpt}`)
+  }
+  lines.push('')
+  lines.push('请输出判定 JSON。')
+  return [
+    { role: 'system', content: JUDGE_OUTCOME_SYSTEM_PROMPT },
+    { role: 'user', content: lines.join('\n') },
+  ]
+}
+
+/**
+ * 解析判定输出：截取首尾大括号做 JSON 解析（模型偶尔包裹文字时仍可救回）；
+ * verdict 必须在三态内、summary 必须非空——否则抛错（调用方按「判定不可用」
+ * 处理，规格 §4：判定失败 → blocked 附判定不可用）。
+ */
+export function parseOutcomeJudgement(raw: string): OutcomeJudgement {
+  const start = raw.indexOf('{')
+  const end = raw.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error(`判定输出不可解析: ${raw.trim().slice(0, 80)}`)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1))
+  } catch {
+    throw new Error(`判定输出不是合法 JSON: ${raw.trim().slice(0, 80)}`)
+  }
+  const record = (typeof parsed === 'object' && parsed !== null ? parsed : {}) as { verdict?: unknown; summary?: unknown }
+  const verdict = record.verdict
+  if (verdict !== 'completed' && verdict !== 'partial' && verdict !== 'failed') {
+    throw new Error(`判定 verdict 非法: ${String(verdict)}`)
+  }
+  const summary = typeof record.summary === 'string' ? record.summary.trim() : ''
+  if (summary === '') throw new Error('判定 summary 为空')
+  return { verdict, summary }
+}
+
+/**
+ * 独立总结判定：复用记忆摘要的 llm 通道（SummaryLlm），输入会话尾部事件，
+ * 输出三态判定。事件无语义文本（空会话等）直接抛错——无从判定就是判定失败。
+ */
+export async function judgeOutcome(
+  sessionId: string,
+  events: readonly unknown[],
+  llm: SummaryLlm,
+  options: { signal?: AbortSignal } = {},
+): Promise<OutcomeJudgement> {
+  const summarized = eventsToSummaryEvents(events)
+  if (summarized.length === 0) {
+    throw new Error(`会话 ${sessionId} 没有可判定的语义事件`)
+  }
+  const messages = buildJudgeOutcomeMessages(summarized)
+  const signal = options.signal ?? new AbortController().signal
+  const raw = (await llm.stream(messages, signal)).trim()
+  if (raw === '') throw new Error('判定模型返回空白')
+  return parseOutcomeJudgement(raw)
 }
 
 /* ────────────────────────── 完成触发 ────────────────────────── */
