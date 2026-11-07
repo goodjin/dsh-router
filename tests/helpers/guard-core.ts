@@ -173,6 +173,8 @@ export interface GuardCoreOptions {
   interruptFace?: AgentInterruptFace
   /** 全局时钟（breaker 默认件与核心记账共用；缺省恒 1000）。 */
   now?: () => number
+  /** worker 生成模式（v1.3 A2/A3；缺省 minimal-face，直通桥的 mode）。 */
+  mode?: 'cache-priority' | 'minimal-face'
 }
 
 export async function guardCoreWith(opts: GuardCoreOptions = {}) {
@@ -195,6 +197,27 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
     workerInstructions: () => '【执行指引】',
     interruptFace: opts.interruptFace,
     signal: new AbortController().signal,
+    mode: opts.mode,
+    // v1.3 A2：类型身份面（GUARD_TEMPLATES 投影；切换卡/身份头取名字与系统提示词）。
+    types: {
+      get: async (templateId) => {
+        const template = GUARD_TEMPLATES.find((entry) => entry.templateId === templateId)
+        if (template === undefined) return undefined
+        return {
+          templateId: template.templateId,
+          name: template.name,
+          description: template.description,
+          role: template.role,
+          models: [],
+          systemPrompt: `你是${template.name}执行者。`,
+          skills: [],
+          enabled: true,
+          origin: 'user' as const,
+          createdAt: 1,
+          updatedAt: 1,
+        }
+      },
+    },
   })
   const relay = new AnswerRelay({ ledger, newId: () => `q-${Math.random()}`, now })
   const driver = fakeDriver()

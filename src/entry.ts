@@ -395,7 +395,27 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     workerInstructions: () => workerInstructionsText(),
     logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
+    // v1.3 A2：worker 生成模式与身份卡已发标记（Review Focus 5 幂等）。
+    mode: config.workerSpawnMode,
+    identityCards: {
+      has: (sessionId: string) => ui.hasIdentityCard(sessionId),
+      mark: (sessionId: string) => ui.markIdentityCardSent(sessionId),
+    },
   })
+
+  /**
+   * Router 身份卡投递（v1.3 A2 规格 §2.2）：两个入口共用——①我们创建的 Router
+   * 会话（POST /router/sessions 成功后）②picker 自建、被去重收编为正主的 Router
+   * 会话（GET /router/state 去重扫描后）。桥内按已发标记幂等，requestId=
+   * identity-<sessionId> 宿主侧再去重；失败只告警不挡主流程（下次 state 再试）。
+   */
+  const deliverRouterCard = async (sessionId: string): Promise<void> => {
+    try {
+      await bridge.deliverRouterIdentityCard(sessionId)
+    } catch (error) {
+      log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
 
   // 动态预设引擎：类型/默认值变更 → unregister+register 增量同步；每次注册的
   // 注销器自接线 ctx.effect（r4 条件①）；Router 动态注册失败回退静态定义。
@@ -735,7 +755,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   ctx.inject?.(['webServer', 'connection'], (child) => {
     registerRouterRoutes(child as RouterRoutesContext, {
       getState: async (workspaceId) => {
-        if (dedup !== undefined) await dedup.resolve()
+        if (dedup !== undefined) {
+          await dedup.resolve()
+          // v1.3 A2：收编补发——正主可能是 picker 自建的 Router 预设会话，
+          // 身份卡由桥按已发标记幂等补发一次（含我们自建的：重启后标记在盘）。
+          for (const canonicalSessionId of dedup.canonicalSessionIds()) {
+            await deliverRouterCard(canonicalSessionId)
+          }
+        }
         const state = await assembled.workbench.state(workspaceId)
         const withRedirect = dedup !== undefined
           ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
@@ -744,7 +771,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         // 合并后由此键承载全部卡）。
         return withRedirect
       },
-      createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
+      createRouterSession: async (workspaceId, name) => {
+        const created = await assembled.workbench.createRouterSession(workspaceId, name)
+        // v1.3 A2 规格 §2.2：Router 会话创建成功后投递一次身份卡（幂等）。
+        await deliverRouterCard(created.sessionId)
+        return created
+      },
       answerQuestion: async (questionId, answers) => {
         await assembled.workbench.answerQuestion(questionId, answers)
         void assembled.refreshSnapshot()

@@ -92,6 +92,11 @@ export function toolsForRole(role: RoleKind): readonly OrchestrationToolName[] {
   return TOOL_NAMES.filter((name) => ROLE_TOOLS[role].includes(name))
 }
 
+/** 一个编排工具的注册描述（身份卡/切换卡的工具清单与注册面同源，不设第二份文本）。 */
+export function orchestrationToolDescription(name: OrchestrationToolName): string {
+  return TOOL_SPECS[name].description
+}
+
 /**
  * 工具行的行级角色（v1.3 A1）：三个真实角色 + 'superset'。
  * 'superset' 注册全部十个工具（cache-priority 统一组合用），执行时按调用方

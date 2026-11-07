@@ -26,6 +26,11 @@ export interface UiStateFile {
   schemaVersion: 1
   routerSessions: { sessionId: string; workspaceId?: string; name: string; createdAt: number }[]
   tabs: { workspaceId: string; sessionId: string; taskId?: string; addedAt: number }[]
+  /**
+   * 已投递过 Router 身份卡的会话 ID（v1.3 A2，Review Focus 5）：落盘幂等标记——
+   * 重启/多次派发都不重发。旧文件缺该字段 = 空表（load 兼容）。
+   */
+  identityCards?: string[]
 }
 
 export interface UiStatePersistence {
@@ -52,6 +57,8 @@ export class UiStateStore {
   private now: () => number
   private routerRows: UiStateFile['routerSessions'] = []
   private tabRows: UiStateFile['tabs'] = []
+  /** 已投递身份卡的会话集（v1.3 A2；hasIdentityCard 同步读）。 */
+  private identityCardSessions = new Set<string>()
   private loaded = false
 
   constructor(persistence: UiStatePersistence, now: () => number = Date.now) {
@@ -66,6 +73,9 @@ export class UiStateStore {
     if (file !== null) {
       this.routerRows = structuredClone(file.routerSessions)
       this.tabRows = structuredClone(file.tabs)
+      this.identityCardSessions = new Set(
+        Array.isArray(file.identityCards) ? file.identityCards.filter((id) => typeof id === 'string' && id !== '') : [],
+      )
     }
     this.loaded = true
   }
@@ -75,6 +85,7 @@ export class UiStateStore {
       schemaVersion: 1,
       routerSessions: structuredClone(this.routerRows),
       tabs: structuredClone(this.tabRows),
+      identityCards: [...this.identityCardSessions],
     }
   }
 
@@ -83,12 +94,14 @@ export class UiStateStore {
     await this.load()
     const backupSessions = structuredClone(this.routerRows)
     const backupTabs = structuredClone(this.tabRows)
+    const backupCards = new Set(this.identityCardSessions)
     mutate()
     try {
       await this.persistence.save(this.currentFile())
     } catch (cause) {
       this.routerRows = backupSessions
       this.tabRows = backupTabs
+      this.identityCardSessions = backupCards
       throw new LedgerError('persistence-failed', `UI 状态保存失败，内存已回滚: ${String(cause)}`, { cause })
     }
   }
@@ -109,6 +122,19 @@ export class UiStateStore {
   /** RouterSessionInfo[]（登记序）。 */
   routerSessions(): RouterSessionRow[] {
     return this.routerRows.map((row) => ({ sessionId: row.sessionId, title: row.name }))
+  }
+
+  /** 该会话是否已投递过 Router 身份卡（同步读；未标记 = false）。 */
+  hasIdentityCard(sessionId: string): boolean {
+    return this.identityCardSessions.has(sessionId)
+  }
+
+  /** 打「已投递身份卡」标记（幂等；重复标记保持单条，落盘持久化）。 */
+  async markIdentityCardSent(sessionId: string): Promise<void> {
+    if (this.identityCardSessions.has(sessionId)) return
+    await this.commit(() => {
+      this.identityCardSessions.add(sessionId)
+    })
   }
 
   /** 加标签（同 workspace+sessionId 已存在则更新 taskId，不新增）。 */

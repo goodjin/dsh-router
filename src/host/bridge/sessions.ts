@@ -11,9 +11,11 @@
 import { LedgerError } from '../ledger/errors.ts'
 import type { TaskLedger } from '../ledger/store.ts'
 import type { TaskRecord } from '../../shared/types.ts'
+import type { WorkerSpawnMode } from '../../shared/types.ts'
 import type { TaskDocStore } from '../docs/task-docs.ts'
 import { parseModelRef } from '../model-ref.ts'
 import { tagInfraFailure } from '../guard/classify.ts'
+import { minimalSwitchHeader, routerIdentityCard, switchCard } from '../prompts/identity-cards.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 宿主会话控制器的最小调用面（r2 §1/§2：sessionController.create/prompt）。 */
@@ -75,6 +77,17 @@ export interface SessionBridgeDeps {
   logger?: { warn(message: string): void }
   /** 执行指引文本（prompts/worker-instructions 的产物）。 */
   workerInstructions(): string
+  /**
+   * worker 生成模式（v1.3 A2/A3；缺省 minimal-face）。决定投递内容形态：
+   * cache-priority = 切换卡+任务书（重投只带任务书）；minimal-face = 简化身份头
+   * + 任务书 + 执行指引（现行格式加头）。
+   */
+  mode?: WorkerSpawnMode
+  /**
+   * Router 身份卡已发标记（v1.3 A2，Review Focus 5；entry 接 UiStateStore）。
+   * 缺席 = 无幂等标记面（照发——宿主 requestId 去重仍兜底）。
+   */
+  identityCards?: { has(sessionId: string): boolean; mark(sessionId: string): Promise<void> }
   /** v1.2 B3：投递成功即回调（判定器武装定时器/重置周期）。 */
   onDelivered?(taskId: string, sessionId: string): void
   /** 投递用的中止信号（缺席时每次调用自造 2 分钟超时）。 */
@@ -121,6 +134,8 @@ export class SessionBridge {
   private interruptFace: SessionBridgeDeps['interruptFace']
   private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
+  private mode: WorkerSpawnMode
+  private identityCards: SessionBridgeDeps['identityCards']
   private onDelivered: SessionBridgeDeps['onDelivered']
   private signal: AbortSignal | undefined
   private running = new Map<string, boolean>()
@@ -137,6 +152,8 @@ export class SessionBridge {
     this.interruptFace = deps.interruptFace
     this.logger = deps.logger
     this.workerInstructions = deps.workerInstructions
+    this.mode = deps.mode ?? 'minimal-face'
+    this.identityCards = deps.identityCards
     this.onDelivered = deps.onDelivered
     this.signal = deps.signal
   }
@@ -208,6 +225,48 @@ export class SessionBridge {
     return undefined
   }
 
+  /** 投递卡片的类型身份（types 面缺席/查不到时回退 templateId 与空提示词）。 */
+  private async typeIdentity(templateId: string): Promise<{ name: string; systemPrompt: string }> {
+    if (this.types !== undefined && templateId !== '') {
+      const record = await this.types.get(templateId)
+      if (record !== undefined) return { name: record.name, systemPrompt: record.systemPrompt }
+    }
+    return { name: templateId === '' ? '执行者' : templateId, systemPrompt: '' }
+  }
+
+  /**
+   * 首发投递正文（v1.3 规格 §2.3/§2.4）：cache-priority = 切换卡（①类型系统
+   * 提示词 ②角色工具清单 ③禁用提醒）+ 任务书全文；minimal-face = 简化身份头 +
+   * 现行格式（任务书 + 执行指引）。
+   */
+  private async firstDeliveryText(record: TaskRecord, book: string): Promise<string> {
+    const identity = await this.typeIdentity(record.templateId ?? '')
+    const role = record.role === 'supervisor' ? 'supervisor' : 'worker'
+    if (this.mode === 'cache-priority') {
+      return `${switchCard(identity, role)}\n${book}`
+    }
+    return `${minimalSwitchHeader(identity, role)}\n${book}\n\n${this.workerInstructions()}`
+  }
+
+  /**
+   * Router 身份卡投递（v1.3 A2）：requestId=identity-<sessionId> 宿主侧幂等，
+   * 已发标记（ui-state，跨重启）跳过；投递成功才打标，失败不打（下次重试时
+   * 同 requestId 在宿主侧去重，不会双发）。
+   */
+  async deliverRouterIdentityCard(sessionId: string): Promise<void> {
+    if (this.identityCards?.has(sessionId)) return
+    await this.host.prompt(
+      {
+        requestId: `identity-${sessionId}`,
+        sessionId,
+        mode: 'queue',
+        content: [{ type: 'text', text: routerIdentityCard() }],
+      },
+      this.hostSignal(),
+    )
+    await this.identityCards?.mark(sessionId)
+  }
+
   /**
    * 派发任务：无会话则建（解析 workspace / 预设、改名），投任务书全文 + 执行指引
    * （requestId 幂等），成功后走状态机到 dispatched。draft 任务经 draft→queued→
@@ -233,13 +292,14 @@ export class SessionBridge {
       await this.pinDefaultModel(fresh, record.templateId ?? '')
     }
     const deliverySessionId: string = sessionId
+    const firstText = await this.firstDeliveryText(record, book)
     await this.tagged('任务书投递失败', () =>
       this.host.prompt(
         {
           requestId: `dispatch-${taskId}-v${record.docVersion}`,
           sessionId: deliverySessionId,
           mode: 'queue',
-          content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
+          content: [{ type: 'text', text: firstText }],
         },
         this.hostSignal(),
       ),
@@ -262,13 +322,16 @@ export class SessionBridge {
     if (record.sessionId === undefined) return { sessionId: undefined }
     const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     const existingSessionId: string = record.sessionId
+    // 重投正文（v1.3 A2 裁定）：cache-priority = 任务书全文（身份已在会话历史，
+    // 不重发切换卡与指引）；minimal-face = 现行格式（任务书 + 执行指引）。
+    const supplementText = this.mode === 'cache-priority' ? book : `${book}\n\n${this.workerInstructions()}`
     await this.tagged('任务书投递失败', () =>
       this.host.prompt(
         {
           requestId: `dispatch-${taskId}-v${record.docVersion}`,
           sessionId: existingSessionId,
           mode: 'queue',
-          content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
+          content: [{ type: 'text', text: supplementText }],
         },
         this.hostSignal(),
       ),

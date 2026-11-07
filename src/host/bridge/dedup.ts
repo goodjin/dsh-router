@@ -189,6 +189,14 @@ export class RouterDedup {
     return this.pending.get(workspaceId)?.[0]
   }
 
+  /**
+   * 已 pin 的正主会话清单（去重跨 workspace；v1.3 A2 供 Router 身份卡的收编
+   * 补发——picker 自建的 Router 会话被 dedup 判定为正主后补发一次身份卡）。
+   */
+  canonicalSessionIds(): readonly string[] {
+    return [...new Set(this.pinnedCanonical.values())]
+  }
+
   /** 客户端消费回执：按被归档会话清掉对应指令（没有匹配就静默）。 */
   ackRedirect(workspaceId: string, supersededSessionId: string): void {
     const queue = this.pending.get(workspaceId)
