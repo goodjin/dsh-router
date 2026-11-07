@@ -123,19 +123,22 @@ function depthOf(ledger: TaskLedger, taskId: string | undefined): number {
 
 /** TaskRecord → TaskCard（role 字段：任务只会以 supervisor/worker 创建）。 */
 function toCard(record: TaskRecord, waiting: number): TaskCard {
-  return {
+  // 可选字段只在有值时进卡：undefined 值的键会被 JSON 序列化静默蒸发，
+  // 输出就不是无损 JSON（v1.1 Task A3 门禁，v1 现场 query_tasks 因此全盲）。
+  const card: TaskCard = {
     taskId: record.id,
     title: record.title,
     goal: record.goal,
     status: record.status,
     role: record.role as 'supervisor' | 'worker',
     templateId: record.templateId ?? '',
-    progress: record.progress,
-    sessionId: record.sessionId,
     waitingQuestions: waiting,
-    parentId: record.parentId,
     docVersion: record.docVersion,
   }
+  if (record.progress !== undefined) card.progress = record.progress
+  if (record.sessionId !== undefined) card.sessionId = record.sessionId
+  if (record.parentId !== undefined) card.parentId = record.parentId
+  return card
 }
 
 export interface RouterCoreAssembly {
@@ -364,7 +367,11 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         }
       }
       await refreshSnapshot()
-      return { accepted: completed.status === 'completed', status: completed.status, pendingFrom }
+      // pendingFrom 只在待验收时进输出：undefined 值的键会被 JSON 序列化蒸发
+      //（v1.1 Task A3 lossless 门禁）。
+      return pendingFrom !== undefined
+        ? { accepted: completed.status === 'completed', status: completed.status, pendingFrom }
+        : { accepted: completed.status === 'completed', status: completed.status }
     },
 
     async reportBlocker(callerSessionId, taskId, reason) {
