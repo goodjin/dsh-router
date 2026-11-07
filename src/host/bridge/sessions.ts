@@ -11,7 +11,7 @@
 import { LedgerError } from '../ledger/errors.ts'
 import type { TaskLedger } from '../ledger/store.ts'
 import type { TaskRecord } from '../../shared/types.ts'
-import type { WorkerSpawnMode } from '../../shared/types.ts'
+import type { WorkerSpawnMode } from '../../shared/view-contract.ts'
 import type { TaskDocStore } from '../docs/task-docs.ts'
 import { parseModelRef } from '../model-ref.ts'
 import { tagInfraFailure } from '../guard/classify.ts'

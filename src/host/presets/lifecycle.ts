@@ -26,7 +26,7 @@ import {
   type PresetDefinition,
   type RowSpec,
 } from './dynamic.ts'
-import type { WorkerSpawnMode } from '../../shared/types.ts'
+import type { WorkerSpawnMode } from '../../shared/view-contract.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** agentPresets 注册表的最小面（r4 §1：register 返回注销器）。 */

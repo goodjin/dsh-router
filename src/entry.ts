@@ -129,7 +129,6 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   breakerWindowMs: number
   breakerInfraThreshold: number
   breakerCreationThreshold: number
-  workerSpawnMode: WorkerSpawnMode
 }
 
 /** 数值钳位：非数值回默认，负数取 0。 */
@@ -179,7 +178,7 @@ export function spawnModeOr(value: unknown): WorkerSpawnMode {
 }
 
 /** 防御性解析（导出仅为测试与将来复用）：缺省补默认、枚举外回默认、负数取 0。 */
-function resolveRootConfig(raw: unknown): ResolvedRootConfig {
+export function resolveRootConfig(raw: unknown): ResolvedRootConfig {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return {
@@ -193,7 +192,6 @@ function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
     // v1.3 C2（规格 §1）：防御性解析——两枚举值之外一律回默认 cache-priority
     //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
-    workerSpawnMode: spawnModeOr(source.workerSpawnMode),
     summarizationProvider: stringOr(source.summarizationProvider, ''),
     summarizationModel: stringOr(source.summarizationModel, ''),
     questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),

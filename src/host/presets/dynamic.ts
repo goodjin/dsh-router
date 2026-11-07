@@ -23,7 +23,7 @@
 
 import { routerPrompt } from '../prompts/router.ts'
 import { unifiedPrompt } from '../prompts/unified.ts'
-import type { WorkerSpawnMode } from '../../shared/types.ts'
+import type { WorkerSpawnMode } from '../../shared/view-contract.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 一条声明行（与 validate-row.ts 的 RowSpec 兼容，另含组行字段）。 */
