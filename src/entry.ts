@@ -55,7 +55,7 @@ import {
   type SessionObservationLike,
 } from './host/memory/adapter.ts'
 import type { FsAdapter } from './shared/fs-adapter.ts'
-import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
+import type { SpawnModeResponse, WorkerSpawnMode, WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD, type BreakerVisibility } from './host/guard/breaker.ts'
 import { DispatchBudgets } from './host/guard/budgets.ts'
 import { FirstRequestCacheObserver } from './host/observability.ts'
@@ -115,6 +115,11 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   maxActiveCards: number
   perTypeConcurrency: number
   maxDepth: number
+  routerPreset: string
+  supervisorPreset: string
+  workerPreset: string
+  /** worker 派生模式（v1.3 C2）：volatile，运行时经 /router/spawn-mode 可改。 */
+  workerSpawnMode: WorkerSpawnMode
   summarizationProvider: string
   summarizationModel: string
   questionBudget: number
@@ -159,7 +164,8 @@ function templatesOr(value: unknown): WorkerTemplate[] {
   return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES
 }
 
-function resolveRootConfig(raw: unknown): ResolvedRootConfig {
+/** 防御性解析（导出仅为测试与将来复用）：缺省补默认、枚举外回默认、负数取 0。 */
+export function resolveRootConfig(raw: unknown): ResolvedRootConfig {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   return {
@@ -171,6 +177,9 @@ function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     routerPreset: stringOr(source.routerPreset, 'dsh-router'),
     supervisorPreset: stringOr(source.supervisorPreset, 'dsh-router-supervisor'),
     workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
+    // v1.3 C2（规格 §1）：防御性解析——两枚举值之外一律回默认 cache-priority
+    //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
+    workerSpawnMode: source.workerSpawnMode === 'minimal-face' ? 'minimal-face' : 'cache-priority',
     summarizationProvider: stringOr(source.summarizationProvider, ''),
     summarizationModel: stringOr(source.summarizationModel, ''),
     questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
@@ -234,6 +243,12 @@ function jsonFilePersistence<T>(path: string): {
 export function apply(ctx: RootContext, rawConfig: unknown): void {
   const config = resolveRootConfig(rawConfig)
   const log = ctx.logger?.(name) ?? { info: (m: string) => console.info(`[${name}] ${m}`), warn: (m: string) => console.warn(`[${name}] ${m}`) }
+
+  // v1.3 C2：worker 派生模式的运行时值（规格 §1 volatile）。初值 = 启动配置；
+  // 设置页 POST 即改（即时生效，存量任务/会话不受影响）；不落盘——宿主重启
+  // 回到启动配置值（要常驻用宿主设置页改 workerSpawnMode 配置）。
+  let currentSpawnMode: WorkerSpawnMode = config.workerSpawnMode
+  const spawnMode = (): WorkerSpawnMode => currentSpawnMode
 
   const fs = fsAdapter()
   const ledger = new TaskLedger(jsonFilePersistence<LedgerFile>(join(config.dataDir, 'ledger.json')))
@@ -783,6 +798,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         // 覆盖能力」的回归路径。
         defaultsText = saved.routerSystemPrompt
         return saved
+      },
+      // v1.3 C2 spawn-mode（规格 §1 volatile）：内存易变 holder——POST 即时生效
+      // 不落盘，宿主重启回到启动配置值（要常驻用宿主设置页改 workerSpawnMode
+      // 配置）。Part A 的组合引擎/分叉创建消费同一 holder（读 spawnMode()）。
+      getSpawnMode: async (): Promise<SpawnModeResponse> => ({ mode: spawnMode() }),
+      saveSpawnMode: async (mode: WorkerSpawnMode): Promise<SpawnModeResponse> => {
+        currentSpawnMode = mode
+        return { mode: spawnMode() }
       },
       // 会话级系统提示词（v1.1 C5）：读带 isDefault 标记；写空串 = 清除回落
       // 默认。写后下一轮 system prompt 组装即生效（section text 每轮现读）。

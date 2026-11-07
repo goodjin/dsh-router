@@ -23,11 +23,13 @@ import type {
   RouterDefaults,
   RouterState,
   SessionPromptResponse,
+  SpawnModeResponse,
   TypesCreateRequest,
   TypesEnabledRequest,
   TypesItemResponse,
   TypesListResponse,
   TypesUpdateRequest,
+  WorkerSpawnMode,
   WorkerTypeRecord,
 } from '../shared/view-contract.ts'
 
@@ -44,6 +46,8 @@ export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 /** Router 默认值（规格 §6）：GET 读 / POST 写。 */
 export const ROUTER_NOTIFICATIONS_ACK_PATH = '/router/notifications/ack'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
+/** worker 派生模式（v1.3 C2，规格 §1）：GET 读 / POST 写（volatile，即时生效）。 */
+export const ROUTER_SPAWN_MODE_PATH = '/router/spawn-mode'
 /** 会话级 Router 系统提示词（v1.1 C5，规格 §7）：GET 读 / PUT 写（空串=清除回落默认）。 */
 export const ROUTER_PROMPT_PATH = '/router/prompt'
 /** 用户发起的任务控制（v1.2 Task B4）：镜像 control_task + 用户专属 redispatch。 */
@@ -93,6 +97,10 @@ export interface RouterRoutesDeps {
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
+  /** 读当前生效的 worker 派生模式（v1.3 C2；volatile：重启后回到启动配置值）。 */
+  getSpawnMode(): Promise<SpawnModeResponse>
+  /** 写 worker 派生模式（即时生效；合法值由路由层守卫，非两枚举值 400）。 */
+  saveSpawnMode(mode: WorkerSpawnMode): Promise<SpawnModeResponse>
   /** 通知卡确认（v1.2 B3/C1）：消费后清除展示。 */
   ackNotification(cardId: string): Promise<boolean>
   /** 会话级系统提示词（v1.1 C5）：读当前生效文本 + 是否默认标记。 */
@@ -325,6 +333,21 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
       throw new LedgerError('bad-request', 'routerSystemPrompt 与 routerModel(字符串) 必填')
     }
     const saved = await deps.saveDefaults({ routerSystemPrompt: body['routerSystemPrompt'], routerModel: body['routerModel'] })
+    return { status: 200, body: JSON.stringify(saved) }
+  })
+
+  /* ── worker 派生模式（v1.3 Task C2，规格 §1）：GET 读 / POST 写 ── */
+
+  handle(ROUTER_SPAWN_MODE_PATH, ['GET', 'POST'], async (request) => {
+    if (request.method === 'GET') {
+      return { status: 200, body: JSON.stringify(await deps.getSpawnMode()) }
+    }
+    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    const mode = body['mode']
+    if (mode !== 'cache-priority' && mode !== 'minimal-face') {
+      throw new LedgerError('bad-request', "mode 必须是 'cache-priority' | 'minimal-face' 之一")
+    }
+    const saved = await deps.saveSpawnMode(mode)
     return { status: 200, body: JSON.stringify(saved) }
   })
 

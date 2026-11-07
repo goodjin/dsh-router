@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
-import { Config as rootConfig, inject, name } from '../src/entry.ts'
+import { Config as rootConfig, inject, name, resolveRootConfig } from '../src/entry.ts'
 import {
   HOVER_DARKEN_FILTER,
   hoverDarkenStyle,
@@ -36,6 +36,18 @@ describe('宿主侧入口 src/entry.ts', () => {
     expect(() => rootConfig({ maxDepth: 5, maxActiveCards: 20, templates: [
       { templateId: 'coder', name: '编码', description: '', role: 'worker' },
     ] })).not.toThrow()
+  })
+
+  it('workerSpawnMode（v1.3 C2）：两合法值过校验、非法值拒；防御性解析缺省/非法回 cache-priority', () => {
+    expect(() => rootConfig({ workerSpawnMode: 'cache-priority' })).not.toThrow()
+    expect(() => rootConfig({ workerSpawnMode: 'minimal-face' })).not.toThrow()
+    expect(() => rootConfig({ workerSpawnMode: 'bogus' as unknown as 'cache-priority' })).toThrow()
+    // 运行时默认由 resolveRootConfig 兜底（Schemastery union 的缺省物化行为
+    // 随宿主版本浮动，插件自己保证：缺省/非法一律 cache-priority）。
+    expect(resolveRootConfig({}).workerSpawnMode).toBe('cache-priority')
+    expect(resolveRootConfig({ workerSpawnMode: 'minimal-face' }).workerSpawnMode).toBe('minimal-face')
+    expect(resolveRootConfig({ workerSpawnMode: 'bogus' }).workerSpawnMode).toBe('cache-priority')
+    expect(resolveRootConfig(undefined).workerSpawnMode).toBe('cache-priority')
   })
 })
 

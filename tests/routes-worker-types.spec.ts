@@ -29,6 +29,7 @@ import type {
   RouterDefaults,
   TypesCreateRequest,
   TypesUpdateRequest,
+  WorkerSpawnMode,
   WorkerTypeRecord,
 } from '../src/shared/view-contract.ts'
 
@@ -263,6 +264,13 @@ function fakeDeps(factories?: {
       synced.push('router-preset')
       return saved
     },
+    // v1.3 C2 spawn-mode 桩：本文件用例不触达，只为满足 deps 形状。
+    async getSpawnMode() {
+      return { mode: 'cache-priority' as const }
+    },
+    async saveSpawnMode(mode: WorkerSpawnMode) {
+      return { mode }
+    },
   }
 }
 
@@ -276,7 +284,7 @@ function handlerOf(routes: Array<{ path: string; handler: unknown }>, path: stri
 /* ────────────────────────── 断言 ────────────────────────── */
 
 describe('worker 类型路由（C3）', () => {
-  it('新 exact 路由全部挂上（C3 七条 + C5 会话提示词一条 + B4 控制三条）', () => {
+  it('新 exact 路由全部挂上（C3 七条 + C5 会话提示词一条 + B4 控制三条 + v1.3 C2 spawn-mode）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -290,6 +298,7 @@ describe('worker 类型路由（C3）', () => {
       '/router/worker-types/enabled',
       '/router/notifications/ack',
       '/router/defaults',
+      '/router/spawn-mode',
       '/router/prompt',
       '/router/tasks/control',
       '/router/breaker/unfreeze',

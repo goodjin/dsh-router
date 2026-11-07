@@ -940,6 +940,9 @@ describe('POST /router/notifications/ack（C1 只消费）', () => {
       removeWorkerType: async () => {},
       getDefaults: async () => ({ routerSystemPrompt: '', routerModel: '' }),
       saveDefaults: async (value) => value,
+      // v1.3 C2 spawn-mode 桩：本文件用例不触达，只为满足 deps 形状。
+      getSpawnMode: async () => ({ mode: 'cache-priority' as const }),
+      saveSpawnMode: async (mode) => ({ mode }),
       getSessionPrompt: async () => ({ prompt: '', isDefault: true }),
       saveSessionPrompt: async () => {},
       ackNotification: async (cardId: string) => store.ack(cardId),

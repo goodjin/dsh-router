@@ -92,7 +92,8 @@ function templatesOr(value) {
     }
     return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES;
 }
-function resolveRootConfig(raw) {
+/** 防御性解析（导出仅为测试与将来复用）：缺省补默认、枚举外回默认、负数取 0。 */
+export function resolveRootConfig(raw) {
     const source = (typeof raw === 'object' && raw !== null ? raw : {});
     const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
     return {
@@ -104,6 +105,9 @@ function resolveRootConfig(raw) {
         routerPreset: stringOr(source.routerPreset, 'dsh-router'),
         supervisorPreset: stringOr(source.supervisorPreset, 'dsh-router-supervisor'),
         workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
+        // v1.3 C2（规格 §1）：防御性解析——两枚举值之外一律回默认 cache-priority
+        //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
+        workerSpawnMode: source.workerSpawnMode === 'minimal-face' ? 'minimal-face' : 'cache-priority',
         summarizationProvider: stringOr(source.summarizationProvider, ''),
         summarizationModel: stringOr(source.summarizationModel, ''),
         questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
@@ -163,6 +167,11 @@ function jsonFilePersistence(path) {
 export function apply(ctx, rawConfig) {
     const config = resolveRootConfig(rawConfig);
     const log = ctx.logger?.(name) ?? { info: (m) => console.info(`[${name}] ${m}`), warn: (m) => console.warn(`[${name}] ${m}`) };
+    // v1.3 C2：worker 派生模式的运行时值（规格 §1 volatile）。初值 = 启动配置；
+    // 设置页 POST 即改（即时生效，存量任务/会话不受影响）；不落盘——宿主重启
+    // 回到启动配置值（要常驻用宿主设置页改 workerSpawnMode 配置）。
+    let currentSpawnMode = config.workerSpawnMode;
+    const spawnMode = () => currentSpawnMode;
     const fs = fsAdapter();
     const ledger = new TaskLedger(jsonFilePersistence(join(config.dataDir, 'ledger.json')));
     const docStores = new Map();
@@ -688,6 +697,14 @@ export function apply(ctx, rawConfig) {
                 // 覆盖能力」的回归路径。
                 defaultsText = saved.routerSystemPrompt;
                 return saved;
+            },
+            // v1.3 C2 spawn-mode（规格 §1 volatile）：内存易变 holder——POST 即时生效
+            // 不落盘，宿主重启回到启动配置值（要常驻用宿主设置页改 workerSpawnMode
+            // 配置）。Part A 的组合引擎/分叉创建消费同一 holder（读 spawnMode()）。
+            getSpawnMode: async () => ({ mode: spawnMode() }),
+            saveSpawnMode: async (mode) => {
+                currentSpawnMode = mode;
+                return { mode: spawnMode() };
             },
             // 会话级系统提示词（v1.1 C5）：读带 isDefault 标记；写空串 = 清除回落
             // 默认。写后下一轮 system prompt 组装即生效（section text 每轮现读）。

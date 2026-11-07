@@ -125,6 +125,19 @@ export interface RouterDefaults {
   routerModel: string
 }
 
+/**
+ * worker 派生模式（v1.3 规格 §1，配置项 workerSpawnMode，默认 cache-priority）。
+ * cache-priority = 三预设统一组合 + 宿主分叉继承来源模型/历史 + 前缀缓存可命中；
+ * minimal-face = 各预设最小工具白名单 + 类型钉模型 + 无缓存复用（历史仍完整继承）。
+ * 两模式切换是配置级：存量任务/会话不受影响。
+ */
+export type WorkerSpawnMode = 'cache-priority' | 'minimal-face'
+
+/** GET/POST /router/spawn-mode 的请求体（POST）与响应（两侧同形）。 */
+export interface SpawnModeResponse {
+  mode: WorkerSpawnMode
+}
+
 /* ── Worker 类型管理路由的请求/响应类型（v1.1 Task C3；命名与路由对齐） ── */
 
 /** 类型可编辑字段的补丁（POST /router/worker-types/update 的 patch；只含可改字段）。 */

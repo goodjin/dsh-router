@@ -19,6 +19,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { RouterApi } from './api.ts'
 import type { ClientPrefsStore } from './client-prefs.ts'
 import {
+  SPAWN_MODE_MODEL_HINT,
   canDisableRecord,
   canEditRecord,
   canRemoveRecord,
@@ -29,6 +30,8 @@ import {
   originLabel,
   roleLabel,
   skillCatalogOf,
+  spawnModeDescription,
+  spawnModeLabel,
   typeManageReducer,
   validateTypeForm,
   type TypeFormState,
@@ -37,7 +40,7 @@ import {
 import { SETTINGS_ID, SETTINGS_ORDER, SETTINGS_SLOT } from './surface-ids.ts'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 import type { SlotsHost } from './workbench-tabs.tsx'
-import type { WorkerTypeRecord } from '../shared/view-contract.ts'
+import type { WorkerSpawnMode, WorkerTypeRecord } from '../shared/view-contract.ts'
 
 /** 组件的业务输入。 */
 export interface SettingsFace {
@@ -553,8 +556,13 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
   const reload = useCallback(async (): Promise<void> => {
     dispatch({ type: 'load-start' })
     try {
-      const [types, defaults] = await Promise.all([props.api.listWorkerTypes(), props.api.getDefaults()])
+      const [types, defaults, spawn] = await Promise.all([
+        props.api.listWorkerTypes(),
+        props.api.getDefaults(),
+        props.api.getSpawnMode(),
+      ])
       dispatch({ type: 'loaded', types, defaults })
+      dispatch({ type: 'spawn-loaded', mode: spawn.mode })
     } catch (caught) {
       dispatch({ type: 'load-failed', message: caught instanceof Error ? caught.message : String(caught) })
     }
@@ -593,6 +601,18 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
     }
   }
 
+  /** 切派生模式（v1.3 C2）：选择即保存（volatile，即时生效；失败保旧值提示）。 */
+  async function changeSpawnMode(mode: WorkerSpawnMode): Promise<void> {
+    if (state.spawnMode === null) return
+    dispatch({ type: 'spawn-save-start' })
+    try {
+      const saved = await props.api.saveSpawnMode(mode)
+      dispatch({ type: 'spawn-save-done', mode: saved.mode })
+    } catch (caught) {
+      dispatch({ type: 'spawn-failed', message: caught instanceof Error ? caught.message : String(caught) })
+    }
+  }
+
   const modelCatalog = modelCatalogOf(state.types)
   const skillCatalog = skillCatalogOf(state.types)
 
@@ -620,7 +640,41 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
         </div>
       </div>
 
-      {/* 2. Worker 类型管理（规格 §6） */}
+      {/* 2. 派生模式（v1.3 C2，规格 §1）：双模式选择器 + 两模式语义 + 切模型即换缓存提示 */}
+      <div style={CARD_STYLE} data-router-spawn-section>
+        <div style={SECTION_TITLE_STYLE}>
+          <strong>派生模式</strong>
+          {state.spawnMode !== null ? <span style={TAG_STYLE} data-router-spawn-current>{spawnModeLabel(state.spawnMode)}</span> : null}
+        </div>
+        <label style={FIELD_LABEL_STYLE}>
+          <span>worker 派生方式（改动即时生效；不影响存量任务与已建会话）</span>
+          <select
+            data-router-spawn-mode
+            style={FIELD_STYLE}
+            value={state.spawnMode ?? ''}
+            disabled={state.spawnBusy || state.spawnMode === null}
+            onChange={(event) => {
+              const value = event.target.value
+              if (value === 'cache-priority' || value === 'minimal-face') void changeSpawnMode(value)
+            }}
+          >
+            {state.spawnMode === null ? <option value="">加载中…</option> : null}
+            <option value="cache-priority">{spawnModeLabel('cache-priority')}</option>
+            <option value="minimal-face">{spawnModeLabel('minimal-face')}</option>
+          </select>
+        </label>
+        {state.spawnMode !== null ? (
+          <div style={NOTE_STYLE} data-router-spawn-description>{spawnModeDescription(state.spawnMode)}</div>
+        ) : null}
+        <div style={NOTE_STYLE} data-router-spawn-model-hint>{SPAWN_MODE_MODEL_HINT}</div>
+        <div style={NOTE_STYLE}>
+          此开关为运行时值（volatile）：保存即生效、不落盘，宿主重启后回到启动配置的
+          workerSpawnMode 值；要常驻生效请在宿主设置页改本插件的 workerSpawnMode 配置项。
+        </div>
+        {state.spawnError !== null ? <div style={PROBLEM_STYLE} data-router-spawn-error>保存失败（保留原模式）：{state.spawnError}</div> : null}
+      </div>
+
+      {/* 3. Worker 类型管理（规格 §6） */}
       <div style={CARD_STYLE} data-router-types-section>
         <div style={SECTION_TITLE_STYLE}>
           <strong>Worker 类型</strong>
@@ -675,7 +729,7 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
         </div>
       </div>
 
-      {/* 3. Router 默认区（规格 §6） */}
+      {/* 4. Router 默认区（规格 §6） */}
       {state.defaultsDraft !== null ? (
         <div style={CARD_STYLE} data-router-defaults-section>
           <div style={SECTION_TITLE_STYLE}>
