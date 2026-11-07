@@ -33,7 +33,7 @@ import { TaskLedger } from "./host/ledger/store.js";
 import { TaskDocStore } from "./host/docs/task-docs.js";
 import { Scheduler } from "./host/ledger/scheduler.js";
 import { SessionBridge } from "./host/bridge/sessions.js";
-import { AnswerRelay } from "./host/bridge/questions.js";
+import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from "./host/bridge/questions.js";
 import { UiStateStore } from "./host/bridge/tabs.js";
 import { RouterDedup, stateWithRedirect } from "./host/bridge/dedup.js";
 import { CompactionDriver } from "./host/context/compaction-driver.js";
@@ -52,8 +52,6 @@ export const name = '@goodjin2/dsh-router';
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
  *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets'];
-/** 提问预算的缺省上限（v1.1 规格 §3.6；root-config 的 questionBudget 可调）。 */
-const DEFAULT_QUESTION_BUDGET = 2;
 /** 数值钳位：非数值回默认，负数取 0。 */
 function nonNegative(value, fallback) {
     if (typeof value !== 'number' || !Number.isFinite(value))

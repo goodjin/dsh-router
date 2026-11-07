@@ -28,7 +28,7 @@ import { TaskLedger, type LedgerFile, type LedgerPersistence } from './host/ledg
 import { TaskDocStore } from './host/docs/task-docs.ts'
 import { Scheduler } from './host/ledger/scheduler.ts'
 import { SessionBridge, type WorkspaceInfo } from './host/bridge/sessions.ts'
-import { AnswerRelay } from './host/bridge/questions.ts'
+import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
 import { RouterDedup, stateWithRedirect, type SessionSnapshotLike } from './host/bridge/dedup.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
@@ -60,9 +60,6 @@ export const name = '@goodjin2/dsh-router'
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
  *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets']
-
-/** 提问预算的缺省上限（v1.1 规格 §3.6；root-config 的 questionBudget 可调）。 */
-const DEFAULT_QUESTION_BUDGET = 2
 
 /** 宿主上下文的最小面（窄接口；webServer/connection 走机会式注入）。 */
 interface RootContext {
