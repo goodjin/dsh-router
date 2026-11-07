@@ -12,7 +12,15 @@
  * fetch 可注入：默认 globalThis.fetch，测试给假实现。
  */
 
-import type { AskUserQuestionAnswerItem, RouterState } from '../shared/view-contract.ts'
+import type {
+  AskUserQuestionAnswerItem,
+  RouterDefaults,
+  RouterState,
+  TypesCreateRequest,
+  TypesEnabledRequest,
+  TypesUpdateRequest,
+  WorkerTypeRecord,
+} from '../shared/view-contract.ts'
 
 /** 请求失败（网络/超时/HTTP 错误体）；status 是 HTTP 状态码（超时/网络错时缺省）。 */
 export class RouterApiError extends Error {
@@ -48,6 +56,16 @@ export interface RouterApi {
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
   /** 消费去重指令的回执（v1.1 Task C4）：幂等，失败抛 RouterApiError。 */
   ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
+  /* ── v1.1 Task C3：worker 类型 / Router 默认值管理（api 只增函数） ── */
+  /** 全量类型记录（含禁用与 builtin），设置管理栏目消费。 */
+  listWorkerTypes(): Promise<WorkerTypeRecord[]>
+  createWorkerType(input: TypesCreateRequest): Promise<WorkerTypeRecord>
+  updateWorkerType(request: TypesUpdateRequest): Promise<WorkerTypeRecord>
+  setWorkerTypeEnabled(request: TypesEnabledRequest): Promise<WorkerTypeRecord>
+  /** 删除类型（builtin 拒 409，错误带 status 透出给 UI）。 */
+  removeWorkerType(templateId: string): Promise<void>
+  getDefaults(): Promise<RouterDefaults>
+  saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
@@ -58,6 +76,11 @@ export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
 export const ROUTER_REDIRECT_ACK_PATH = '/router/redirect/ack'
+/** v1.1 Task C3：worker 类型 / Router 默认值（与宿主 routes 一侧逐字对齐）。 */
+export const WORKER_TYPES_PATH = '/router/worker-types'
+export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
+export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
+export const ROUTER_DEFAULTS_PATH = '/router/defaults'
 
 function defaultFetch(): FetchLike {
   return (input, init) => globalThis.fetch(input, init)
@@ -125,6 +148,19 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
     })
   }
 
+  function deleteJson(path: string): Promise<unknown> {
+    return request(path, { method: 'DELETE', headers: { accept: 'application/json' } })
+  }
+
+  /** {type} 响应的解包（缺 type 即协议错误）。 */
+  function unwrapType(body: unknown): WorkerTypeRecord {
+    const type = (body as { type?: unknown } | null)?.type
+    if (type === null || typeof type !== 'object') {
+      throw new RouterApiError('router: worker-type response missing type')
+    }
+    return type as WorkerTypeRecord
+  }
+
   return {
     async getState(workspaceId?: string): Promise<RouterState> {
       const query = typeof workspaceId === 'string' && workspaceId.length > 0
@@ -157,6 +193,43 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
 
     async ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void> {
       await postJson(ROUTER_REDIRECT_ACK_PATH, { workspaceId, supersededSessionId })
+    },
+
+    /* ── v1.1 Task C3：worker 类型 / Router 默认值 ── */
+
+    async listWorkerTypes(): Promise<WorkerTypeRecord[]> {
+      const body = await request(WORKER_TYPES_PATH, { headers: { accept: 'application/json' } })
+      const types = (body as { types?: unknown } | null)?.types
+      if (!Array.isArray(types)) throw new RouterApiError('router: worker-types response missing types')
+      return types as WorkerTypeRecord[]
+    },
+
+    async createWorkerType(input: TypesCreateRequest): Promise<WorkerTypeRecord> {
+      return unwrapType(await postJson(WORKER_TYPES_PATH, input as unknown as Record<string, unknown>))
+    },
+
+    async updateWorkerType(req: TypesUpdateRequest): Promise<WorkerTypeRecord> {
+      return unwrapType(await postJson(WORKER_TYPES_UPDATE_PATH, req as unknown as Record<string, unknown>))
+    },
+
+    async setWorkerTypeEnabled(req: TypesEnabledRequest): Promise<WorkerTypeRecord> {
+      return unwrapType(await postJson(WORKER_TYPES_ENABLED_PATH, req as unknown as Record<string, unknown>))
+    },
+
+    async removeWorkerType(templateId: string): Promise<void> {
+      await deleteJson(`${WORKER_TYPES_PATH}?templateId=${encodeURIComponent(templateId)}`)
+    },
+
+    async getDefaults(): Promise<RouterDefaults> {
+      const body = await request(ROUTER_DEFAULTS_PATH, { headers: { accept: 'application/json' } })
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
+      return body as RouterDefaults
+    },
+
+    async saveDefaults(value: RouterDefaults): Promise<RouterDefaults> {
+      const body = await postJson(ROUTER_DEFAULTS_PATH, value as unknown as Record<string, unknown>)
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
+      return body as RouterDefaults
     },
   }
 }
