@@ -137,7 +137,7 @@ export class NotificationStore implements NotificationSink {
           break
         }
       }
-      const dropAt = oldestAcked >= 0 ? oldestAcked : 0
+      const dropAt = oldestAcked >= 0 ? oldestAcked : this.cards.length - 1
       this.cards.splice(dropAt, 1)
     }
   }
