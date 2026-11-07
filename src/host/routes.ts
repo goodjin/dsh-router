@@ -21,6 +21,8 @@ import type {
   RouterState,
   TypesCreateRequest,
   TypesEnabledRequest,
+  TypesItemResponse,
+  TypesListResponse,
   TypesUpdateRequest,
   WorkerTypeRecord,
 } from '../shared/view-contract.ts'
@@ -62,10 +64,10 @@ export interface RouterRoutesDeps {
   /** 消费回执：清掉该 workspace 上指向被归档会话的 redirect 指令（幂等）。 */
   ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
   /** Worker 类型管理（v1.1 C3）：读全量记录（含禁用与 builtin）。 */
-  listWorkerTypes(): Promise<{ types: WorkerTypeRecord[] }>
-  createWorkerType(input: TypesCreateRequest): Promise<{ type: WorkerTypeRecord }>
-  updateWorkerType(request: TypesUpdateRequest): Promise<{ type: WorkerTypeRecord }>
-  setWorkerTypeEnabled(request: TypesEnabledRequest): Promise<{ type: WorkerTypeRecord }>
+  listWorkerTypes(): Promise<TypesListResponse>
+  createWorkerType(input: TypesCreateRequest): Promise<TypesItemResponse>
+  updateWorkerType(request: TypesUpdateRequest): Promise<TypesItemResponse>
+  setWorkerTypeEnabled(request: TypesEnabledRequest): Promise<TypesItemResponse>
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
