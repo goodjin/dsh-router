@@ -48,6 +48,8 @@ export type LedgerErrorCode =
   | 'invalid-input'
   /** C2 类型工具：类型存储未接线（WorkerTypesFace.createRouterType 缺席）。 */
   | 'types-unavailable'
+  /** v1.2 熔断器：派发全局冻结（规格 §2；解除仅用户）。 */
+  | 'dispatch-frozen'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

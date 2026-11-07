@@ -25,6 +25,12 @@ export interface RouterRootConfig {
   summarizationModel?: string
   /** 每任务澄清提问批次数上限（v1.1 规格 §3.6；缺省 2）。 */
   questionBudget?: number
+  /** 熔断滑动窗宽毫秒（v1.2 规格 §2；缺省 600000 = 10 分钟）。 */
+  breakerWindowMs?: number
+  /** 熔断条件 a 阈值：infra 失败次数（缺省 3）。 */
+  breakerInfraThreshold?: number
+  /** 熔断条件 b 阈值：窗口内创建任务数且零完成（缺省 10）。 */
+  breakerCreationThreshold?: number
 }
 
 import type { WorkerTemplate } from '../shared/view-contract.ts'
@@ -42,6 +48,9 @@ export const Config = Schema.object({
   summarizationProvider: Schema.string().default('').volatile(),
   summarizationModel: Schema.string().default('').volatile(),
   questionBudget: Schema.number().default(2).volatile(),
+  breakerWindowMs: Schema.number().default(600_000).volatile(),
+  breakerInfraThreshold: Schema.number().default(3).volatile(),
+  breakerCreationThreshold: Schema.number().default(10).volatile(),
   templates: Schema.array(
     Schema.object({
       templateId: Schema.string().required(),

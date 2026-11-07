@@ -48,6 +48,7 @@ import { DynamicPresetEngine } from "./host/presets/lifecycle.js";
 import { MemoryDocStore } from "./host/memory/store.js";
 import { search as searchMemory } from "./host/memory/retrieval.js";
 import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
+import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from "./host/guard/breaker.js";
 export { Config } from "./host/root-config.js";
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router';
@@ -100,6 +101,9 @@ function resolveRootConfig(raw) {
         summarizationProvider: stringOr(source.summarizationProvider, ''),
         summarizationModel: stringOr(source.summarizationModel, ''),
         questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
+        breakerWindowMs: nonNegative(source.breakerWindowMs, DEFAULT_BREAKER_WINDOW_MS),
+        breakerInfraThreshold: nonNegative(source.breakerInfraThreshold, DEFAULT_INFRA_THRESHOLD),
+        breakerCreationThreshold: nonNegative(source.breakerCreationThreshold, DEFAULT_CREATION_THRESHOLD),
         templates: templatesOr(source.templates),
     };
 }
@@ -164,6 +168,17 @@ export function apply(ctx, rawConfig) {
         return store;
     };
     const ui = new UiStateStore(jsonFilePersistence(join(config.dataDir, 'ui-state.json')));
+    // 全局派发熔断器（v1.2 规格 §2）：状态落 <dataDir>/guard-state.json，宿主重启
+    // 恢复冻结态（启动 effect 里自报）；窗口/阈值可配（root-config）。
+    const breaker = new CircuitBreaker({
+        fs,
+        path: join(config.dataDir, 'guard-state.json'),
+        now: () => Date.now(),
+        windowMs: config.breakerWindowMs,
+        infraThreshold: config.breakerInfraThreshold,
+        creationThreshold: config.breakerCreationThreshold,
+        logger: { warn: (message) => log.warn(message) },
+    });
     // worker 类型存储 + Router 默认值（v1.1 规格 §5/§6；首启种子化导入 v1 Config
     // 模板后 legacyImported 落盘，v1 templates 配置通道退役）。
     const typeStore = new WorkerTypeStore(fs, join(config.dataDir, 'worker-types.json'), {
@@ -452,6 +467,7 @@ export function apply(ctx, rawConfig) {
         maxActiveCards: config.maxActiveCards,
         tasksDir: config.tasksDir,
         memory: memoryFace,
+        breaker,
         logger: { warn: (message) => log.warn(message) },
     });
     // 供预设树的工具行 / 上下文行 / prompt-section 行经作用域链注入；memory 一并挂上（brief 形状）。
@@ -505,6 +521,13 @@ export function apply(ctx, rawConfig) {
             const recovered = await assembled.recoverOrphans();
             if (recovered.length > 0)
                 log.warn(`重启恢复：${recovered.length} 个待答问题已失效，对应任务标为受阻`);
+            // 熔断状态恢复自报（规格 §2：宿主重启恢复冻结态；冻结时一切派发被拒，
+            // 直至用户解除）。
+            const guardState = await breaker.state();
+            if (guardState.frozen) {
+                const frozenAt = guardState.frozenAt !== undefined ? new Date(guardState.frozenAt).toISOString() : '未知时间';
+                log.warn(`重启恢复：派发已冻结（${guardState.reason ?? '原因未记录'}，冻结于 ${frozenAt}）——请停止重试并向用户报告，直至用户解除`);
+            }
             await assembled.refreshSnapshot();
             log.info('routerCore 就绪');
         })();

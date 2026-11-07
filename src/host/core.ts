@@ -27,6 +27,8 @@ import type {
   RouterTypeCreateInput,
 } from './core-types.ts'
 import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
+import type { CircuitBreaker } from './guard/breaker.ts'
+import { classifyDispatchFailure } from './guard/classify.ts'
 import type {
   AskUserQuestionAnswerItem,
   QuestionCard,
@@ -129,6 +131,10 @@ export interface RouterCoreAssemblyDeps {
   memory?: RouterMemory
   /** 派发失败等非致命问题的日志口（缺席静默）。 */
   logger?: { warn(message: string): void }
+  /** 全局派发熔断器（v1.2 Task B1；缺席 = 不熔断，只走 v1.1 per-task 语义）。 */
+  breaker?: CircuitBreaker
+  /** 熔断事件记账时钟（缺省 Date.now）。 */
+  now?: () => number
 }
 
 /** Router 工作台面（HTTP 路由消费）。 */
@@ -203,7 +209,7 @@ export function assertTemplateUsable(templateId: string, enabledTypes: readonly 
   throw error
 }
 
-/** 派发失败的统一处理：记账（progress + retryCount，达上限自动 blocked）并通知 Router。 */
+/** 派发失败的统一处理：分类上报熔断（v1.2 B1）、记账（progress + retryCount，达上限自动 blocked）并通知 Router。 */
 async function recordDispatchFailure(
   deps: RouterCoreAssemblyDeps,
   ledger: TaskLedger,
@@ -212,6 +218,10 @@ async function recordDispatchFailure(
   error: unknown,
   notifyRouterSession: string | undefined,
 ): Promise<TaskRecord> {
+  // v1.2 规格 §1：失败先分类——infra（会话创建/挂载/投递失败）计入熔断器，
+  // task 类只走既有 per-task 重试，不进熔断计数。
+  const verdict = classifyDispatchFailure(error)
+  await deps.breaker?.recordFailure({ taskId, at: (deps.now ?? (() => Date.now()))(), class: verdict.class })
   const message = error instanceof Error ? error.message : String(error)
   const failed = await ledger.recordDispatchFailure(taskId, `派发失败: ${message}`, { blockAt: DISPATCH_RETRY_CAP })
   if (failed.status === 'blocked' && notifyRouterSession !== undefined) {
@@ -302,6 +312,20 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     })
   }
 
+  /** 记账时钟（熔断事件时间戳；缺省 Date.now）。 */
+  const now = deps.now ?? (() => Date.now())
+
+  /** 熔断冻结拒绝的统一文案（规格 §2：明确告知停止重试并向用户报告）。 */
+  const frozenRejection = (reason: string | undefined): LedgerError =>
+    new LedgerError('dispatch-frozen', `派发已冻结（${reason ?? '原因未记录'}）：请停止重试并向用户报告`)
+
+  /** 熔断冻结时一切派发被拦（dispatch_task / create_worker_type 共用入口检查）。 */
+  const assertDispatchOpen = async (): Promise<void> => {
+    if (deps.breaker === undefined) return
+    const state = await deps.breaker.state()
+    if (state.frozen) throw frozenRejection(state.reason)
+  }
+
   /**
    * 当前启用类型的实时清单：类型存储在册时用它的同步投影（WorkerTypeStore 在
    * 启动装载后维护），缺席退回 v1 Config 模板（降级兼容）。
@@ -320,6 +344,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
 
     async createWorkerType(callerSessionId, input) {
       void callerSessionId // 创建不依赖调用方任务归属；角色由工具白名单保证（router 专属）
+      await assertDispatchOpen() // v1.2 规格 §2：冻结时 create_worker_type 同拦
       const face = deps.types
       if (face?.createRouterType === undefined) {
         throw new LedgerError('types-unavailable', '类型存储未接线（WorkerTypesFace.createRouterType 缺席），无法现场创建 worker 类型')
@@ -330,6 +355,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     },
 
     async dispatchTask(callerSessionId, input) {
+      await assertDispatchOpen() // v1.2 规格 §2：冻结时一切派发被拦
       assertTemplateUsable(input.templateId, enabledTemplates())
       const callerTask = await taskBySession(callerSessionId)
       const callerRole: RoleKind = callerTask?.role ?? 'router'
@@ -360,6 +386,8 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const docs = deps.docsFor(record.cwd)
       const book = renderTaskBook(record, { materials: input.materials, sourceRef: `router 会话 ${callerSessionId}` })
       const docPath = await docs.initTask(record, book)
+      // v1.2 规格 §2 条件 b：创建进熔断计数（任务 ID 集合对窗口；完成清基准）。
+      await deps.breaker?.recordCreation(record.id, now())
       try {
         const { sessionId } = await bridge.dispatchTask(record.id)
         // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
@@ -532,7 +560,9 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         pendingFrom = completed.acceptancePolicy === 'user' ? 'user' : 'supervisor'
       }
       if (completed.status === 'completed' && !wasTerminal) {
-        // 首次完成（幂等重提不重复广播）：记忆触发 + 通知上级 + 解锁依赖自动派发
+        // 首次完成（幂等重提不重复广播）：熔断创建基准清除（v1.2 B1）+ 记忆触发
+        // + 通知上级 + 解锁依赖自动派发
+        await deps.breaker?.recordCompletion(taskId, now())
         deps.memory?.onTaskCompleted({
           taskId,
           title: record.title,
