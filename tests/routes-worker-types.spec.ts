@@ -202,6 +202,10 @@ function fakeDeps(factories?: {
       if (text === '') await usedPrompts.clear(sessionId)
       else await usedPrompts.set(sessionId, text)
     },
+    // v1.2 B3 通知确认桩：本文件用例不触达。
+    async ackNotification() {
+      return false
+    },
     async getState() {
       return {
         routerSessions: [], tasks: [], questions: [], tabs: [],
