@@ -54,6 +54,18 @@ describe('routerPrompt', () => {
     expect(routerPrompt).toMatch(/不建任务|不要建任务|不派发/)
   })
 
+  it('派发通道准则（v1.3 A4 规格 §3.4）：轻→子代理、重/持久→分叉 worker', () => {
+    expect(routerPrompt).toMatch(/轻(活|量)?[^。]{0,40}子代理/)
+    expect(routerPrompt).toMatch(/重(活|型)?[^。]{0,20}持久|持久[^。]{0,20}worker|才建任务/)
+    expect(routerPrompt).toContain('subagent')
+  })
+
+  it('cache 模式说明（v1.3 A4）：类型提示词经切换卡生效；类型 models 仅展示', () => {
+    expect(routerPrompt).toContain('切换卡')
+    expect(routerPrompt).toMatch(/models|模型/)
+    expect(routerPrompt).toMatch(/systemPrompt/)
+  })
+
   it('用户不是执行器（v1.1 C6 规格 §3.5）：不得要求用户跑命令/粘贴输出/报告系统状态', () => {
     expect(routerPrompt).toMatch(/不得要求|不要要求|禁止/)
     expect(routerPrompt).toMatch(/运行命令|跑命令|执行命令/)
@@ -85,6 +97,17 @@ describe('supervisorPrompt', () => {
     expect(supervisorPrompt).toMatch(/结果.{0,12}(随|以).{0,6}(完成通知|通知)|完成通知/)
     expect(supervisorPrompt).toMatch(/多轮|提问|持久/)
     expect(supervisorPrompt).toMatch(/worker/)
+  })
+
+  it('通道轻重准则（v1.3 A4 规格 §3.4）：轻→子代理、重/持久→分叉 worker 成对出现', () => {
+    expect(supervisorPrompt).toMatch(/轻[^。]{0,40}子代理/)
+    expect(supervisorPrompt).toMatch(/重[^。]{0,40}(worker|分叉)|持久[^。]{0,40}worker/)
+  })
+
+  it('cache 模式说明（v1.3 A4）：分叉 worker 的类型提示词经切换卡生效、models 仅展示', () => {
+    expect(supervisorPrompt).toContain('切换卡')
+    expect(supervisorPrompt).toMatch(/systemPrompt/)
+    expect(supervisorPrompt).toMatch(/models|模型/)
   })
 
   it('子代理语义（r6 §4）：spawn 空会话起步提示词自包含；明说不要依赖 list_agents（0.2.1 无此工具）', () => {
