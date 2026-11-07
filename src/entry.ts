@@ -58,6 +58,7 @@ import type { FsAdapter } from './shared/fs-adapter.ts'
 import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD, type BreakerVisibility } from './host/guard/breaker.ts'
 import { DispatchBudgets } from './host/guard/budgets.ts'
+import { FirstRequestCacheObserver } from './host/observability.ts'
 
 import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from './host/guard/emergency.ts'
 
@@ -685,6 +686,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     void assembled.refreshSnapshot()
     return outcome
   }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
+
+  // 缓存命中观测（v1.3 C1，规格 §4 / r11）：根作用域 session/event 放行向上，
+  // 一个监听器收所有会话的落账事件——过滤任务会话首条 assistant/message 的
+  // data.usage.cacheReadTokens 记进账本任务（fire-and-forget，观测不挡事件流）。
+  const cacheObserver = new FirstRequestCacheObserver({ ledger, logger: { warn: (message) => log.warn(message) } })
+  ctx.on('session/event', ((session: unknown, event: unknown) => {
+    void cacheObserver.onSessionEvent(session, event)
+  }) as unknown as (...args: unknown[]) => unknown)
 
   // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
   // 状态装载 + 账本孤儿问题清理 + 快照缓存预热 + 会话提示词覆盖装载。

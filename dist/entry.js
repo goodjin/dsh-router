@@ -53,6 +53,7 @@ import { search as searchMemory } from "./host/memory/retrieval.js";
 import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from "./host/guard/breaker.js";
 import { DispatchBudgets } from "./host/guard/budgets.js";
+import { FirstRequestCacheObserver } from "./host/observability.js";
 import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from "./host/guard/emergency.js";
 export { Config } from "./host/root-config.js";
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
@@ -591,6 +592,13 @@ export function apply(ctx, rawConfig) {
         void assembled.refreshSnapshot();
         return outcome;
     }), { prepend: true });
+    // 缓存命中观测（v1.3 C1，规格 §4 / r11）：根作用域 session/event 放行向上，
+    // 一个监听器收所有会话的落账事件——过滤任务会话首条 assistant/message 的
+    // data.usage.cacheReadTokens 记进账本任务（fire-and-forget，观测不挡事件流）。
+    const cacheObserver = new FirstRequestCacheObserver({ ledger, logger: { warn: (message) => log.warn(message) } });
+    ctx.on('session/event', ((session, event) => {
+        void cacheObserver.onSessionEvent(session, event);
+    }));
     // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
     // 状态装载 + 账本孤儿问题清理 + 快照缓存预热 + 会话提示词覆盖装载。
     ctx.effect(() => {

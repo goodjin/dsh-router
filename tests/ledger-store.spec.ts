@@ -408,3 +408,28 @@ describe('recordDispatchFailure：派发失败记账（v1.1 A4）', () => {
     expect(again.retryCount).toBe(3)
   })
 })
+
+describe('recordFirstCacheRead：首请求缓存命中记账（v1.3 C1）', () => {
+  it('写入 firstRequestCacheReadTokens 并落盘', async () => {
+    const persistence = new MemoryPersistence()
+    const ledger = new TaskLedger(persistence, stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.recordFirstCacheRead(t.id, 5632)
+    expect(ledger.get(t.id)?.firstRequestCacheReadTokens).toBe(5632)
+    const saved = persistence.file?.tasks.find((task) => task.id === t.id)
+    expect(saved?.firstRequestCacheReadTokens).toBe(5632)
+  })
+
+  it('一次性语义：已有值不覆盖（观察器只对首条调用，账本层兜底防覆盖）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.recordFirstCacheRead(t.id, 5632)
+    await ledger.recordFirstCacheRead(t.id, 99999)
+    expect(ledger.get(t.id)?.firstRequestCacheReadTokens).toBe(5632)
+  })
+
+  it('任务不存在 → task-not-found', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    await expect(ledger.recordFirstCacheRead('T-999', 100)).rejects.toMatchObject({ code: 'task-not-found' })
+  })
+})

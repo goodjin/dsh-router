@@ -25,6 +25,11 @@ export interface TaskCard {
   sessionId?: string
   /** 该任务当前待回答的问题数（open 状态）。 */
   waitingQuestions: number
+  /**
+   * 首请求缓存命中量（v1.3 C1，规格 §4）：任务会话首条 assistant/message 的
+   * usage.cacheReadTokens。缺省 = 适配器未上报（客户端显示「未上报」，不冒充 0）。
+   */
+  firstRequestCacheReadTokens?: number
   parentId?: string
   docVersion: number
 }

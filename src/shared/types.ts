@@ -94,6 +94,12 @@ export interface TaskRecord {
   docVersion: number
   /** 完成记录（首次完成的快照，幂等去重返回它）。 */
   result?: TaskResult
+  /**
+   * 首请求缓存命中量（v1.3 C1，规格 §4）：任务会话首条 assistant/message 的
+   * `data.usage.cacheReadTokens`。缺省 = 适配器未上报（「未上报」如实投影，
+   * 不冒充 0——pi-ai 路径命中为 0 时省略字段，r11 §5）。
+   */
+  firstRequestCacheReadTokens?: number
   acceptancePolicy: AcceptancePolicy
   createdAt: number
   updatedAt: number

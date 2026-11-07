@@ -182,6 +182,8 @@ function toCard(record: TaskRecord, waiting: number): TaskCard {
   if (record.progress !== undefined) card.progress = record.progress
   if (record.sessionId !== undefined) card.sessionId = record.sessionId
   if (record.parentId !== undefined) card.parentId = record.parentId
+  // v1.3 C1：首请求缓存命中量，未上报不进卡（undefined 键会被 JSON 蒸发，lossless）
+  if (record.firstRequestCacheReadTokens !== undefined) card.firstRequestCacheReadTokens = record.firstRequestCacheReadTokens
   return card
 }
 
@@ -623,11 +625,16 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         // 首次完成（幂等重提不重复广播）：熔断创建基准清除（v1.2 B1）+ 记忆触发
         // + 通知上级 + 解锁依赖自动派发
         await deps.breaker?.recordCompletion(taskId, now())
+        // v1.3 C1：完成卡摘要可选带「首请求缓存命中 X tok」——已上报才带
+        //（未上报不出现该行，不动既有卡结构语义）。
+        const cacheLine = completed.firstRequestCacheReadTokens !== undefined
+          ? `\n首请求缓存命中 ${completed.firstRequestCacheReadTokens} tok`
+          : ''
         await deps.notifications?.push({
           kind: 'completion',
           taskId,
           title: record.title,
-          summary: input.summary,
+          summary: `${input.summary}${cacheLine}`,
           actions: completionActions(),
           deliveryOrigin: input.deliveryOrigin ?? 'worker',
         })
