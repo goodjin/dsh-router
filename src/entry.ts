@@ -602,10 +602,16 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       }
     },
     prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)) as Promise<{ accepted: boolean }>,
-    sessionState: (sessionId) => (ctx.sessionController as {
-      state?: (id: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
-    }).state?.(sessionId),
-    agentsGet: (sessionId) => ctx.agents.get(sessionId) as { status?: string } | undefined,
+    sessionState: (sessionId) => {
+      const state = (ctx.sessionController as {
+        state?: (id: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
+      }).state
+      return state === undefined ? undefined : state(sessionId)
+    },
+    agentsGet: (sessionId) => {
+      const agent = ctx.agents.get(sessionId) as { status?: string } | undefined
+      return agent === undefined || agent.status === undefined ? undefined : { status: agent.status }
+    },
     llm: summaryLlm,
     core: {
       completeTask: (caller, taskId, input) => assembled.core.completeTask(caller, taskId, input),

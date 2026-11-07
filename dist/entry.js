@@ -515,8 +515,14 @@ export function apply(ctx, rawConfig) {
             }
         },
         prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)),
-        sessionState: (sessionId) => ctx.sessionController.state?.(sessionId),
-        agentsGet: (sessionId) => ctx.agents.get(sessionId),
+        sessionState: (sessionId) => {
+            const state = ctx.sessionController.state;
+            return state === undefined ? undefined : state(sessionId);
+        },
+        agentsGet: (sessionId) => {
+            const agent = ctx.agents.get(sessionId);
+            return agent === undefined || agent.status === undefined ? undefined : { status: agent.status };
+        },
         llm: summaryLlm,
         core: {
             completeTask: (caller, taskId, input) => assembled.core.completeTask(caller, taskId, input),
