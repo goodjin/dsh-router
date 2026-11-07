@@ -200,3 +200,8 @@ export function notificationChipSummary(cardData: NotificationCard, maxSummaryLe
 export function notificationsFromState(state: RouterState): readonly NotificationCard[] {
   return state.notifications ?? []
 }
+
+/** 紧急按钮态：出现带 unfreeze 动作的异常卡 = 已冻结（并列解除按钮）。 */
+export function emergencyButtonState(cards: readonly NotificationCard[]): { frozen: boolean } {
+  return { frozen: cards.some((card) => card.actions.some((action) => action.action === 'unfreeze')) }
+}

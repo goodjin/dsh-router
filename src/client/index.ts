@@ -30,6 +30,7 @@ import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
 import { registerCreateRouter } from './create-router.tsx'
 import { registerPromptAction, registerPromptEditor } from './prompt-editor.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
+import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
 import { registerWorkbenchTabs } from './workbench-tabs.tsx'
 import type { SlotsHost } from './workbench-tabs.tsx'
@@ -148,6 +149,11 @@ export function apply(ctx?: PluginContext): void {
   }
   try {
     registerQuestionCards(slotsHost, { store, prefs, uiWorkspace })
+  } catch (error) {
+    log.warn(`notification overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    registerNotificationCards(slotsHost, { store, api, uiWorkspace })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

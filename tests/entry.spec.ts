@@ -90,13 +90,14 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
   })
 
-  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 三个注册项 + header.actions 一项）', () => {
+  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 四个注册项 + header.actions 一项）', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
     // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮 + 提示词编辑浮层三个注册项；
     // conversation.session.header.actions 是提示词按钮（v1.1 C5，仅 Router 会话渲染）。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
+      'shell.overlay',
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
@@ -109,6 +110,7 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(ids).toContain('router-question-overlay')
     expect(ids).toContain('router-back-button')
     expect(ids).toContain('router-prompt-editor')
+    expect(ids).toContain('router-notification-overlay')
     expect(ids).toContain('router-prompt-action')
     expect(ids).toContain('router-create-entry')
     expect(ids).toContain('router-settings')

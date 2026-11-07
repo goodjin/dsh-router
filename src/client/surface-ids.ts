@@ -20,6 +20,12 @@ export const BACK_BUTTON_SLOT = 'shell.overlay'
 export const BACK_BUTTON_ID = 'router-back-button'
 export const BACK_BUTTON_ORDER = 35
 
+/** 统一通知卡浮窗（list、root、frame 级浮层——同槽位第四项，v1.2 C1）：
+ *  完成/异常卡 + 列顶「紧急暂停/解除冻结」按钮（裁定：常驻全局可见）。 */
+export const NOTIFICATION_OVERLAY_SLOT = 'shell.overlay'
+export const NOTIFICATION_OVERLAY_ID = 'router-notification-overlay'
+export const NOTIFICATION_OVERLAY_ORDER = 37
+
 /** 系统提示词编辑浮层（list、root、frame 级浮层——同槽位第三项，v1.1 C5）。 */
 export const PROMPT_EDITOR_SLOT = 'shell.overlay'
 export const PROMPT_EDITOR_ID = 'router-prompt-editor'

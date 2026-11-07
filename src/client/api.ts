@@ -46,6 +46,14 @@ export interface RouterApiDeps {
 
 /** 五条路由的封装面。 */
 export interface RouterApi {
+  /** 通知确认（v1.2 C1）：消费后服务端从 pending 移除。 */
+  ackNotification(cardId: string): Promise<void>
+  /** 任务控制（v1.2 C2）：pause/resume/cancel/redispatch；用户发起绕过模型侧预算。 */
+  controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch'): Promise<{ status: string }>
+  /** 熔断解除（v1.2 C2）。 */
+  unfreezeBreaker(): Promise<{ before: { frozen: boolean }; after: { frozen: boolean } }>
+  /** 紧急暂停（v1.2 C2）：冻结 + 逐会话中断 + 逐项结果。 */
+  emergencyPause(): Promise<{ frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }>
   getState(workspaceId?: string): Promise<RouterState>
   /**
    * 契约体是 { workspaceId, name? }；templateId 是可选扩展键（模板偏好，
@@ -89,6 +97,10 @@ export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
 /** v1.1 Task C5：会话级 Router 系统提示词（与宿主 routes 一侧逐字对齐）。 */
 export const ROUTER_PROMPT_PATH = '/router/prompt'
+export const ROUTER_NOTIFICATIONS_ACK_PATH = '/router/notifications/ack'
+export const ROUTER_TASKS_CONTROL_PATH = '/router/tasks/control'
+export const ROUTER_BREAKER_UNFREEZE_PATH = '/router/breaker/unfreeze'
+export const ROUTER_EMERGENCY_PAUSE_PATH = '/router/emergency-pause'
 
 function defaultFetch(): FetchLike {
   return (input, init) => globalThis.fetch(input, init)
@@ -254,6 +266,30 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
         headers: { accept: 'application/json', 'content-type': 'application/json' },
         body: JSON.stringify({ sessionId, prompt }),
       })
+    },
+
+    /* ── v1.2 C1/C2：通知确认与用户控制 ── */
+
+    async ackNotification(cardId: string): Promise<void> {
+      await postJson(ROUTER_NOTIFICATIONS_ACK_PATH, { cardId })
+    },
+
+    async controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch'): Promise<{ status: string }> {
+      const body = await postJson(ROUTER_TASKS_CONTROL_PATH, { taskId, action })
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: control response missing body')
+      return body as { status: string }
+    },
+
+    async unfreezeBreaker(): Promise<{ before: { frozen: boolean }; after: { frozen: boolean } }> {
+      const body = await postJson(ROUTER_BREAKER_UNFREEZE_PATH, {})
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: unfreeze response missing body')
+      return body as { before: { frozen: boolean }; after: { frozen: boolean } }
+    },
+
+    async emergencyPause(): Promise<{ frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }> {
+      const body = await postJson(ROUTER_EMERGENCY_PAUSE_PATH, {})
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: emergency-pause response missing body')
+      return body as { frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }
     },
   }
 }

@@ -27,6 +27,7 @@ import {
   notificationChipSummary,
   syncedNotifications,
   toggleNotificationCollapsed,
+  emergencyButtonState,
 } from '../src/client/notification-model.ts'
 import type {
   NotificationCard,
@@ -281,5 +282,17 @@ describe('notificationChipSummary：收起 chip 一行摘要', () => {
 
   it('摘要为空时只给任务名', () => {
     expect(notificationChipSummary(card('K-1', { summary: '' }))).toBe('写发布文档')
+  })
+})
+
+describe('emergencyButtonState：紧急按钮态（v1.2 C2 裁定：常驻通知列顶部）', () => {
+  it('无冻结异常卡 → 未冻结（显示「紧急暂停」）', () => {
+    expect(emergencyButtonState([card('K-1')]).frozen).toBe(false)
+    expect(emergencyButtonState([]).frozen).toBe(false)
+  })
+
+  it('出现带 unfreeze 动作的异常卡 → 已冻结（并列「解除冻结」）', () => {
+    const frozenCard = card('K-9', { kind: 'anomaly', actions: [{ action: 'unfreeze', label: '解除冻结' }] })
+    expect(emergencyButtonState([card('K-1'), frozenCard]).frozen).toBe(true)
   })
 })

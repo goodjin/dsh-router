@@ -309,6 +309,7 @@ describe('lib/client.js 是页面能装的产物', () => {
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
+      'shell.overlay',
       'sidebar.footer.action',
     ].sort())
     const ids = captured.registered.map((entry) => entry.id)
