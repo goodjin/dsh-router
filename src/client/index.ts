@@ -14,6 +14,7 @@
  * 表面清单（键名以 R3 报告为准，集中在 surface-ids.ts）：
  * - conversation.header.leading  → 会话导航标签条（Router 固定首位）
  * - shell.overlay                → worker 问题浮窗（收起 chip + 展开表单）
+ * - shell.overlay                → 「返回 Router」浮动按钮（worker/主管会话时显示）
  * - sidebar.footer.action        → 「新建 Router」入口
  * - settings.section             → 插件设置段（只读 + 预留写通道）
  *
@@ -22,6 +23,7 @@
  */
 
 import { createRouterApi } from './api.ts'
+import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
 import { registerCreateRouter } from './create-router.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
@@ -85,7 +87,7 @@ function makeLogger(ctx: PluginContext): { info(message: string): void; warn(mes
 export function apply(ctx?: PluginContext): void {
   const safeCtx: PluginContext = ctx ?? {}
   const log = makeLogger(safeCtx)
-  const message = 'Router client loaded — workbench tabs / question overlay / create entry / settings section'
+  const message = 'Router client loaded — workbench tabs / question overlay / back button / create entry / settings section'
   log.info(message)
 
   const slots = safeCtx.slots
@@ -95,7 +97,7 @@ export function apply(ctx?: PluginContext): void {
   }
   const slotsHost = slots as SlotsHost
   if (safeCtx.uiWorkspace === undefined || typeof safeCtx.uiWorkspace.openSession !== 'function') {
-    log.warn('uiWorkspace service unavailable — tab switching and create-open disabled')
+    log.warn('uiWorkspace service unavailable — tab switching, back button and create-open disabled')
   }
   const uiWorkspace = safeCtx.uiWorkspace?.openSession !== undefined
     ? safeCtx.uiWorkspace
@@ -135,16 +137,21 @@ export function apply(ctx?: PluginContext): void {
     log.warn('uiSession service unavailable — active tab mapping disabled')
   }
 
-  // 四个表面：各自独立，失败互不牵连。
+  // 五个表面：各自独立，失败互不牵连。
   try {
     registerWorkbenchTabs(slotsHost, { store, uiWorkspace })
   } catch (error) {
     log.warn(`workbench tabs failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
-    registerQuestionCards(slotsHost, { store, prefs })
+    registerQuestionCards(slotsHost, { store, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    registerBackButton(slotsHost, { store, uiWorkspace })
+  } catch (error) {
+    log.warn(`back button failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
     registerCreateRouter(slotsHost, { store, api, uiWorkspace, workspacesList: safeCtx.workspaces?.list })

@@ -10,8 +10,17 @@
  */
 
 import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
 import { Config as rootConfig, inject, name } from '../src/entry.ts'
+import {
+  HOVER_DARKEN_FILTER,
+  hoverDarkenStyle,
+  LightTooltip,
+  LIGHT_TOOLTIP_STYLE,
+  useHoverDarken,
+} from '../src/client/ui-kit.tsx'
 
 describe('宿主侧入口 src/entry.ts', () => {
   it('name 是裸包名；必需服务在 inject 里（缺席 fail loud）', () => {
@@ -81,11 +90,13 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
   })
 
-  it('apply 注册全部四个表面：键名正确、id 各自独立', () => {
+  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 两个注册项）', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
+    // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮两个注册项，inject 出现两次。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
+      'shell.overlay',
       'shell.overlay',
       'sidebar.footer.action',
       'conversation.header.leading',
@@ -93,6 +104,7 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toContain('router-workbench-tabs')
     expect(ids).toContain('router-question-overlay')
+    expect(ids).toContain('router-back-button')
     expect(ids).toContain('router-create-entry')
     expect(ids).toContain('router-settings')
     expect(new Set(ids).size).toBe(ids.length)
@@ -119,5 +131,33 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(warns.join(' ')).not.toBe('')
     expect(() => clientApply(undefined)).not.toThrow()
     expect(() => clientApply({})).not.toThrow()
+  })
+})
+
+describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用）', () => {
+  it('LightTooltip / useHoverDarken / hoverDarkenStyle 是函数，样式常量在', () => {
+    expect(typeof LightTooltip).toBe('function')
+    expect(typeof useHoverDarken).toBe('function')
+    expect(typeof hoverDarkenStyle).toBe('function')
+    expect(typeof LIGHT_TOOLTIP_STYLE).toBe('object')
+    expect(LIGHT_TOOLTIP_STYLE).not.toBeNull()
+    expect(typeof HOVER_DARKEN_FILTER).toBe('string')
+    expect(String(LIGHT_TOOLTIP_STYLE.background)).toMatch(/^#[0-9a-f]{6}$/i)
+  })
+
+  it('浏览器面全部组件不再用原生 title 悬浮提示（规格 §9 禁原生黑浮层）', () => {
+    const files = [
+      'back-button.tsx',
+      'create-router.tsx',
+      'question-cards.tsx',
+      'settings.tsx',
+      'ui-kit.tsx',
+      'workbench-tabs.tsx',
+    ]
+    for (const file of files) {
+      const source = readFileSync(fileURLToPath(new URL(`../src/client/${file}`, import.meta.url)), 'utf8')
+      const hits = source.match(/\stitle="/g)
+      expect(hits, `${file} 还有原生 title 悬浮提示（应换 ui-kit 的 LightTooltip）`).toBeNull()
+    }
   })
 })

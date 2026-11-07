@@ -15,6 +15,7 @@ import type { RouterApi } from './api.ts'
 import type { WorkspacesListLike, WorkbenchStore } from './workbench-store.ts'
 import { CREATE_ENTRY_ID, CREATE_ENTRY_ORDER, CREATE_ENTRY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
+import { LightTooltip } from './ui-kit.tsx'
 import type { WorkerTemplate } from '../shared/view-contract.ts'
 
 /** 组件的业务输入。 */
@@ -175,16 +176,18 @@ export function CreateRouterButton(props: CreateRouterProps): ReactNode {
 
   if (!open) {
     return (
-      <button
-        type="button"
-        data-router-create-entry
-        title="新建 Router 会话"
-        style={BUTTON_STYLE}
-        onClick={() => { void openForm() }}
-      >
-        <span aria-hidden>＋</span>
-        <span>Router</span>
-      </button>
+      // 浅色悬浮提示替代原生 title（规格 §9 禁黑底原生浮层）。
+      <LightTooltip label="新建 Router 会话">
+        <button
+          type="button"
+          data-router-create-entry
+          style={BUTTON_STYLE}
+          onClick={() => { void openForm() }}
+        >
+          <span aria-hidden>＋</span>
+          <span>Router</span>
+        </button>
+      </LightTooltip>
     )
   }
   return (

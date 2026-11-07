@@ -9,6 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   buildAnswerItems,
+  chipClickAction,
   chipSummary,
   cardsReceived,
   emptyBoard,
@@ -209,6 +210,18 @@ describe('buildAnswerItems：草稿 → 官方答案词汇（user-questions 编�
         { id: 'q1', selected: ['B'] },
         { id: 'q2', selected: [] },
       ])
+  })
+})
+
+describe('chipClickAction：chip 点击动作（规格 §8：点击 = 展开 + 跳到该 worker 会话）', () => {
+  it('返回 expand-and-open 动作，sessionId 取卡上的 worker 会话', () => {
+    expect(chipClickAction(card('QA'))).toEqual({ type: 'expand-and-open', sessionId: 'w-1' })
+  })
+
+  it('不同卡各自带自己的 sessionId（跳到提问的 worker，不是当前会话）；纯函数不改卡', () => {
+    const probe = card('QB', { sessionId: 'w-9' })
+    expect(chipClickAction(probe)).toEqual({ type: 'expand-and-open', sessionId: 'w-9' })
+    expect(probe).toEqual(card('QB', { sessionId: 'w-9' }))
   })
 })
 

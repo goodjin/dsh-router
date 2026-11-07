@@ -153,6 +153,18 @@ export function chipSummary(card: QuestionCard, maxChars = 20): string {
   return first.length > maxChars ? `${first.slice(0, maxChars)}…` : first
 }
 
+/** chip 点击动作（规格 §8）：展开本卡 + 跳到该问题所属的 worker 会话作答。 */
+export type QuestionChipAction = { type: 'expand-and-open'; sessionId: string }
+
+/**
+ * chip 点击 → 动作（纯函数，只读卡数据）：collapsed 翻转仍走 toggleCollapsed，
+ * 会话跳转由组件拿 action.sessionId 经 uiWorkspace.openSession 执行；
+ * 提交成功后卡片出队、停留在跳过去的会话——没有任何「自动跳回」的动作类型。
+ */
+export function chipClickAction(card: QuestionCard): QuestionChipAction {
+  return { type: 'expand-and-open', sessionId: card.sessionId }
+}
+
 /**
  * 草稿 → 官方答案词汇（user-questions 编码规则，逐字）：
  * - 单选题带 custom：custom 覆盖选中项 → selected 置空、custom 承载回答；
