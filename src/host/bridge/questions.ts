@@ -36,6 +36,15 @@ export const DEFAULT_QUESTION_BUDGET = 2
 /** 超预算时的自动回答案（逐题同文；指明出路：任务书假设 + report_blocker）。 */
 export const QUESTION_BUDGET_EXHAUSTED_ANSWER = '提问预算已用尽：请基于任务书做合理假设继续执行，或调用 report_blocker 报告阻塞'
 
+/** Router 会话每轮提问批次超限的自动回答案（v1.2 规格 §3；指明出路：请合并为一批重问）。 */
+export const ROUTER_QUESTION_BATCH_EXHAUSTED_ANSWER = '每轮最多 1 批提问：请合并为一批重问（把要确认的问题放进同一次提问）'
+
+/** Router 会话的每轮提问预算面（v1.2 Task B2；entry 接 DispatchBudgets）。 */
+export interface RouterQuestionBudgetFace {
+  isRouterSession(sessionId: string): boolean
+  tryConsumeQuestionBatch(sessionId: string): { ok: true } | { ok: false; code: 'per-turn-question-budget' }
+}
+
 export interface AnswerRelayDeps {
   ledger: SessionTaskIndex & Pick<TaskLedger, 'addQuestion' | 'settleQuestion' | 'openQuestions' | 'findQuestion' | 'reportBlocker' | 'countTaskQuestions'>
   /** 问题 ID 生成器（宿主装配用 uuid；测试注入计数器）。 */
@@ -43,6 +52,8 @@ export interface AnswerRelayDeps {
   now(): number
   /** 每任务提问批次数上限（缺省 DEFAULT_QUESTION_BUDGET）。 */
   questionBudget?: number
+  /** Router 会话的每轮提问预算面（v1.2 Task B2；缺席 = Router 提问照旧放行）。 */
+  routerQuestions?: RouterQuestionBudgetFace
   /** 预算拒绝等非致命事件的日志口（缺席静默）。 */
   logger?: { warn(message: string): void }
 }
@@ -64,6 +75,7 @@ export class AnswerRelay {
   private newId: () => string
   private now: () => number
   private questionBudget: number
+  private routerQuestions: RouterQuestionBudgetFace | undefined
   private logger: AnswerRelayDeps['logger']
 
   constructor(deps: AnswerRelayDeps) {
@@ -73,6 +85,7 @@ export class AnswerRelay {
     this.questionBudget = typeof deps.questionBudget === 'number' && deps.questionBudget >= 0
       ? deps.questionBudget
       : DEFAULT_QUESTION_BUDGET
+    this.routerQuestions = deps.routerQuestions
     this.logger = deps.logger
   }
 
@@ -96,7 +109,25 @@ export class AnswerRelay {
       return next() // 没有 agent 的全局请求不是会话提问，放行
     }
     const taskRecord = await this.taskBySession(sessionId)
-    if (taskRecord === undefined || taskRecord.role === 'router') return next()
+    if (taskRecord === undefined || taskRecord.role === 'router') {
+      // v1.2 规格 §3：Router 提问每轮 1 批——在认领层强制，第二批不弹卡、直接
+      // 自动回「请合并为一批重问」。未接预算面（降级）时照旧放行。
+      const routerQuestions = this.routerQuestions
+      if (routerQuestions !== undefined && routerQuestions.isRouterSession(sessionId)) {
+        const verdict = routerQuestions.tryConsumeQuestionBatch(sessionId)
+        if (!verdict.ok) {
+          this.logger?.warn(`Router 会话 ${sessionId} 本轮提问批次已用尽，本次提问被自动回答（请合并为一批重问）`)
+          return {
+            answers: request.questions.map((question) => ({
+              id: question.id,
+              selected: [],
+              custom: ROUTER_QUESTION_BATCH_EXHAUSTED_ANSWER,
+            })),
+          }
+        }
+      }
+      return next()
+    }
     const claimed = await this.ledger.countTaskQuestions(taskRecord.id)
     if (claimed >= this.questionBudget) {
       this.logger?.warn(

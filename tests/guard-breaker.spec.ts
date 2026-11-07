@@ -43,9 +43,9 @@ describe('CircuitBreaker：infra 失败滑窗熔断（规格 §2 条件 a）', (
     const { breaker, clock } = await breakerWith()
     await breaker.recordFailure({ taskId: 'T-001', at: clock.now(), class: 'infra' })
     await breaker.recordFailure({ taskId: 'T-002', at: clock.now() + 1, class: 'infra' })
-    expect((await breaker.state()).frozen).toBe(false)
+    expect((await breaker!.state()).frozen).toBe(false)
     await breaker.recordFailure({ taskId: 'T-003', at: clock.now() + 2, class: 'infra' })
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(true)
     expect(state.reason).toContain('infra')
     expect(state.frozenAt).toBe(clock.now() + 2)
@@ -57,7 +57,7 @@ describe('CircuitBreaker：infra 失败滑窗熔断（规格 §2 条件 a）', (
     for (let i = 0; i < 5; i += 1) {
       await breaker.recordFailure({ taskId: `T-00${i + 1}`, at: 1000 + i, class: 'task' })
     }
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(false)
     expect(state.counts.infraFailures).toBe(0)
   })
@@ -69,7 +69,7 @@ describe('CircuitBreaker：infra 失败滑窗熔断（规格 §2 条件 a）', (
     clock.advance(WINDOW_MS + 300) // 前两条滑出窗口
     await breaker.recordFailure({ taskId: 'T-003', at: clock.now(), class: 'infra' })
     await breaker.recordFailure({ taskId: 'T-004', at: clock.now() + 1, class: 'infra' })
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(false)
     expect(state.counts.infraFailures).toBe(2)
   })
@@ -81,9 +81,9 @@ describe('CircuitBreaker：创建风暴熔断（规格 §2 条件 b，按任务 
     for (let i = 1; i <= 9; i += 1) {
       await breaker.recordCreation(`T-${String(i).padStart(3, '0')}`, 1000 + i)
     }
-    expect((await breaker.state()).frozen).toBe(false)
+    expect((await breaker!.state()).frozen).toBe(false)
     await breaker.recordCreation('T-010', 1010)
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(true)
     expect(state.reason).toContain('创建')
     expect(state.counts.creations).toBe(10)
@@ -94,7 +94,7 @@ describe('CircuitBreaker：创建风暴熔断（规格 §2 条件 b，按任务 
     for (let i = 0; i < 3; i += 1) {
       await breaker.recordCreation('T-001', 1000 + i)
     }
-    expect((await breaker.state()).counts.creations).toBe(1)
+    expect((await breaker!.state()).counts.creations).toBe(1)
   })
 
   it('完成清基准：9 创建 → 完成 1 个 → 第 10 创建不冻（计数回落 + 零完成被破）', async () => {
@@ -104,7 +104,7 @@ describe('CircuitBreaker：创建风暴熔断（规格 §2 条件 b，按任务 
     }
     await breaker.recordCompletion('T-005', 1100)
     await breaker.recordCreation('T-010', 1200)
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(false)
     expect(state.counts.creations).toBe(9) // 9 - 完成 1 + 新 1
     expect(state.counts.completions).toBe(1)
@@ -130,9 +130,9 @@ describe('CircuitBreaker：持久化与解除（规格 §2 解除仅用户）', 
     await breaker.recordFailure({ taskId: 'T-001', at: 1, class: 'infra' })
     await breaker.recordFailure({ taskId: 'T-002', at: 2, class: 'infra' })
     await breaker.recordFailure({ taskId: 'T-003', at: 3, class: 'infra' })
-    expect((await breaker.state()).frozen).toBe(true)
+    expect((await breaker!.state()).frozen).toBe(true)
     await breaker.unfreeze()
-    expect((await breaker.state()).frozen).toBe(false)
+    expect((await breaker!.state()).frozen).toBe(false)
     const restored = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
     expect((await restored.state()).frozen).toBe(false)
     await restored.recordFailure({ taskId: 'T-004', at: 4, class: 'infra' })
@@ -191,11 +191,11 @@ const INPUT = {
 
 describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', () => {
   it('infra 失败 ×3 全局冻结：第 4 次 dispatch_task 被 dispatch-frozen 拦下，文案含停止重试与向用户报告', async () => {
-    const { core, breaker } = await guardCoreWith({ failCreate: () => new Error('boom') })
+    const { core, breaker } = await guardCoreWith({ failCreate: () => new Error('boom'), budgets: null })
     for (let i = 0; i < 3; i += 1) {
       await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     }
-    expect((await breaker.state()).frozen).toBe(true)
+    expect((await breaker!.state()).frozen).toBe(true)
     await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({
       code: 'dispatch-frozen',
       message: expect.stringContaining('派发已冻结'),
@@ -204,11 +204,11 @@ describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', (
   })
 
   it('冻结时 create_worker_type 同拦：同文案', async () => {
-    const { core, breaker } = await guardCoreWith({ failCreate: () => new Error('boom') })
+    const { core, breaker } = await guardCoreWith({ failCreate: () => new Error('boom'), budgets: null })
     for (let i = 0; i < 3; i += 1) {
       await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     }
-    expect((await breaker.state()).frozen).toBe(true)
+    expect((await breaker!.state()).frozen).toBe(true)
     await expect(core.createWorkerType('router-s-1', { name: '新类型' })).rejects.toMatchObject({
       code: 'dispatch-frozen',
       message: expect.stringContaining('请停止重试并向用户报告'),
@@ -216,31 +216,31 @@ describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', (
   })
 
   it('task 类拒绝不计熔断：未知模板连拒 5 次，熔断不冻', async () => {
-    const { core, breaker } = await guardCoreWith()
+    const { core, breaker } = await guardCoreWith({ budgets: null })
     for (let i = 0; i < 5; i += 1) {
       await expect(core.dispatchTask('router-s-1', { ...INPUT, templateId: 'nope' })).rejects.toMatchObject({
         code: 'template-unavailable',
       })
     }
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.frozen).toBe(false)
     expect(state.counts.infraFailures).toBe(0)
   })
 
   it('成功派发进创建计数：第 10 个任务创建后冻结，第 11 次派发被拦', async () => {
-    const { core, breaker } = await guardCoreWith()
+    const { core, breaker } = await guardCoreWith({ budgets: null })
     for (let i = 0; i < 10; i += 1) {
       // 第 10 次：冻结检查在创建计数之前 → 本次仍成功，随后熔断闭合
       await core.dispatchTask('router-s-1', { ...INPUT, title: `任务 ${i + 1}` })
     }
-    expect((await breaker.state()).frozen).toBe(true)
+    expect((await breaker!.state()).frozen).toBe(true)
     await expect(core.dispatchTask('router-s-1', { ...INPUT, title: '第 11 个' })).rejects.toMatchObject({
       code: 'dispatch-frozen',
     })
   })
 
   it('完成清基准接线：9 次派发 + 完成 1 个 → 第 10 次派发放行', async () => {
-    const { core, breaker, ledger } = await guardCoreWith()
+    const { core, breaker, ledger } = await guardCoreWith({ budgets: null })
     const results = []
     for (let i = 0; i < 9; i += 1) {
       results.push(await core.dispatchTask('router-s-1', { ...INPUT, title: `任务 ${i + 1}` }))
@@ -250,7 +250,7 @@ describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', (
     await core.completeTask(results[0]!.sessionId!, results[0]!.taskId, { docVersion: 1, summary: '完成' })
     const tenth = await core.dispatchTask('router-s-1', { ...INPUT, title: '任务 10' })
     expect(tenth.taskId).toBe('T-010')
-    expect((await breaker.state()).frozen).toBe(false)
+    expect((await breaker!.state()).frozen).toBe(false)
   })
 
   it('解锁自动派发失败也计熔断（infra）：完成解锁后建会话失败 → counts.infraFailures=1', async () => {
@@ -262,7 +262,7 @@ describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', (
     await docs.initTask(ledger.get('T-010')!, '# 任务书 T-010')
     await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '依赖完' })
     expect(ledger.get('T-010')?.status).toBe('queued')
-    const state = await breaker.state()
+    const state = await breaker!.state()
     expect(state.counts.infraFailures).toBe(1)
     expect(state.frozen).toBe(false) // 只 1 次，未达阈值
   })

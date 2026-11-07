@@ -50,6 +50,10 @@ export type LedgerErrorCode =
   | 'types-unavailable'
   /** v1.2 熔断器：派发全局冻结（规格 §2；解除仅用户）。 */
   | 'dispatch-frozen'
+  /** v1.2 派发预算：Router 每轮任务数硬限（规格 §3；出路：先 ask_user 确认）。 */
+  | 'per-turn-task-budget'
+  /** v1.2 派发预算：主管连续失败冻结（规格 §3；出路：report_blocker）。 */
+  | 'supervisor-failure-budget'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

@@ -20,6 +20,7 @@
 import type { RoleKind, TaskRecord, TaskStatus } from '../../shared/types.ts'
 import type { WorkerTemplate, WorkerTypeSummary } from '../../shared/view-contract.ts'
 import { LedgerError } from '../ledger/errors.ts'
+import type { BudgetSnapshot as DispatchBudgetsSnapshot } from '../guard/budgets.ts'
 import type {
   CompleteTaskInput,
   DispatchTaskInput,
@@ -309,33 +310,53 @@ const TOOL_SPECS: Record<
     outputSchema: {
       type: 'object',
       additionalProperties: false,
-      properties: { tasks: { type: 'array', items: { type: 'object' } } },
+      properties: {
+        tasks: { type: 'array', items: { type: 'object' } },
+        budgets: { type: 'object', additionalProperties: true },
+        breaker: { type: 'object', additionalProperties: true },
+      },
       required: ['tasks'],
     },
-    async run(core, _sid, args) {
+    async run(core, sid, args) {
       const filter: QueryTasksFilter = {}
       if (Array.isArray(args.status) && args.status.length > 0) filter.status = args.status as TaskStatus[]
       if (typeof args.taskId === 'string' && args.taskId !== '') filter.taskId = args.taskId
-      return core.queryTasks(Object.keys(filter).length > 0 ? filter : undefined)
+      // v1.2 规格 §3：带上调用方会话——返回附该会话的预算快照与熔断冻结态。
+      return core.queryTasks(Object.keys(filter).length > 0 ? filter : undefined, sid)
     },
     render(_args, value) {
-      const cards = (value as { tasks: {
+      const v = value as { tasks: {
         taskId: string; title: string; status: TaskStatus; role: string; templateId: string;
         progress?: string; sessionId?: string; waitingQuestions: number; docVersion: number
-      }[] }).tasks
-      if (cards.length === 0) return '当前没有符合条件的任务。'
-      return cards
-        .map((c) =>
-          [
-            `${c.taskId}「${c.title}」${STATUS_LABEL[c.status]}`,
-            `  角色 ${c.role}/${c.templateId}，任务书 v${c.docVersion}${c.sessionId !== undefined ? `，会话 ${c.sessionId}` : ''}`,
-            c.progress !== undefined ? `  进度：${c.progress}` : null,
-            c.waitingQuestions > 0 ? `  待用户回答 ${c.waitingQuestions} 个问题` : null,
-          ]
-            .filter((line) => line !== null)
-            .join('\n'),
+      }[]; budgets?: DispatchBudgetsSnapshot; breaker?: { frozen: boolean; reason?: string } }
+      const cardsText = v.tasks.length === 0
+        ? '当前没有符合条件的任务。'
+        : v.tasks
+            .map((c) =>
+              [
+                `${c.taskId}「${c.title}」${STATUS_LABEL[c.status]}`,
+                `  角色 ${c.role}/${c.templateId}，任务书 v${c.docVersion}${c.sessionId !== undefined ? `，会话 ${c.sessionId}` : ''}`,
+                c.progress !== undefined ? `  进度：${c.progress}` : null,
+                c.waitingQuestions > 0 ? `  待用户回答 ${c.waitingQuestions} 个问题` : null,
+              ]
+                .filter((line) => line !== null)
+                .join('\n'),
+            )
+            .join('\n')
+      // v1.2 规格 §3：预算与冻结态对模型可见（reject 的出路随附在可见态里）。
+      const notes: string[] = []
+      if (v.breaker?.frozen === true) {
+        notes.push(`⚠ 派发已冻结（${v.breaker.reason ?? '原因未记录'}）：停止一切派发与重试，向用户报告`)
+      }
+      if (v.budgets !== undefined) {
+        const b = v.budgets
+        notes.push(
+          `派发预算：本轮已派 ${b.taskDispatchesThisTurn}/${b.taskLimitPerTurn} 个任务、${b.questionBatchesThisTurn}/${b.questionLimitPerTurn} 批提问；`
+            + `连续失败 ${b.consecutiveDispatchFailures}/${b.supervisorFailureLimit}${b.supervisorFrozen ? '（你的派发已冻结，出路 report_blocker）' : ''}`
+            + `${b.taskDispatchesThisTurn >= b.taskLimitPerTurn ? '；要再派任务请先 ask_user 确认' : ''}`,
         )
-        .join('\n')
+      }
+      return notes.length > 0 ? `${cardsText}\n${notes.join('\n')}` : cardsText
     },
   },
   control_task: {

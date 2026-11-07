@@ -44,6 +44,13 @@ export interface BreakerState {
   counts: BreakerCounts
 }
 
+/** 熔断冻结态的模型可见投影（query_tasks.breaker；lossless：未冻结只带 frozen）。 */
+export interface BreakerVisibility {
+  frozen: boolean
+  reason?: string
+  frozenAt?: number
+}
+
 /** guard-state.json 落盘形状（含窗口事件，重启不重置计数）。 */
 export interface GuardStateFile {
   schemaVersion: 1

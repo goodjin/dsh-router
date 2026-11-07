@@ -49,6 +49,7 @@ import { MemoryDocStore } from "./host/memory/store.js";
 import { search as searchMemory } from "./host/memory/retrieval.js";
 import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from "./host/guard/breaker.js";
+import { DispatchBudgets } from "./host/guard/budgets.js";
 export { Config } from "./host/root-config.js";
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router';
@@ -179,6 +180,9 @@ export function apply(ctx, rawConfig) {
         creationThreshold: config.breakerCreationThreshold,
         logger: { warn: (message) => log.warn(message) },
     });
+    // 派发预算（v1.2 规格 §3）：以轮次近似用户消息边界——running→true 即新轮
+    //（下方 onStatusChange 接线；ask_user 的回答开启新轮，预算自然重计）。
+    const budgets = new DispatchBudgets();
     // worker 类型存储 + Router 默认值（v1.1 规格 §5/§6；首启种子化导入 v1 Config
     // 模板后 legacyImported 落盘，v1 templates 配置通道退役）。
     const typeStore = new WorkerTypeStore(fs, join(config.dataDir, 'worker-types.json'), {
@@ -314,6 +318,12 @@ export function apply(ctx, rawConfig) {
         now: () => Date.now(),
         // 提问预算（v1.1 规格 §3.6）：每任务澄清提问批次数上限，超限自动回答案。
         questionBudget: config.questionBudget,
+        // Router 会话每轮 1 批提问（v1.2 规格 §3）：认领层强制，第二批自动回
+        //「请合并为一批重问」。Router 会话清单以 UI 登记为准。
+        routerQuestions: {
+            isRouterSession: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
+            tryConsumeQuestionBatch: (sessionId) => budgets.tryConsumeQuestionBatch(sessionId),
+        },
         logger: { warn: (message) => log.warn(message) },
     });
     const scheduler = new Scheduler(ledger, {
@@ -468,6 +478,7 @@ export function apply(ctx, rawConfig) {
         tasksDir: config.tasksDir,
         memory: memoryFace,
         breaker,
+        budgets,
         logger: { warn: (message) => log.warn(message) },
     });
     // 供预设树的工具行 / 上下文行 / prompt-section 行经作用域链注入；memory 一并挂上（brief 形状）。
@@ -481,6 +492,12 @@ export function apply(ctx, rawConfig) {
     // 会话空闲：压缩驱动（pending 只由我方投递打标；idle 且无排队消息才动作）
     // + 记忆增量摘要（worker/主管会话后台跑，同会话同增量位只跑一次）。
     bridge.watchStatus();
+    // 轮次边界（v1.2 规格 §3）：running→true 即新轮——预算清零重计（ask_user 的
+    // 回答开启新轮，自然重计）。
+    bridge.onStatusChange((sessionId, running) => {
+        if (running)
+            budgets.onTurnStart(sessionId);
+    });
     bridge.onStatusChange((sessionId, running) => {
         if (running)
             return;

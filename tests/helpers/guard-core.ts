@@ -13,6 +13,7 @@ import { AnswerRelay } from '../../src/host/bridge/questions.ts'
 import { CompactionDriver, type CompactionDeps } from '../../src/host/context/compaction-driver.ts'
 import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../../src/host/bridge/tabs.ts'
 import { CircuitBreaker } from '../../src/host/guard/breaker.ts'
+import { DispatchBudgets } from '../../src/host/guard/budgets.ts'
 import { createRouterCore, type RouterCoreAssemblyDeps, type RouterCoreHosts } from '../../src/host/core.ts'
 import { makeMemFs, type MemFs } from './mem-fs.ts'
 import type { FsAdapter } from '../../src/shared/fs-adapter.ts'
@@ -161,8 +162,10 @@ export interface GuardCoreOptions {
   records?: TaskRecord[]
   failCreate?: (attempt: number) => Error | undefined
   failPrompt?: Error | ((attempt: number) => Error | undefined)
-  /** 注入预制熔断器（缺省 = memfs 新建，时钟取 opts.now）。 */
-  breaker?: CircuitBreaker
+  /** 注入预制熔断器（缺省 = memfs 新建，时钟取 opts.now；显式 null = 不接熔断器）。 */
+  breaker?: CircuitBreaker | null
+  /** 注入预制预算（缺省 = 新建默认预算 1/1/3；显式 null = 不接预算层）。 */
+  budgets?: DispatchBudgets | null
   /** 全局时钟（breaker 默认件与核心记账共用；缺省恒 1000）。 */
   now?: () => number
 }
@@ -192,7 +195,8 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
   const scheduler = new Scheduler(ledger, { maxDepth: 2, concurrency: { default: 3 } })
   const memfs: MemFs = makeMemFs()
   await memfs.fs.mkdirp('/guard')
-  const breaker = opts.breaker ?? new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now })
+  const breaker = opts.breaker === null ? undefined : opts.breaker ?? new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now })
+  const budgets = opts.budgets === null ? undefined : opts.budgets ?? new DispatchBudgets()
   const deps: RouterCoreAssemblyDeps = {
     ledger,
     docsFor: () => docs,
@@ -209,6 +213,7 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
       templates: GUARD_TEMPLATES,
     },
     breaker,
+    budgets,
     newId: () => `q-${Math.random()}`,
     signal: new AbortController().signal,
     isRunning: () => false,
@@ -217,5 +222,5 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
   }
   const assembled = createRouterCore(deps)
   await assembled.refreshSnapshot()
-  return { ledger, docs, bridge, relay, driver, events, statusCbs, ui, breaker, memfs, now, ...assembled }
+  return { ledger, docs, bridge, relay, driver, events, statusCbs, ui, breaker, budgets, memfs, now, ...assembled }
 }

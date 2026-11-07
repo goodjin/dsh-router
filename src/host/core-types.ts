@@ -9,6 +9,8 @@
 
 import type { TaskRecord, TaskStatus } from '../shared/types.ts'
 import type { TaskCard, WorkerTemplate, WorkerTypeSummary } from '../shared/view-contract.ts'
+import type { BudgetSnapshot } from './guard/budgets.ts'
+import type { BreakerVisibility } from './guard/breaker.ts'
 
 /** dispatch_task 的入参（依赖条目允许带版本；版本当前仅供审计，调度按任务 ID）。 */
 export interface DispatchTaskInput {
@@ -54,8 +56,12 @@ export interface RouterCore {
   dispatchTask(callerSessionId: string, input: DispatchTaskInput): Promise<{ taskId: string; docPath: string; sessionId?: string }>
   /** 补充约束：任务书升版并重投原 worker 会话；返回新版本号。 */
   supplementTask(callerSessionId: string, taskId: string, additions: string[]): Promise<{ docVersion: number }>
-  /** 查询任务短卡（只读；编排角色可看全量）。 */
-  queryTasks(filter?: QueryTasksFilter): Promise<{ tasks: TaskCard[] }>
+  /**
+   * 查询任务短卡（只读；编排角色可看全量）。viewerSessionId 提供时返回附该会话
+   * 的预算快照 budgets 与全局熔断冻结态 breaker（v1.2 规格 §3：预算状态对模型
+   * 可见）；两者都只在防护面接线时出现。
+   */
+  queryTasks(filter?: QueryTasksFilter, viewerSessionId?: string): Promise<{ tasks: TaskCard[]; budgets?: BudgetSnapshot; breaker?: BreakerVisibility }>
   /** 暂停 / 恢复 / 取消一个任务。 */
   controlTask(callerSessionId: string, taskId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ status: TaskStatus }>
   /** 检索记忆（B8 起接真实现；检索失败时返回空命中与失败注记）。 */

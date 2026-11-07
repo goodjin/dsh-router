@@ -27,7 +27,8 @@ import type {
   RouterTypeCreateInput,
 } from './core-types.ts'
 import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
-import type { CircuitBreaker } from './guard/breaker.ts'
+import type { CircuitBreaker, BreakerVisibility } from './guard/breaker.ts'
+import type { DispatchBudgets, BudgetSnapshot } from './guard/budgets.ts'
 import { classifyDispatchFailure } from './guard/classify.ts'
 import type {
   AskUserQuestionAnswerItem,
@@ -133,6 +134,8 @@ export interface RouterCoreAssemblyDeps {
   logger?: { warn(message: string): void }
   /** 全局派发熔断器（v1.2 Task B1；缺席 = 不熔断，只走 v1.1 per-task 语义）。 */
   breaker?: CircuitBreaker
+  /** 派发预算（v1.2 Task B2；缺席 = 不限每轮任务/提问、无主管失败预算）。 */
+  budgets?: DispatchBudgets
   /** 熔断事件记账时钟（缺省 Date.now）。 */
   now?: () => number
 }
@@ -367,6 +370,27 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       if (!verdict.ok) {
         throw new LedgerError(verdict.code, `派发被拒（${verdict.code}）：${dispatchRejectionText(verdict.code, callerRole)}`)
       }
+      // v1.2 规格 §3 派发预算（两层，互不替代；per-task retry 的 v1.1 语义不动）：
+      // 主管只受连续失败预算（成功子任务不设上限）；其余（Router）每轮 1 个任务，
+      // 第二个必须先 ask_user 列计划与理由，用户确认后新轮重计。
+      if (deps.budgets !== undefined) {
+        if (callerRole === 'supervisor') {
+          if (deps.budgets.supervisorFrozen(callerSessionId)) {
+            throw new LedgerError(
+              'supervisor-failure-budget',
+              `连续 ${deps.budgets.snapshot(callerSessionId).consecutiveDispatchFailures} 次派发失败，你的派发已被冻结：请停止重试，调用 report_blocker 向用户报告阻塞`,
+            )
+          }
+        } else {
+          const budgetVerdict = deps.budgets.tryConsumeTaskDispatch(callerSessionId)
+          if (!budgetVerdict.ok) {
+            throw new LedgerError(
+              budgetVerdict.code,
+              `本轮（当前用户消息）已派发过 ${deps.budgets.snapshot(callerSessionId).taskLimitPerTurn} 个任务。要派第二个任务，请先调用 ask_user 列出计划与理由征得用户确认；确认后预算清零重计`,
+            )
+          }
+        }
+      }
       const workspace = workspaceOfSession(callerSessionId)
       const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd()
       const projectId = workspace?.id ?? `cwd:${cwd}`
@@ -393,12 +417,15 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
         // dispatch_task 成功后给 Router（或主管）会话打 pendingCompaction，其自身
         // 的派发讨论段在 idle 后被压缩（裁定 5 顺延项的补齐）。
+        deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：成功清主管连败
         driver.onDispatched(callerSessionId)
         await afterDispatch(record, sessionId, workspace?.id)
         return { taskId: record.id, docPath, sessionId }
       } catch (error) {
         // 派发失败不留空壳（v1.1 规格 §2-4）：任务回 draft/queued、错误文本写
-        // progress、retryCount+1；达上限自动 blocked 并通知 Router。
+        // progress、retryCount+1；达上限自动 blocked 并通知 Router。v1.2：同时
+        // 分类上报熔断、计入调用者的主管失败预算（infra/task 均计）。
+        deps.budgets?.recordDispatchFailure(callerSessionId)
         const failed = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId)
         await refreshSnapshot()
         throw new LedgerError(
@@ -425,6 +452,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         // 首发未完成的任务（draft/queued）重投失败：与首发失败同口径记账——
         // retryCount 朝上限累计，达 3 自动 blocked；running 等任务照原样抛。
         if (live.sessionId !== undefined && (live.status === 'draft' || live.status === 'queued')) {
+          deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重投失败同口径计入失败预算
           const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
           await refreshSnapshot()
           throw new LedgerError(
@@ -435,6 +463,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         throw error
       }
       if (delivered.sessionId !== undefined) {
+        deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重投成功清连败
         driver.onDispatched(delivered.sessionId)
         driver.onDispatched(callerSessionId)
         const live = ledger.get(taskId)!
@@ -462,6 +491,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
           if (!dispatchable) return // 依赖未满足 / 已封顶 / 已有会话：只升版，不派发
           try {
             const { sessionId } = await bridge.dispatchTask(taskId)
+            deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重派成功清连败
             if (sessionId !== undefined) {
               driver.onDispatched(sessionId)
             }
@@ -473,6 +503,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
               dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
             )
           } catch (error) {
+            deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重派失败同口径计入失败预算
             const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
             await refreshSnapshot()
             throw new LedgerError(
@@ -486,7 +517,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       return { docVersion: newVersion }
     },
 
-    async queryTasks(filter) {
+    async queryTasks(filter, viewerSessionId) {
       const records = await ledger.listAll()
       const counts = await waitingCounts()
       let cards = records.map((record) => toCard(record, counts[record.id] ?? 0))
@@ -495,7 +526,23 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         cards = cards.filter((card) => wanted.has(card.status))
       }
       if (filter?.taskId !== undefined) cards = cards.filter((card) => card.taskId === filter.taskId)
-      return { tasks: cards }
+      // v1.2 规格 §3：预算状态对模型可见——viewer 的预算快照 + 全局熔断冻结态。
+      // 可选键只在有值时进返回对象（undefined 值的键会被 JSON 序列化静默蒸发，
+      // v1.1 Task A3 lossless 门禁）。
+      const result: { tasks: TaskCard[]; budgets?: BudgetSnapshot; breaker?: BreakerVisibility } = { tasks: cards }
+      if (deps.budgets !== undefined && viewerSessionId !== undefined) {
+        result.budgets = deps.budgets.snapshot(viewerSessionId)
+      }
+      if (deps.breaker !== undefined) {
+        const breakerState = await deps.breaker.state()
+        const view: BreakerVisibility = { frozen: breakerState.frozen }
+        if (breakerState.frozen) {
+          if (breakerState.reason !== undefined) view.reason = breakerState.reason
+          if (breakerState.frozenAt !== undefined) view.frozenAt = breakerState.frozenAt
+        }
+        result.breaker = view
+      }
+      return result
     },
 
     async controlTask(callerSessionId, taskId, action) {
