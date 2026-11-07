@@ -291,7 +291,15 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       registry: {
         pinSession: (sessionId) => ctx.workspaceRegistry.pinSession!(sessionId),
         archiveSession: (sessionId, options) => ctx.workspaceRegistry.archiveSession!(sessionId, options),
-        archivedSessionIds: () => ctx.workspaceRegistry.archivedSessionIds?.() ?? [],
+        archivedSessionIds: () => {
+          // 宿主为 getter 属性（数组）而非方法；兼容两形状。
+          const raw: unknown = (ctx.workspaceRegistry as { archivedSessionIds?: unknown }).archivedSessionIds
+          return typeof raw === 'function'
+            ? ((raw as () => readonly string[])() ?? [])
+            : Array.isArray(raw)
+              ? (raw as readonly string[])
+              : []
+        },
       },
       routerPreset: config.routerPreset,
       logger: { warn: (message) => log.warn(message) },

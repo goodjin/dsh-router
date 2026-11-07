@@ -46,7 +46,7 @@ export interface DedupRegistryActions {
   pinSession(sessionId: string): Promise<unknown>
   archiveSession(sessionId: string, options?: { stopActivity?: boolean }): Promise<unknown>
   /** 缺席时按「无归档信息」处理（重复归档在宿主侧本就幂等）。 */
-  archivedSessionIds?(): readonly string[]
+  archivedSessionIds?: readonly string[] | (() => readonly string[])
 }
 
 export interface RouterDedupDeps {
@@ -122,7 +122,16 @@ export class RouterDedup {
    * 自然重试。
    */
   async resolve(): Promise<void> {
-    const archived = new Set<string>(this.deps.registry.archivedSessionIds?.() ?? [])
+    // 宿主把 archivedSessionIds 暴露为 getter 属性（数组，dsh-workspace
+    // lib/index.js:506-507）；防御性兼容「函数返回数组」的旧假设。
+    const rawArchived: unknown = (this.deps.registry as { archivedSessionIds?: unknown }).archivedSessionIds
+    const archivedList: readonly string[] =
+      typeof rawArchived === 'function'
+        ? ((rawArchived as () => readonly string[])() ?? [])
+        : Array.isArray(rawArchived)
+          ? (rawArchived as readonly string[])
+          : []
+    const archived = new Set<string>(archivedList)
     for (const workspace of this.deps.workspaces.list()) {
       const members = workspace.sessionIds ?? []
       for (const sessionId of members) {

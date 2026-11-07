@@ -41,6 +41,8 @@ interface EnvOptions {
   failFirstPin?: boolean
   /** 初始已在归档集的会话（模拟重启前已处置过的重复会话）。 */
   archived?: string[]
+  /** 用旧假设的「函数形状」暴露归档集（默认 getter 属性形状 = 宿主真实形状）。 */
+  archivedAsFunction?: boolean
 }
 
 /** 组一套带记录的假环境：读写计数与告警全部可断言。 */
@@ -84,7 +86,8 @@ function createEnv(options: EnvOptions) {
         archived.add(sessionId)
         return undefined
       },
-      archivedSessionIds: () => [...archived],
+      /** 宿主真实形状（getter 属性返回数组）；置 true 时用旧假设的函数形状。 */
+      archivedSessionIds: options.archivedAsFunction === true ? () => [...archived] : [...archived],
     },
     routerPreset: 'dsh-router',
     logger: { warn: (message: string) => { warns.push(message) } },
@@ -169,6 +172,37 @@ describe('RouterDedup.resolve：正主判定与归档', () => {
     expect(env.archiveCalls).toEqual(['r-b'])
     expect(env.dedup.pendingRedirectFor('ws-1')).toEqual({ sessionId: 'r-a', supersededSessionId: 'r-b' })
     expect(env.dedup.pendingRedirectFor('ws-2')).toBeUndefined()
+  })
+
+  it('归档集形状兼容：宿主 getter 属性（默认）与旧函数假设行为一致（重启不重复跳）', async () => {
+    // 默认（属性形状，宿主真实形状 dsh-workspace lib/index.js:506-507）
+    const asProperty = createEnv({
+      archived: ['r-b'],
+      workspaces: [WS('ws-1', ['r-a', 'r-b'])],
+      snapshots: new Map([
+        ['r-a', snapshot('dsh-router', 1)],
+        ['r-b', snapshot('dsh-router', 2)],
+      ]),
+    })
+    await asProperty.dedup.resolve()
+    expect(asProperty.pinCalls).toEqual(['r-a'])
+    expect(asProperty.archiveCalls).toEqual([])
+    expect(asProperty.dedup.pendingRedirectFor('ws-1')).toBeUndefined()
+
+    // 旧函数形状（防御性兼容路径）
+    const asFunction = createEnv({
+      archived: ['r-b'],
+      archivedAsFunction: true,
+      workspaces: [WS('ws-1', ['r-a', 'r-b'])],
+      snapshots: new Map([
+        ['r-a', snapshot('dsh-router', 1)],
+        ['r-b', snapshot('dsh-router', 2)],
+      ]),
+    })
+    await asFunction.dedup.resolve()
+    expect(asFunction.pinCalls).toEqual(['r-a'])
+    expect(asFunction.archiveCalls).toEqual([])
+    expect(asFunction.dedup.pendingRedirectFor('ws-1')).toBeUndefined()
   })
 })
 

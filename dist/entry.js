@@ -226,7 +226,15 @@ export function apply(ctx, rawConfig) {
             registry: {
                 pinSession: (sessionId) => ctx.workspaceRegistry.pinSession(sessionId),
                 archiveSession: (sessionId, options) => ctx.workspaceRegistry.archiveSession(sessionId, options),
-                archivedSessionIds: () => ctx.workspaceRegistry.archivedSessionIds?.() ?? [],
+                archivedSessionIds: () => {
+                    // 宿主为 getter 属性（数组）而非方法；兼容两形状。
+                    const raw = ctx.workspaceRegistry.archivedSessionIds;
+                    return typeof raw === 'function'
+                        ? (raw() ?? [])
+                        : Array.isArray(raw)
+                            ? raw
+                            : [];
+                },
             },
             routerPreset: config.routerPreset,
             logger: { warn: (message) => log.warn(message) },
