@@ -16,6 +16,7 @@ import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
   RouterState,
+  SessionPromptResponse,
   TypesCreateRequest,
   TypesEnabledRequest,
   TypesUpdateRequest,
@@ -66,6 +67,11 @@ export interface RouterApi {
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
+  /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */
+  /** 当前会话生效文本（无覆盖回落默认，isDefault 标记）。 */
+  getPrompt(sessionId: string): Promise<SessionPromptResponse>
+  /** 写会话覆盖；prompt 空串 = 清除回落默认。 */
+  saveSessionPrompt(sessionId: string, prompt: string): Promise<void>
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
@@ -81,6 +87,8 @@ export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
 export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
+/** v1.1 Task C5：会话级 Router 系统提示词（与宿主 routes 一侧逐字对齐）。 */
+export const ROUTER_PROMPT_PATH = '/router/prompt'
 
 function defaultFetch(): FetchLike {
   return (input, init) => globalThis.fetch(input, init)
@@ -230,6 +238,22 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       const body = await postJson(ROUTER_DEFAULTS_PATH, value as unknown as Record<string, unknown>)
       if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
       return body as RouterDefaults
+    },
+
+    /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */
+
+    async getPrompt(sessionId: string): Promise<SessionPromptResponse> {
+      const body = await request(`${ROUTER_PROMPT_PATH}?sessionId=${encodeURIComponent(sessionId)}`, { headers: { accept: 'application/json' } })
+      if (body === null || typeof body !== 'object') throw new RouterApiError('router: prompt response missing body')
+      return body as SessionPromptResponse
+    },
+
+    async saveSessionPrompt(sessionId: string, prompt: string): Promise<void> {
+      await request(ROUTER_PROMPT_PATH, {
+        method: 'PUT',
+        headers: { accept: 'application/json', 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId, prompt }),
+      })
     },
   }
 }

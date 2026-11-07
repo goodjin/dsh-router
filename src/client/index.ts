@@ -15,6 +15,8 @@
  * - conversation.header.leading  → 会话导航标签条（Router 固定首位）
  * - shell.overlay                → worker 问题浮窗（收起 chip + 展开表单）
  * - shell.overlay                → 「返回 Router」浮动按钮（worker/主管会话时显示）
+ * - shell.overlay                → 系统提示词编辑浮层（C5：提示词按钮点开）
+ * - conversation.session.header.actions → 「提示词」按钮（仅 Router 会话渲染，C5）
  * - sidebar.footer.action        → 「新建 Router」入口
  * - settings.section             → 插件设置段（只读 + 预留写通道）
  *
@@ -26,6 +28,7 @@ import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
 import { registerCreateRouter } from './create-router.tsx'
+import { registerPromptAction, registerPromptEditor } from './prompt-editor.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
 import { registerWorkbenchTabs } from './workbench-tabs.tsx'
@@ -87,7 +90,7 @@ function makeLogger(ctx: PluginContext): { info(message: string): void; warn(mes
 export function apply(ctx?: PluginContext): void {
   const safeCtx: PluginContext = ctx ?? {}
   const log = makeLogger(safeCtx)
-  const message = 'Router client loaded — workbench tabs / question overlay / back button / create entry / settings section'
+  const message = 'Router client loaded — workbench tabs / question overlay / back button / prompt editor / create entry / settings section'
   log.info(message)
 
   const slots = safeCtx.slots
@@ -152,6 +155,16 @@ export function apply(ctx?: PluginContext): void {
     registerBackButton(slotsHost, { store, uiWorkspace })
   } catch (error) {
     log.warn(`back button failed to register: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    registerPromptEditor(slotsHost, { store, api })
+  } catch (error) {
+    log.warn(`prompt editor failed to register: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    registerPromptAction(slotsHost, { store })
+  } catch (error) {
+    log.warn(`prompt action failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
     registerCreateRouter(slotsHost, { store, api, uiWorkspace, workspacesList: safeCtx.workspaces?.list })

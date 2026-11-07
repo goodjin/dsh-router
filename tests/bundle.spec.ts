@@ -26,6 +26,7 @@ import { describe, expect, it } from 'vitest'
 import { routerPrompt } from '../src/host/prompts/router.ts'
 import { supervisorPrompt } from '../src/host/prompts/supervisor.ts'
 import { workerPrompt } from '../src/host/prompts/worker.ts'
+import { buildRouterPresetDefinition, staticRouterDefinition } from '../src/host/presets/dynamic.ts'
 
 const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
   name: string
@@ -40,6 +41,7 @@ const BUNDLE_PATH = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const ENTRY_PATH = fileURLToPath(new URL('../dist/entry.js', import.meta.url))
 const TOOLS_PATH = fileURLToPath(new URL('../dist/tools.js', import.meta.url))
 const CONTEXT_PATH = fileURLToPath(new URL('../dist/context.js', import.meta.url))
+const PROMPT_SECTION_PATH = fileURLToPath(new URL('../dist/prompt-section.js', import.meta.url))
 
 type Factory = (require: (specifier: string) => unknown) => Record<string, unknown>
 type Row = { id: string; factory: Factory }
@@ -90,11 +92,15 @@ describe('package.json 满足浏览器半边的接线条件', () => {
     expect(entryCode).not.toContain('lib/client')
   })
 
-  it('子路径导出 ./tools 与 ./context 存在且指向构建产物，产物可加载', async () => {
-    for (const [key, file] of [['./tools', TOOLS_PATH], ['./context', CONTEXT_PATH]] as const) {
+  it('子路径导出 ./tools、./context、./prompt-section 存在且指向构建产物，产物可加载', async () => {
+    for (const [key, file] of [
+      ['./tools', TOOLS_PATH],
+      ['./context', CONTEXT_PATH],
+      ['./prompt-section', PROMPT_SECTION_PATH],
+    ] as const) {
       const exportEntry = PKG.exports[key] as { types?: string; default?: string } | undefined
       expect(exportEntry, `${key} 导出缺失：预设树里的行会 never started → 整预设回滚`).toBeDefined()
-      expect(exportEntry?.default).toBe(`./dist/${key === './tools' ? 'tools' : 'context'}.js`)
+      expect(exportEntry?.default).toBe(`./dist/${key.slice(2)}.js`)
       expect(existsSync(file), `${key} 的构建产物不存在——先 npm run build`).toBe(true)
       const mod = (await import(pathToFileURL(file).href)) as Record<string, unknown>
       expect(typeof mod.name, `${key} 产物缺 name`).toBe('string')
@@ -102,12 +108,15 @@ describe('package.json 满足浏览器半边的接线条件', () => {
       expect(typeof mod.Config, `${key} 产物缺 Config（check-host-rows 要校验）`).toBe('function')
       expect(typeof mod.apply, `${key} 产物缺 apply`).toBe('function')
     }
-    // Config 真能校验：role 必填；context 默认 order
+    // Config 真能校验：role 必填；context/prompt-section 缺省可过
     const toolsMod = (await import(pathToFileURL(TOOLS_PATH).href)) as { Config: (config: unknown) => unknown; name: string }
     expect(() => toolsMod.Config({ role: 'router' })).not.toThrow()
     expect(() => toolsMod.Config({})).toThrow()
     const contextMod = (await import(pathToFileURL(CONTEXT_PATH).href)) as { Config: (config: unknown) => unknown }
     expect(() => contextMod.Config({})).not.toThrow()
+    const promptSectionMod = (await import(pathToFileURL(PROMPT_SECTION_PATH).href)) as { Config: (config: unknown) => unknown }
+    expect(() => promptSectionMod.Config(undefined)).not.toThrow()
+    expect(() => promptSectionMod.Config({})).not.toThrow()
   })
 })
 
@@ -179,9 +188,15 @@ function personaPrefix(yml: string, personaRowId: string): string {
 }
 
 describe('persona 文本与 TS 模板逐字同步', () => {
-  it('router-persona：静态 yml 行已移除（v1.1 动态注册），routerPrompt 与静态兜底定义同源（presets-dynamic 看守）', () => {
+  it('router-persona：yml 无行（v1.1 动态注册）；动态定义无 persona 行（complete 唯一）；兜底定义有 persona 行', () => {
     expect(PATCH_TEXT).not.toMatch(/id:\s*router-persona\b/)
     expect(routerPrompt.length).toBeGreaterThan(0)
+    // C5 看守：complete 段唯一——动态定义走 prompt-section 行（运行时 complete），
+    // 决不残留 persona 行（宿主组装期 multiple complete 会炸整轮对话）；
+    // 静态兜底定义保留 persona 行 + routerPrompt 逐字（回退源）。
+    expect(buildRouterPresetDefinition().plugins.some((row) => row.name === '@deepseek-ai/dsh-persona')).toBe(false)
+    const fallbackPersona = staticRouterDefinition().plugins.find((row) => row.name === '@deepseek-ai/dsh-persona')
+    expect(fallbackPersona?.config).toMatchObject({ prefix: routerPrompt, complete: true })
   })
   it('supervisor-persona === supervisorPrompt', () => {
     expect(personaPrefix(PATCH_TEXT, 'supervisor-persona')).toBe(supervisorPrompt)
@@ -282,13 +297,16 @@ describe('lib/client.js 是页面能装的产物', () => {
       expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
     }
 
-    // 按页面物化的方式真跑一遍 apply：表面注册齐（shell.overlay 两个注册项：
-    // 问题浮窗 + 返回按钮）、自报一行、生命周期经 effect。
+    // 按页面物化的方式真跑一遍 apply：表面注册齐（shell.overlay 三个注册项：
+    // 问题浮窗 + 返回按钮 + 提示词编辑浮层；header.actions 提示词按钮）、
+    // 自报一行、生命周期经 effect。
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
+      'conversation.session.header.actions',
       'settings.section',
+      'shell.overlay',
       'shell.overlay',
       'shell.overlay',
       'sidebar.footer.action',
@@ -298,6 +316,8 @@ describe('lib/client.js 是页面能装的产物', () => {
       'router-workbench-tabs',
       'router-question-overlay',
       'router-back-button',
+      'router-prompt-editor',
+      'router-prompt-action',
       'router-create-entry',
       'router-settings',
     ])

@@ -90,21 +90,26 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
   })
 
-  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 两个注册项）', () => {
+  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 三个注册项 + header.actions 一项）', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
-    // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮两个注册项，inject 出现两次。
+    // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮 + 提示词编辑浮层三个注册项；
+    // conversation.session.header.actions 是提示词按钮（v1.1 C5，仅 Router 会话渲染）。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
       'shell.overlay',
       'shell.overlay',
+      'shell.overlay',
       'sidebar.footer.action',
       'conversation.header.leading',
+      'conversation.session.header.actions',
     ].sort())
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toContain('router-workbench-tabs')
     expect(ids).toContain('router-question-overlay')
     expect(ids).toContain('router-back-button')
+    expect(ids).toContain('router-prompt-editor')
+    expect(ids).toContain('router-prompt-action')
     expect(ids).toContain('router-create-entry')
     expect(ids).toContain('router-settings')
     expect(new Set(ids).size).toBe(ids.length)
@@ -149,6 +154,7 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
     const files = [
       'back-button.tsx',
       'create-router.tsx',
+      'prompt-editor.tsx',
       'question-cards.tsx',
       'settings.tsx',
       'ui-kit.tsx',

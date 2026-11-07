@@ -631,12 +631,16 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async saveDefaults(value) {
       return value
     },
+    async getSessionPrompt() {
+      return { prompt: '', isDefault: true }
+    },
+    async saveSessionPrompt() {},
     ...state,
   }
 }
 
 describe('HTTP 路由（exact + admit）', () => {
-  it('九条 exact 路由全部挂上（C4 redirect/ack + C3 worker 类型/默认值）', () => {
+  it('十条 exact 路由全部挂上（C4 redirect/ack + C3 worker 类型/默认值 + C5 会话提示词）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -649,6 +653,7 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/worker-types/update',
       '/router/worker-types/enabled',
       '/router/defaults',
+      '/router/prompt',
     ])
   })
 

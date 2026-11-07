@@ -25,7 +25,6 @@ import {
   staticRouterDefinition,
   type PresetDefinition,
   type RowSpec,
-  type RouterPresetDefaults,
 } from './dynamic.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
@@ -151,11 +150,13 @@ export class DynamicPresetEngine {
   }
 
   /**
-   * Router 预设同步：动态定义（defaults 提示词）优先，校验或注册失败 → 静态
-   * 兜底定义（逐行等价 v1 yml 行）；兜底也失败 → 只告警（Router 缺席可重建）。
+   * Router 预设同步：动态定义（C5：complete section 运行时按会话组装文本，
+   * 定义不烘焙默认值——签名因此不带 defaults）优先，校验或注册失败 → 静态
+   * 兜底定义（persona + prompts/router.ts 逐字）；兜底也失败 → 只告警。
+   * 返回值语义不变：'dynamic' | 'static' | 'failed'。
    */
-  async syncRouter(defaults: RouterPresetDefaults): Promise<'dynamic' | 'static' | 'failed'> {
-    const dynamic = buildRouterPresetDefinition(defaults)
+  async syncRouter(): Promise<'dynamic' | 'static' | 'failed'> {
+    const dynamic = buildRouterPresetDefinition()
     try {
       const problems = await this.validate(dynamic.plugins)
       if (problems.length > 0) throw new Error(`校验未过:\n${problems.join('\n')}`)

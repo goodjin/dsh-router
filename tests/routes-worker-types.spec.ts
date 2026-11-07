@@ -94,6 +94,7 @@ const BUILTIN = builtinGeneralType(1)
 function fakeStores(seed: WorkerTypeRecord[] = []) {
   let rows: WorkerTypeRecord[] = [structuredClone(BUILTIN), ...seed]
   let defaults: RouterDefaults = { routerSystemPrompt: '静态兜底 Router 提示词', routerModel: '' }
+  const promptsMap = new Map<string, string>()
   let clock = 10
   const calls: string[] = []
   const store = {
@@ -160,21 +161,47 @@ function fakeStores(seed: WorkerTypeRecord[] = []) {
       return { ...defaults }
     },
   }
-  return { store, defaultsStore, calls }
+  /** 会话提示词假面（与 SessionPromptStore + 默认值缓存同语义；记录调用）。 */
+  const prompts = {
+    get(sessionId: string): { prompt: string; isDefault: boolean } {
+      const override = promptsMap.get(sessionId)
+      return override !== undefined
+        ? { prompt: override, isDefault: false }
+        : { prompt: defaults.routerSystemPrompt, isDefault: true }
+    },
+    async set(sessionId: string, text: string): Promise<void> {
+      calls.push(`set-prompt:${sessionId}`)
+      promptsMap.set(sessionId, text)
+    },
+    async clear(sessionId: string): Promise<void> {
+      calls.push(`clear-prompt:${sessionId}`)
+      promptsMap.delete(sessionId)
+    },
+  }
+  return { store, defaultsStore, prompts, calls }
 }
 
 /** 组路由 deps：假 store + 引擎同步桩（记录调用，断言写路径触发同步）。 */
 function fakeDeps(factories?: {
   store?: ReturnType<typeof fakeStores>['store']
   defaultsStore?: ReturnType<typeof fakeStores>['defaultsStore']
+  prompts?: ReturnType<typeof fakeStores>['prompts']
 }): RouterRoutesDeps & { calls: string[]; synced: string[] } {
-  const { store, defaultsStore, calls } = fakeStores()
+  const { store, defaultsStore, prompts, calls } = fakeStores()
   const usedStore = factories?.store ?? store
   const usedDefaults = factories?.defaultsStore ?? defaultsStore
+  const usedPrompts = factories?.prompts ?? prompts
   const synced: string[] = []
   return {
     calls,
     synced,
+    async getSessionPrompt(sessionId: string) {
+      return usedPrompts.get(sessionId)
+    },
+    async saveSessionPrompt(sessionId: string, text: string) {
+      if (text === '') await usedPrompts.clear(sessionId)
+      else await usedPrompts.set(sessionId, text)
+    },
     async getState() {
       return {
         routerSessions: [], tasks: [], questions: [], tabs: [],
@@ -232,7 +259,7 @@ function handlerOf(routes: Array<{ path: string; handler: unknown }>, path: stri
 /* ────────────────────────── 断言 ────────────────────────── */
 
 describe('worker 类型路由（C3）', () => {
-  it('七条新 exact 路由全部挂上', () => {
+  it('新 exact 路由全部挂上（C3 七条 + C5 会话提示词一条）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -245,6 +272,7 @@ describe('worker 类型路由（C3）', () => {
       '/router/worker-types/update',
       '/router/worker-types/enabled',
       '/router/defaults',
+      '/router/prompt',
     ])
   })
 
@@ -446,5 +474,96 @@ describe('Router 默认值路由（C3）', () => {
     const worse = fakeExchange('POST', '/router/defaults', '[]')
     await handlerOf(routes, '/router/defaults')(worse.req, worse.res)
     expect(worse.captured.status).toBe(400)
+  })
+})
+
+/* ────────────────────────── 会话提示词路由（v1.1 Task C5，规格 §7） ────────────────────────── */
+
+describe('会话系统提示词路由（C5）', () => {
+  it('路径挂上：/router/prompt 进 exact 路由清单', () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    expect(routes.map((r) => r.path)).toContain('/router/prompt')
+  })
+
+  it('GET /router/prompt?sessionId= 有覆盖 → {prompt, isDefault:false}', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    const deps = fakeDeps()
+    registerRouterRoutes(ctx, deps)
+    await deps.saveSessionPrompt('s-router', '本会话覆盖')
+    const { req, res, captured } = fakeExchange('GET', '/router/prompt?sessionId=s-router')
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(200)
+    expect(JSON.parse(captured.body!)).toEqual({ prompt: '本会话覆盖', isDefault: false })
+  })
+
+  it('GET /router/prompt?sessionId= 无覆盖 → 回落默认文本 + isDefault:true 标记', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    const deps = fakeDeps()
+    registerRouterRoutes(ctx, deps)
+    const { req, res, captured } = fakeExchange('GET', '/router/prompt?sessionId=s-other')
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(200)
+    expect(JSON.parse(captured.body!)).toEqual({ prompt: '静态兜底 Router 提示词', isDefault: true })
+  })
+
+  it('GET 缺 sessionId 查询参数 → 400', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    const { req, res, captured } = fakeExchange('GET', '/router/prompt')
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(400)
+  })
+
+  it('PUT /router/prompt {sessionId, prompt} → {ok:true}，覆盖生效（写后下一轮组装即用新文本）', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    const deps = fakeDeps()
+    registerRouterRoutes(ctx, deps)
+    const { req, res, captured } = fakeExchange('PUT', '/router/prompt', JSON.stringify({ sessionId: 's-router', prompt: '改后的提示词' }))
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(200)
+    expect(JSON.parse(captured.body!)).toEqual({ ok: true })
+    expect(deps.calls).toContain('set-prompt:s-router')
+    const got = fakeExchange('GET', '/router/prompt?sessionId=s-router')
+    await handlerOf(routes, '/router/prompt')(got.req, got.res)
+    expect(JSON.parse(got.captured.body!)).toEqual({ prompt: '改后的提示词', isDefault: false })
+  })
+
+  it('PUT prompt 为空串 → 清除覆盖回落默认（isDefault 回 true）', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    const deps = fakeDeps()
+    registerRouterRoutes(ctx, deps)
+    await deps.saveSessionPrompt('s-router', '旧覆盖')
+    const { req, res, captured } = fakeExchange('PUT', '/router/prompt', JSON.stringify({ sessionId: 's-router', prompt: '' }))
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(200)
+    expect(deps.calls).toContain('clear-prompt:s-router')
+    const got = fakeExchange('GET', '/router/prompt?sessionId=s-router')
+    await handlerOf(routes, '/router/prompt')(got.req, got.res)
+    expect(JSON.parse(got.captured.body!)).toEqual({ prompt: '静态兜底 Router 提示词', isDefault: true })
+  })
+
+  it('PUT 体缺 sessionId / prompt 不是字符串 → 400', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    for (const body of [
+      JSON.stringify({ prompt: 'x' }),
+      JSON.stringify({ sessionId: 's' }),
+      JSON.stringify({ sessionId: 's', prompt: 42 }),
+      '[]',
+    ]) {
+      const { req, res, captured } = fakeExchange('PUT', '/router/prompt', body)
+      await handlerOf(routes, '/router/prompt')(req, res)
+      expect(captured.status, body).toBe(400)
+    }
+  })
+
+  it('GET/PUT 之外的方法 → 405（allow 头带 PUT）', async () => {
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, fakeDeps())
+    const { req, res, captured } = fakeExchange('POST', '/router/prompt', '{}')
+    await handlerOf(routes, '/router/prompt')(req, res)
+    expect(captured.status).toBe(405)
+    expect(captured.headers['allow']).toContain('PUT')
   })
 })

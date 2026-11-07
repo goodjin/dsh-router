@@ -18,6 +18,10 @@
       "types": "./src/context.ts",
       "default": "./dist/context.js"
     },
+    "./prompt-section": {
+      "types": "./src/prompt-section.ts",
+      "default": "./dist/prompt-section.js"
+    },
     "./client": {
       "types": "./src/client/index.ts",
       "default": "./lib/client.js"

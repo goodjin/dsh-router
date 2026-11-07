@@ -182,6 +182,20 @@ export interface RouterRedirect {
   supersededSessionId: string
 }
 
+/** 会话级 Router 系统提示词（v1.1 Task C5，规格 §7）：GET /router/prompt 的返回。 */
+export interface SessionPromptResponse {
+  /** 当前生效文本：会话覆盖，无覆盖时 = defaults.routerSystemPrompt。 */
+  prompt: string
+  /** true = 无覆盖回落默认（前端据此渲染「重置默认」的可宽态）。 */
+  isDefault: boolean
+}
+
+/** PUT /router/prompt 的请求体（prompt 空串 = 清除覆盖回落默认）。 */
+export interface SessionPromptPutRequest {
+  sessionId: string
+  prompt: string
+}
+
 /** GET /router/state 的完整返回。 */
 export interface RouterState {
   routerSessions: RouterSessionInfo[]

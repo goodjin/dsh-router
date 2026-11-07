@@ -4,8 +4,9 @@
  * - buildWorkerPresetDefinition(t)：每个启用 worker 类型 → 真实代理预设
  *   `dsh-router-worker-<templateId>`（persona=systemPrompt complete 整段替换、
  *   工具行按角色、技能行照 r4 §6 样板、压缩组）；
- * - buildRouterPresetDefinition(defaults)：Router 预设动态化（id 不变
- *   dsh-router，默认提示词来自 defaults）；
+ * - buildRouterPresetDefinition()：Router 预设动态化（id 不变 dsh-router；
+ *   C5 起 complete 提示词由本包 prompt-section 行运行时组装：会话覆盖 ?? 默认，
+ *   定义本身不烘焙文本）；
  * - staticRouterDefinition()：静态兜底（逐行等价 v1 yml 的 dsh-router 行；
  *   动态注册失败时由生命周期接线注册它，保证 Router 花名册不消失）。
  *
@@ -51,11 +52,6 @@ export function dynamicPresetId(templateId: string): string {
 
 /** 动态预设排在静态三预设（10/20/30）之后。 */
 const DYNAMIC_ORDER = 100
-
-/** Router 预设的动态化输入（默认提示词来自设置）。 */
-export interface RouterPresetDefaults {
-  routerSystemPrompt: string
-}
 
 export interface BuildWorkerOptions {
   /** record.skills 解析出的技能目录（有技能且目录非空才挂技能行）。 */
@@ -149,8 +145,13 @@ export function buildWorkerPresetDefinition(t: WorkerTypeRecord, options: BuildW
   }
 }
 
-/** Router 预设动态定义（id 不变 dsh-router；默认提示词来自 defaults）。 */
-export function buildRouterPresetDefinition(defaults: RouterPresetDefaults): PresetDefinition {
+/**
+ * Router 预设动态定义（id 不变 dsh-router；v1.1 C5：persona complete 行换成
+ * 本包 prompt-section 行——complete section 运行时按「当前会话覆盖 ?? 默认」
+ * 组装文本，默认值不烘焙进行定义，改默认无需重注册；多 complete 冲突由宿主
+ * 组装期报错，所以动态定义里不得残留 persona 行，presets-dynamic/bundle 看守）。
+ */
+export function buildRouterPresetDefinition(): PresetDefinition {
   const compaction = compactionGroup()
   compaction.id = 'router-compaction'
   return {
@@ -159,11 +160,7 @@ export function buildRouterPresetDefinition(defaults: RouterPresetDefaults): Pre
     description: '任务编排器：理解需求、拆解派发、追踪汇总',
     order: 10,
     plugins: [
-      {
-        id: 'router-persona',
-        name: '@deepseek-ai/dsh-persona',
-        config: { prefix: defaults.routerSystemPrompt, complete: true },
-      },
+      { id: 'router-prompt-section', name: '@goodjin2/dsh-router/prompt-section' },
       { id: 'router-tools', name: '@goodjin2/dsh-router/tools', config: { role: 'router' } },
       { id: 'router-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
       { id: 'router-context', name: '@goodjin2/dsh-router/context' },
@@ -176,9 +173,29 @@ export function buildRouterPresetDefinition(defaults: RouterPresetDefaults): Pre
  * Router 静态兜底定义：逐行等价 v1 cordis.patch.yml 的 dsh-router 行（该行已从
  * yml 移除——yml 版与动态注册同 id 会撞 Duplicate agent preset，r4 §1；兜底改由
  * 本函数携带，提示词与 prompts/router.ts 同源 import，无第二份文本可漂移）。
+ * C5 起它保留 persona complete 行（prompts/router.ts 逐字），是动态注册失败时
+ * 的回退源——回退形态丢会话级覆盖能力，但保证 Router 花名册不消失。
  */
 export function staticRouterDefinition(): PresetDefinition {
-  return buildRouterPresetDefinition({ routerSystemPrompt: routerPrompt })
+  const compaction = compactionGroup()
+  compaction.id = 'router-compaction'
+  return {
+    id: 'dsh-router',
+    name: 'Router',
+    description: '任务编排器：理解需求、拆解派发、追踪汇总',
+    order: 10,
+    plugins: [
+      {
+        id: 'router-persona',
+        name: '@deepseek-ai/dsh-persona',
+        config: { prefix: routerPrompt, complete: true },
+      },
+      { id: 'router-tools', name: '@goodjin2/dsh-router/tools', config: { role: 'router' } },
+      { id: 'router-ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
+      { id: 'router-context', name: '@goodjin2/dsh-router/context' },
+      compaction,
+    ],
+  }
 }
 
 /**

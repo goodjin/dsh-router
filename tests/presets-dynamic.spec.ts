@@ -56,6 +56,7 @@ const FAKE_MODULES: Record<string, { Config?: unknown }> = {
   '@deepseek-ai/dsh-tool-bash': {},
   '@deepseek-ai/dsh-tool-skill': {},
   '@goodjin2/dsh-router/context': {},
+  '@goodjin2/dsh-router/prompt-section': {},
   '@deepseek-ai/dsh-tool-subagent-control': {},
   '@deepseek-ai/dsh-compaction-basic': {},
   '@deepseek-ai/dsh-command-compact': {},
@@ -261,22 +262,30 @@ describe('内置通用 worker：等价修复后的静态 worker 组合', () => {
   })
 })
 
-describe('buildRouterPresetDefinition：Router 预设动态化', () => {
-  it('id 仍 dsh-router；默认提示词来自 defaults；组合含 router 工具/上下文/压缩组', () => {
-    const def = buildRouterPresetDefinition({ routerSystemPrompt: '自定义 Router 提示词' })
+describe('buildRouterPresetDefinition：Router 预设动态化（C5：complete section 会话级覆盖）', () => {
+  it('id 仍 dsh-router；persona 行移除——complete 换本包 prompt-section 行（动态读覆盖）', () => {
+    const def = buildRouterPresetDefinition()
     expect(def.id).toBe('dsh-router')
     expect(def.order).toBe(10)
-    expect(rowById(def, 'router-persona')).toMatchObject({
-      name: '@deepseek-ai/dsh-persona',
-      config: { prefix: '自定义 Router 提示词', complete: true },
-    })
+    expect(rowById(def, 'router-prompt-section')).toMatchObject({ name: '@goodjin2/dsh-router/prompt-section' })
     expect(rowById(def, 'router-tools')).toMatchObject({ name: '@goodjin2/dsh-router/tools', config: { role: 'router' } })
     expect(rowById(def, 'router-ask-user')).toMatchObject({ name: '@deepseek-ai/dsh-tool-ask-user' })
     expect(rowById(def, 'router-context')).toMatchObject({ name: '@goodjin2/dsh-router/context' })
     expect(rowById(def, 'router-compaction')).toBeDefined()
   })
 
-  it('静态兜底定义 ≡ 旧静态 yml 行：提示词与 prompts/router.ts 逐字同步、行序不变', () => {
+  it('多 complete 冲突看守（宿主组装期抛 multiple complete）：动态定义零 persona 行、零行级 complete 标记', () => {
+    const def = buildRouterPresetDefinition()
+    expect(def.plugins.some((row) => row.name === '@deepseek-ai/dsh-persona')).toBe(false)
+    for (const row of def.plugins) {
+      const config = row.config
+      if (config !== null && typeof config === 'object' && !Array.isArray(config)) {
+        expect(config, row.id).not.toHaveProperty('complete')
+      }
+    }
+  })
+
+  it('静态兜底定义保留 persona 行 + prompts/router.ts 逐字文本（回退源；prompt-section 行不在兜底里）', () => {
     const def = staticRouterDefinition()
     expect(def.id).toBe('dsh-router')
     expect(def.plugins.map((row) => row.id)).toEqual([
@@ -287,6 +296,7 @@ describe('buildRouterPresetDefinition：Router 预设动态化', () => {
       'router-compaction',
     ])
     expect(rowById(def, 'router-persona')!.config).toMatchObject({ prefix: routerPrompt, complete: true })
+    expect(rowById(def, 'router-prompt-section')).toBeUndefined()
   })
 })
 
@@ -297,7 +307,7 @@ describe('动态定义逐行过 validateRowSpec', () => {
     const defs = [
       buildWorkerPresetDefinition(workerType(), { customSkillDirs: SKILL_DIRS }),
       buildWorkerPresetDefinition(workerType({ templateId: 'lead2', name: '主管二', role: 'supervisor', skills: [] })),
-      buildRouterPresetDefinition({ routerSystemPrompt: 'x' }),
+      buildRouterPresetDefinition(),
     ]
     for (const def of defs) {
       expect(await validateDefinition(def), def.id).toEqual([])
@@ -327,7 +337,7 @@ describe('动态定义逐行过 validateRowSpec', () => {
     const defs = [
       buildWorkerPresetDefinition(workerType(), { customSkillDirs: SKILL_DIRS }),
       buildWorkerPresetDefinition(workerType({ templateId: 'lead2', name: '主管二', role: 'supervisor', skills: [] })),
-      buildRouterPresetDefinition({ routerSystemPrompt: 'x' }),
+      buildRouterPresetDefinition(),
     ]
     for (const def of defs) {
       expect(await validateDefinition(def, load), `${def.id} @ ${cliBase}`).toEqual([])
@@ -482,32 +492,34 @@ describe('DynamicPresetEngine：类型注册生命周期', () => {
 })
 
 describe('DynamicPresetEngine：Router 预设动态化与静态兜底', () => {
-  it('动态注册成功：默认提示词来自 defaults', async () => {
+  it('动态注册成功：定义带 prompt-section 行、无 persona 行（覆盖/默认都由运行时解析，不烘焙）', async () => {
     const { engine, registry } = engineHarness()
-    await engine.syncRouter({ routerSystemPrompt: '动态提示词' })
+    await engine.syncRouter()
     const def = registry.registered.get('dsh-router')!
-    expect((def.plugins[0]!.config as { prefix: string }).prefix).toBe('动态提示词')
+    expect(def.plugins.some((row) => row.id === 'router-prompt-section')).toBe(true)
+    expect(def.plugins.some((row) => row.name === '@deepseek-ai/dsh-persona')).toBe(false)
   })
 
-  it('动态注册失败 → 注册静态兜底定义（routerPrompt 逐字）；兜底也失败 → 只告警不炸', async () => {
-    const { engine, registry, warns } = engineHarness((def) => (def.plugins[0]!.config as { prefix: string }).prefix === '动态提示词')
-    await engine.syncRouter({ routerSystemPrompt: '动态提示词' })
+  it('动态注册失败 → 注册静态兜底定义（persona + routerPrompt 逐字）；兜底也失败 → 只告警不炸', async () => {
+    const { engine, registry, warns } = engineHarness((def) => def.plugins.some((row) => row.id === 'router-prompt-section'))
+    await engine.syncRouter()
     const def = registry.registered.get('dsh-router')!
-    expect((def.plugins[0]!.config as { prefix: string }).prefix).toBe(routerPrompt)
+    expect(rowById(def, 'router-persona')!.config).toMatchObject({ prefix: routerPrompt, complete: true })
+    expect(def.plugins.some((row) => row.id === 'router-prompt-section')).toBe(false)
 
     const { engine: engine2, registry: registry2, warns: warns2 } = engineHarness(() => true)
-    await engine2.syncRouter({ routerSystemPrompt: '动态提示词' })
+    await engine2.syncRouter()
     expect(registry2.registered.size).toBe(0)
     expect(warns2.length).toBeGreaterThan(0)
   })
 
-  it('defaults 变更 → unregister + register（Router 重注册同 id）', async () => {
+  it('重复 syncRouter → 同 id 重注册（幂等替换）；签名不带 defaults（默认值改走运行时解析）', async () => {
     const { engine, registry } = engineHarness()
-    await engine.syncRouter({ routerSystemPrompt: 'v1' })
-    await engine.syncRouter({ routerSystemPrompt: 'v2' })
+    await engine.syncRouter()
+    await engine.syncRouter()
     expect(registry.disposals).toEqual(['dsh-router'])
     expect(registry.registered.size).toBe(1)
-    expect((registry.registered.get('dsh-router')!.plugins[0]!.config as { prefix: string }).prefix).toBe('v2')
+    expect(registry.registered.get('dsh-router')!.plugins.some((row) => row.id === 'router-prompt-section')).toBe(true)
   })
 
   it('校验失败的 Router 动态定义不注册、直接走静态兜底', async () => {
@@ -518,8 +530,8 @@ describe('DynamicPresetEngine：Router 预设动态化与静态兜底', () => {
       validate: async () => ['bad row'],
       logger: { info: () => {}, warn: () => {} },
     })
-    await engine.syncRouter({ routerSystemPrompt: '动态提示词' })
+    await engine.syncRouter()
     const def = registry.registered.get('dsh-router')!
-    expect((def.plugins[0]!.config as { prefix: string }).prefix).toBe(routerPrompt)
+    expect(rowById(def, 'router-persona')!.config).toMatchObject({ prefix: routerPrompt, complete: true })
   })
 })

@@ -35,6 +35,8 @@ import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
 import { workerInstructions as WORKER_INSTRUCTIONS } from './host/prompts/worker-instructions.ts'
+import { SessionPromptStore } from './host/prompts/session-prompt.ts'
+import { routerPrompt } from './host/prompts/router.ts'
 import { BUILTIN_GENERAL_ID, BUILTIN_TEMPLATES, RouterDefaultsStore, WorkerTypeStore } from './host/templates.ts'
 import { dynamicPresetId } from './host/presets/dynamic.ts'
 import { DynamicPresetEngine, type AgentPresetsFace } from './host/presets/lifecycle.ts'
@@ -228,6 +230,16 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     seedTemplates: config.templates,
   })
   const defaultsStore = new RouterDefaultsStore(fs, join(config.dataDir, 'router-defaults.json'))
+  // 会话级系统提示词覆盖（v1.1 C5，规格 §7）：dataDir/router-prompts.json。
+  // 默认文本走内存缓存（section 的 text 回调是同步的，不能等 defaults 读盘）：
+  // 初值 = prompts/router.ts 静态缺省，启动恢复与每次保存默认后刷新缓存。
+  const sessionPrompts = new SessionPromptStore(fs, join(config.dataDir, 'router-prompts.json'))
+  let defaultsText = routerPrompt
+  /** prompt-section 行的同步文本源：当前会话覆盖 ?? 默认（缓存）。 */
+  const sessionPromptText = (sessionId?: string): string => {
+    if (sessionId === undefined) return defaultsText
+    return sessionPrompts.get(sessionId) ?? defaultsText
+  }
 
   /** templateId → 预设 id：启用类型走动态预设；内置通用 worker 走静态预设
    *  （保证任何情况下可派发）；禁用/未知 → undefined（回退静态角色预设，
@@ -514,10 +526,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     logger: { warn: (message: string) => log.warn(message) },
   })
 
-  // 供预设树的工具行 / 上下文行经作用域链注入；memory 一并挂上（brief 形状）。
+  // 供预设树的工具行 / 上下文行 / prompt-section 行经作用域链注入；memory 一并挂上（brief 形状）。
   ctx.provide('routerCore', {
     ...assembled.core,
     snapshotText: assembled.snapshotText,
+    // v1.1 C5：会话级系统提示词文本源（prompt-section 行的 complete section 消费）。
+    sessionPromptText,
     memory: { search: memoryFace.search },
   })
 
@@ -545,17 +559,19 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
 
   // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
-  // 状态装载 + 账本孤儿问题清理 + 快照缓存预热。
+  // 状态装载 + 账本孤儿问题清理 + 快照缓存预热 + 会话提示词覆盖装载。
   ctx.effect(() => {
     void (async () => {
       const defaults = await defaultsStore.get()
-      const routerOutcome = await engine.syncRouter(defaults)
+      defaultsText = defaults.routerSystemPrompt // 默认文本缓存刷新（section 同步读）
+      const routerOutcome = await engine.syncRouter()
       const enabledTypes = (await typeStore.list()).filter((record) => record.enabled)
       const outcomes = await engine.syncTypes(enabledTypes)
       if (outcomes.failed.length > 0) {
         log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`)
       }
       log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走静态预设）`)
+      await sessionPrompts.load()
       await ui.load()
       await ledger.listAll()
       const recovered = await assembled.recoverOrphans()
@@ -614,8 +630,24 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       getDefaults: () => defaultsStore.get(),
       saveDefaults: async (value) => {
         const saved = await defaultsStore.set(value)
-        await engine.syncRouter(saved) // 默认提示词变了 → Router 预设重注册（失败回退静态定义）
+        // C5 起 Router 动态定义不烘焙默认文本（prompt-section 运行时经
+        // sessionPromptText 现读），默认值变更只需刷新缓存，不再重注册预设——
+        // 也避免「保存默认时重注册瞬败 → 回退静态 persona 行 → 丢失会话级
+        // 覆盖能力」的回归路径。
+        defaultsText = saved.routerSystemPrompt
         return saved
+      },
+      // 会话级系统提示词（v1.1 C5）：读带 isDefault 标记；写空串 = 清除回落
+      // 默认。写后下一轮 system prompt 组装即生效（section text 每轮现读）。
+      getSessionPrompt: async (sessionId) => {
+        const override = sessionPrompts.get(sessionId)
+        return override !== undefined
+          ? { prompt: override, isDefault: false }
+          : { prompt: defaultsText, isDefault: true }
+      },
+      saveSessionPrompt: async (sessionId, prompt) => {
+        if (prompt === '') await sessionPrompts.clear(sessionId)
+        else await sessionPrompts.set(sessionId, prompt)
       },
     })
   })

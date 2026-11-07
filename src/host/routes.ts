@@ -19,6 +19,7 @@ import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
   RouterState,
+  SessionPromptResponse,
   TypesCreateRequest,
   TypesEnabledRequest,
   TypesItemResponse,
@@ -39,6 +40,8 @@ export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
 export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 /** Router 默认值（规格 §6）：GET 读 / POST 写。 */
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
+/** 会话级 Router 系统提示词（v1.1 C5，规格 §7）：GET 读 / PUT 写（空串=清除回落默认）。 */
+export const ROUTER_PROMPT_PATH = '/router/prompt'
 
 /** 路由需要的最小宿主面（webServer/connection 可缺席：缺席即不挂路由）。 */
 export interface RouterRoutesContext {
@@ -71,6 +74,10 @@ export interface RouterRoutesDeps {
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
+  /** 会话级系统提示词（v1.1 C5）：读当前生效文本 + 是否默认标记。 */
+  getSessionPrompt(sessionId: string): Promise<SessionPromptResponse>
+  /** 写会话覆盖（prompt 空串 = 清除回落默认）；写后下一轮 system prompt 组装即生效。 */
+  saveSessionPrompt(sessionId: string, prompt: string): Promise<void>
 }
 
 /** 域错误码 → HTTP 状态。 */
@@ -144,7 +151,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
 
   const handle = (
     path: string,
-    methods: readonly ('GET' | 'POST' | 'DELETE')[],
+    methods: readonly ('GET' | 'POST' | 'PUT' | 'DELETE')[],
     logic: (request: IncomingMessage) => Promise<{ status: number; body: string }>,
   ): void => {
     const allow = methods.join(', ')
@@ -160,7 +167,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
               response.end(admission.rejection === 401 ? 'unauthorized' : 'forbidden')
               return
             }
-            if (request.method === undefined || !methods.includes(request.method as 'GET' | 'POST' | 'DELETE')) {
+            if (request.method === undefined || !methods.includes(request.method as 'GET' | 'POST' | 'PUT' | 'DELETE')) {
               response.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow })
               response.end('method not allowed')
               return
@@ -272,6 +279,26 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     }
     const saved = await deps.saveDefaults({ routerSystemPrompt: body['routerSystemPrompt'], routerModel: body['routerModel'] })
     return { status: 200, body: JSON.stringify(saved) }
+  })
+
+  /* ── 会话级系统提示词（v1.1 Task C5，规格 §7）：GET 读 / PUT 写 ── */
+
+  handle(ROUTER_PROMPT_PATH, ['GET', 'PUT'], async (request) => {
+    if (request.method === 'GET') {
+      const url = new URL(request.url ?? '/', 'http://localhost')
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      if (sessionId === '') throw new LedgerError('bad-request', 'sessionId 查询参数必填')
+      const prompt = await deps.getSessionPrompt(sessionId)
+      return { status: 200, body: JSON.stringify(prompt) }
+    }
+    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    if (body === null || typeof body !== 'object'
+      || typeof body['sessionId'] !== 'string' || body['sessionId'] === ''
+      || typeof body['prompt'] !== 'string') {
+      throw new LedgerError('bad-request', 'sessionId(字符串) 与 prompt(字符串) 必填；prompt 空串 = 清除覆盖')
+    }
+    await deps.saveSessionPrompt(body['sessionId'], body['prompt'])
+    return { status: 200, body: JSON.stringify({ ok: true }) }
   })
 }
 

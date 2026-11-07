@@ -265,6 +265,49 @@ describe('C3 worker 类型 / Router 默认值（api 只增函数）', () => {
   })
 })
 
+describe('C5 会话系统提示词（GET/PUT /router/prompt）', () => {
+  it('getPrompt：GET ?sessionId=，返回 {prompt, isDefault}', async () => {
+    const calls: Array<{ input: string; method?: string }> = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        calls.push({ input, method: init?.method })
+        return jsonResponse(200, { prompt: '本会话覆盖', isDefault: false })
+      }),
+    })
+    await expect(api.getPrompt('s-router')).resolves.toEqual({ prompt: '本会话覆盖', isDefault: false })
+    expect(calls[0]).toEqual({ input: '/router/prompt?sessionId=s-router', method: undefined })
+  })
+
+  it('getPrompt 的 sessionId 走 URL 编码', async () => {
+    const calls: string[] = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input) => {
+        calls.push(input)
+        return jsonResponse(200, { prompt: 'x', isDefault: true })
+      }),
+    })
+    await api.getPrompt('a b&c')
+    expect(calls[0]).toBe('/router/prompt?sessionId=a%20b%26c')
+  })
+
+  it('saveSessionPrompt：PUT JSON {sessionId, prompt}', async () => {
+    const calls: Array<{ input: string; method?: string; body?: string }> = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        calls.push({ input, method: init?.method, body: init?.body === undefined ? undefined : String(init?.body) })
+        return jsonResponse(200, { ok: true })
+      }),
+    })
+    await expect(api.saveSessionPrompt('s-router', '新文本')).resolves.toBeUndefined()
+    expect(calls[0]?.input).toBe('/router/prompt')
+    expect(calls[0]?.method).toBe('PUT')
+    expect(JSON.parse(calls[0]?.body ?? '{}')).toEqual({ sessionId: 's-router', prompt: '新文本' })
+    // 空串 = 清除回落默认，也走 PUT（宿主按空串语义 clear）
+    await api.saveSessionPrompt('s-router', '')
+    expect(JSON.parse(calls[1]?.body ?? '{}')).toEqual({ sessionId: 's-router', prompt: '' })
+  })
+})
+
 describe('错误与超时', () => {
   it('5xx + {error} 透出为 RouterApiError（message 含 error 字段）', async () => {
     const api = createRouterApi({ fetch: jsonFetch(() => jsonResponse(503, { error: 'core service down' })) })
