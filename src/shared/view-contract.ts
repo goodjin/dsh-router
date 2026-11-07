@@ -25,6 +25,11 @@ export interface TaskCard {
   sessionId?: string
   /** 该任务当前待回答的问题数（open 状态）。 */
   waitingQuestions: number
+  /**
+   * 首请求缓存命中量（v1.3 C1，规格 §4）：任务会话首条 assistant/message 的
+   * usage.cacheReadTokens。缺省 = 适配器未上报（客户端显示「未上报」，不冒充 0）。
+   */
+  firstRequestCacheReadTokens?: number
   parentId?: string
   docVersion: number
 }
@@ -118,6 +123,19 @@ export interface RouterDefaults {
   routerSystemPrompt: string
   /** "provider/model"；空串 = 不钉（跟随宿主默认）。 */
   routerModel: string
+}
+
+/**
+ * worker 派生模式（v1.3 规格 §1，配置项 workerSpawnMode，默认 cache-priority）。
+ * cache-priority = 三预设统一组合 + 宿主分叉继承来源模型/历史 + 前缀缓存可命中；
+ * minimal-face = 各预设最小工具白名单 + 类型钉模型 + 无缓存复用（历史仍完整继承）。
+ * 两模式切换是配置级：存量任务/会话不受影响。
+ */
+export type WorkerSpawnMode = 'cache-priority' | 'minimal-face'
+
+/** GET/POST /router/spawn-mode 的请求体（POST）与响应（两侧同形）。 */
+export interface SpawnModeResponse {
+  mode: WorkerSpawnMode
 }
 
 /* ── Worker 类型管理路由的请求/响应类型（v1.1 Task C3；命名与路由对齐） ── */

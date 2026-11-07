@@ -56,10 +56,10 @@ import {
   type SessionObservationLike,
 } from './host/memory/adapter.ts'
 import type { FsAdapter } from './shared/fs-adapter.ts'
-import type { WorkerSpawnMode } from './shared/types.ts'
-import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
+import type { SpawnModeResponse, WorkerSpawnMode, WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD, type BreakerVisibility } from './host/guard/breaker.ts'
 import { DispatchBudgets } from './host/guard/budgets.ts'
+import { FirstRequestCacheObserver } from './host/observability.ts'
 
 import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from './host/guard/emergency.ts'
 
@@ -116,6 +116,11 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   maxActiveCards: number
   perTypeConcurrency: number
   maxDepth: number
+  routerPreset: string
+  supervisorPreset: string
+  workerPreset: string
+  /** worker 派生模式（v1.3 C2）：volatile，运行时经 /router/spawn-mode 可改。 */
+  workerSpawnMode: WorkerSpawnMode
   summarizationProvider: string
   summarizationModel: string
   questionBudget: number
@@ -173,6 +178,7 @@ export function spawnModeOr(value: unknown): WorkerSpawnMode {
   return resolved === 'minimal-face' ? 'minimal-face' : 'cache-priority'
 }
 
+/** 防御性解析（导出仅为测试与将来复用）：缺省补默认、枚举外回默认、负数取 0。 */
 function resolveRootConfig(raw: unknown): ResolvedRootConfig {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -185,6 +191,9 @@ function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     routerPreset: stringOr(source.routerPreset, 'dsh-router'),
     supervisorPreset: stringOr(source.supervisorPreset, 'dsh-router-supervisor'),
     workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
+    // v1.3 C2（规格 §1）：防御性解析——两枚举值之外一律回默认 cache-priority
+    //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
+    workerSpawnMode: spawnModeOr(source.workerSpawnMode),
     summarizationProvider: stringOr(source.summarizationProvider, ''),
     summarizationModel: stringOr(source.summarizationModel, ''),
     questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
@@ -249,6 +258,12 @@ function jsonFilePersistence<T>(path: string): {
 export function apply(ctx: RootContext, rawConfig: unknown): void {
   const config = resolveRootConfig(rawConfig)
   const log = ctx.logger?.(name) ?? { info: (m: string) => console.info(`[${name}] ${m}`), warn: (m: string) => console.warn(`[${name}] ${m}`) }
+
+  // v1.3 C2：worker 派生模式的运行时值（规格 §1 volatile）。初值 = 启动配置；
+  // 设置页 POST 即改（即时生效，存量任务/会话不受影响）；不落盘——宿主重启
+  // 回到启动配置值（要常驻用宿主设置页改 workerSpawnMode 配置）。
+  let currentSpawnMode: WorkerSpawnMode = config.workerSpawnMode
+  const spawnMode = (): WorkerSpawnMode => currentSpawnMode
 
   const fs = fsAdapter()
   const ledger = new TaskLedger(jsonFilePersistence<LedgerFile>(join(config.dataDir, 'ledger.json')))
@@ -409,7 +424,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
     // v1.3 A2：worker 生成模式与身份卡已发标记（Review Focus 5 幂等）。
-    mode: config.workerSpawnMode,
+    mode: spawnMode(),
     identityCards: {
       has: (sessionId: string) => ui.hasIdentityCard(sessionId),
       mark: (sessionId: string) => ui.markIdentityCardSent(sessionId),
@@ -496,7 +511,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // builtin 不经引擎（映射静态预设，ensureRegistered 对它恒 false）。
   const syncTypePresets = async (record: WorkerTypeRecord): Promise<void> => {
     if (!record.enabled || record.origin === 'builtin') return
-    const outcome = await engine.syncTypes([record], config.workerSpawnMode)
+    const outcome = await engine.syncTypes([record], spawnMode())
     for (const failed of outcome.failed) {
       log.warn(`类型 ${failed} 的动态预设注册失败（派发会被拒；保存的类型数据不受影响）`)
     }
@@ -671,7 +686,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       // 如实带出（不静默）。
       createRouterType: async (input) => {
         const record = await typeStore.create({ ...input, origin: 'router', enabled: true })
-        const presetRegistered = await engine.ensureRegistered(record, config.workerSpawnMode)
+        const presetRegistered = await engine.ensureRegistered(record, spawnMode())
         return { record, presetRegistered }
       },
     },
@@ -781,15 +796,23 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     return outcome
   }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
 
+  // 缓存命中观测（v1.3 C1，规格 §4 / r11）：根作用域 session/event 放行向上，
+  // 一个监听器收所有会话的落账事件——过滤任务会话首条 assistant/message 的
+  // data.usage.cacheReadTokens 记进账本任务（fire-and-forget，观测不挡事件流）。
+  const cacheObserver = new FirstRequestCacheObserver({ ledger, logger: { warn: (message) => log.warn(message) } })
+  ctx.on('session/event', ((session: unknown, event: unknown) => {
+    void cacheObserver.onSessionEvent(session, event)
+  }) as unknown as (...args: unknown[]) => unknown)
+
   // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
   // 状态装载 + 账本孤儿问题清理 + 快照缓存预热 + 会话提示词覆盖装载。
   ctx.effect(() => {
     void (async () => {
       const defaults = await defaultsStore.get()
       defaultsText = defaults.routerSystemPrompt // 默认文本缓存刷新（section 同步读）
-      const routerOutcome = await engine.syncRouter(config.workerSpawnMode)
+      const routerOutcome = await engine.syncRouter(spawnMode())
       const enabledTypes = (await typeStore.list()).filter((record) => record.enabled)
-      const outcomes = await engine.syncTypes(enabledTypes, config.workerSpawnMode)
+      const outcomes = await engine.syncTypes(enabledTypes, spawnMode())
       if (outcomes.failed.length > 0) {
         log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`)
       }
@@ -885,6 +908,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         // 覆盖能力」的回归路径。
         defaultsText = saved.routerSystemPrompt
         return saved
+      },
+      // v1.3 C2 spawn-mode（规格 §1 volatile）：内存易变 holder——POST 即时生效
+      // 不落盘，宿主重启回到启动配置值（要常驻用宿主设置页改 workerSpawnMode
+      // 配置）。Part A 的组合引擎/分叉创建消费同一 holder（读 spawnMode()）。
+      getSpawnMode: async (): Promise<SpawnModeResponse> => ({ mode: spawnMode() }),
+      saveSpawnMode: async (mode: WorkerSpawnMode): Promise<SpawnModeResponse> => {
+        currentSpawnMode = mode
+        return { mode: spawnMode() }
       },
       // 会话级系统提示词（v1.1 C5）：读带 isDefault 标记；写空串 = 清除回落
       // 默认。写后下一轮 system prompt 组装即生效（section text 每轮现读）。

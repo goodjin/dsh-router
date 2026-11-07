@@ -17,9 +17,11 @@ import type {
   RouterDefaults,
   RouterState,
   SessionPromptResponse,
+  SpawnModeResponse,
   TypesCreateRequest,
   TypesEnabledRequest,
   TypesUpdateRequest,
+  WorkerSpawnMode,
   WorkerTypeRecord,
 } from '../shared/view-contract.ts'
 
@@ -75,6 +77,10 @@ export interface RouterApi {
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
+  /** 读当前生效的 worker 派生模式（v1.3 C2）。 */
+  getSpawnMode(): Promise<SpawnModeResponse>
+  /** 写 worker 派生模式（volatile：即时生效，重启回到启动配置值）。 */
+  saveSpawnMode(mode: WorkerSpawnMode): Promise<SpawnModeResponse>
   /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */
   /** 当前会话生效文本（无覆盖回落默认，isDefault 标记）。 */
   getPrompt(sessionId: string): Promise<SessionPromptResponse>
@@ -95,6 +101,8 @@ export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
 export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
+/** v1.3 Task C2：worker 派生模式（与宿主 routes 一侧逐字对齐）。 */
+export const ROUTER_SPAWN_MODE_PATH = '/router/spawn-mode'
 /** v1.1 Task C5：会话级 Router 系统提示词（与宿主 routes 一侧逐字对齐）。 */
 export const ROUTER_PROMPT_PATH = '/router/prompt'
 export const ROUTER_NOTIFICATIONS_ACK_PATH = '/router/notifications/ack'
@@ -250,6 +258,26 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       const body = await postJson(ROUTER_DEFAULTS_PATH, value as unknown as Record<string, unknown>)
       if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
       return body as RouterDefaults
+    },
+
+    /* ── v1.3 Task C2：worker 派生模式 ── */
+
+    async getSpawnMode(): Promise<SpawnModeResponse> {
+      const body = await request(ROUTER_SPAWN_MODE_PATH, { headers: { accept: 'application/json' } })
+      const mode = (body as { mode?: unknown } | null)?.mode
+      if (mode !== 'cache-priority' && mode !== 'minimal-face') {
+        throw new RouterApiError('router: spawn-mode response missing mode')
+      }
+      return { mode }
+    },
+
+    async saveSpawnMode(mode: WorkerSpawnMode): Promise<SpawnModeResponse> {
+      const body = await postJson(ROUTER_SPAWN_MODE_PATH, { mode })
+      const saved = (body as { mode?: unknown } | null)?.mode
+      if (saved !== 'cache-priority' && saved !== 'minimal-face') {
+        throw new RouterApiError('router: spawn-mode response missing mode')
+      }
+      return { mode: saved }
     },
 
     /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */

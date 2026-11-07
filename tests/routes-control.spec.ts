@@ -28,7 +28,7 @@ import {
   runEmergencyPause,
   type EmergencyPauseReport,
 } from '../src/host/guard/emergency.ts'
-import type { RouterState } from '../src/shared/view-contract.ts'
+import type { RouterState, WorkerSpawnMode } from '../src/shared/view-contract.ts'
 
 /* ────────────────────────── 假 HTTP 上下文（照 routes-worker-types 同款） ────────────────────────── */
 
@@ -121,6 +121,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
   const breaker = h.breaker!
   let cardSeq = 0
   const notifications = new NotificationStore({ fs: h.memfs.fs, path: '/guard/notifications.json', newId: () => `card-${++cardSeq}`, now: () => 5000 })
+  const spawnModeHolder: { mode: WorkerSpawnMode } = { mode: 'cache-priority' }
   const deps: RouterRoutesDeps = {
     // v1.2 B3 通知确认：经统一 NotificationStore。
     ackNotification: (cardId: string) => notifications.ack(cardId),
@@ -153,6 +154,12 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
     },
     async saveDefaults(value) {
       return value
+    },
+    /* ── v1.3 C2 spawn-mode：与 entry.ts 同构的内存易变 holder ── */
+    getSpawnMode: async () => ({ mode: spawnModeHolder.mode }),
+    saveSpawnMode: async (mode) => {
+      spawnModeHolder.mode = mode
+      return { mode: spawnModeHolder.mode }
     },
     async getSessionPrompt() {
       return { prompt: '', isDefault: true }
@@ -198,7 +205,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
         notify: async (input) => notifications.push({ kind: 'anomaly', title: input.title, summary: input.summary, actions: anomalyActions() }),
       }),
   }
-  return { ...h, deps, notifications, breaker, interrupt: opts.interrupt }
+  return { ...h, deps, notifications, breaker, interrupt: opts.interrupt, spawnModeHolder }
 }
 
 /** 派发一个 worker 任务（经真核心，走模板校验→建会话→投递→dispatched 全链）。 */
@@ -257,6 +264,12 @@ describe('POST /router/tasks/control（B4）', () => {
       async saveDefaults(value) {
         return value
       },
+      async getSpawnMode() {
+        return { mode: 'cache-priority' as const }
+      },
+      async saveSpawnMode(mode: WorkerSpawnMode) {
+        return { mode }
+      },
       async getSessionPrompt() {
         return { prompt: '', isDefault: true }
       },
@@ -275,6 +288,7 @@ describe('POST /router/tasks/control（B4）', () => {
     expect(paths).toContain('/router/tasks/control')
     expect(paths).toContain('/router/breaker/unfreeze')
     expect(paths).toContain('/router/emergency-pause')
+    expect(paths).toContain('/router/spawn-mode')
   })
 
   it('pause：running→paused，执行会话收到暂停通知（steer）', async () => {
@@ -704,5 +718,63 @@ describe('guard 通知段（B4→B3 合并后：紧急暂停落统一 Notificati
       { status: 'completed', sessionId: 's-5' },
     ])
     expect(targets).toEqual(['s-1', 's-2'])
+  })
+})
+
+/* ────────────────────────── spawn-mode 读写（v1.3 Task C2） ────────────────────────── */
+
+describe('GET/POST /router/spawn-mode（v1.3 C2，规格 §1 volatile）', () => {
+  it('路由挂上：GET 读初始值 cache-priority；POST minimal-face 写入后 GET 反映新值', async () => {
+    const h = await controlHarness()
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+
+    const read1 = fakeExchange('GET', '/router/spawn-mode')
+    await handlerOf(routes, '/router/spawn-mode')(read1.req, read1.res)
+    expect(read1.captured.status).toBe(200)
+    expect(JSON.parse(read1.captured.body!)).toEqual({ mode: 'cache-priority' })
+
+    const write = fakeExchange('POST', '/router/spawn-mode', JSON.stringify({ mode: 'minimal-face' }))
+    await handlerOf(routes, '/router/spawn-mode')(write.req, write.res)
+    expect(write.captured.status).toBe(200)
+    expect(JSON.parse(write.captured.body!)).toEqual({ mode: 'minimal-face' })
+
+    const read2 = fakeExchange('GET', '/router/spawn-mode')
+    await handlerOf(routes, '/router/spawn-mode')(read2.req, read2.res)
+    expect(JSON.parse(read2.captured.body!)).toEqual({ mode: 'minimal-face' })
+    expect(h.spawnModeHolder.mode).toBe('minimal-face')
+  })
+
+  it('POST 写回 cache-priority 往返；非法值/缺字段 → 400', async () => {
+    const h = await controlHarness()
+    await h.deps.saveSpawnMode('minimal-face')
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const handler = handlerOf(routes, '/router/spawn-mode')
+
+    const back = fakeExchange('POST', '/router/spawn-mode', JSON.stringify({ mode: 'cache-priority' }))
+    await handler(back.req, back.res)
+    expect(back.captured.status).toBe(200)
+    expect(h.spawnModeHolder.mode).toBe('cache-priority')
+
+    const bogus = fakeExchange('POST', '/router/spawn-mode', JSON.stringify({ mode: 'bogus' }))
+    await handler(bogus.req, bogus.res)
+    expect(bogus.captured.status).toBe(400)
+    expect(JSON.parse(bogus.captured.body!)).toMatchObject({ error: expect.stringContaining('mode') })
+
+    const missing = fakeExchange('POST', '/router/spawn-mode', JSON.stringify({}))
+    await handler(missing.req, missing.res)
+    expect(missing.captured.status).toBe(400)
+    // 非法写入不动当前值
+    expect(h.spawnModeHolder.mode).toBe('cache-priority')
+  })
+
+  it('仅 GET/POST：PUT → 405', async () => {
+    const h = await controlHarness()
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('PUT', '/router/spawn-mode')
+    await handlerOf(routes, '/router/spawn-mode')(exchange.req, exchange.res)
+    expect(exchange.captured.status).toBe(405)
   })
 })

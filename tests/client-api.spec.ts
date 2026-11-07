@@ -360,3 +360,29 @@ describe('错误与超时', () => {
     expect((error as RouterApiError).message).toMatch(/timeout/i)
   })
 })
+
+describe('C2 派生模式（GET/POST /router/spawn-mode）', () => {
+  it('getSpawnMode：GET 读 {mode}；saveSpawnMode：POST 写 {mode} 并回显', async () => {
+    const calls: Array<{ input: string; method?: string; body?: string }> = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        calls.push({ input, method: init?.method, body: init?.body === undefined ? undefined : String(init?.body) })
+        const requested = calls.length >= 2 ? { mode: 'minimal-face' } : { mode: 'cache-priority' }
+        return jsonResponse(200, requested)
+      }),
+    })
+    await expect(api.getSpawnMode()).resolves.toEqual({ mode: 'cache-priority' })
+    await expect(api.saveSpawnMode('minimal-face')).resolves.toEqual({ mode: 'minimal-face' })
+    expect(calls[0]).toEqual({ input: '/router/spawn-mode', method: undefined })
+    expect(calls[1]?.method).toBe('POST')
+    expect(JSON.parse(calls[1]?.body ?? '{}')).toEqual({ mode: 'minimal-face' })
+  })
+
+  it('saveSpawnMode 400 错误体透出（非法 mode 被宿主拒）', async () => {
+    const api = createRouterApi({ fetch: jsonFetch(() => jsonResponse(400, { error: "mode 必须是 'cache-priority' | 'minimal-face' 之一" })) })
+    const error = await api.saveSpawnMode('bogus' as 'cache-priority').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(RouterApiError)
+    expect((error as RouterApiError).status).toBe(400)
+    expect((error as RouterApiError).message).toContain('mode')
+  })
+})

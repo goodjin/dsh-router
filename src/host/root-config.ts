@@ -8,7 +8,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { BUILTIN_TEMPLATES } from './templates.ts'
-import type { WorkerSpawnMode } from '../shared/types.ts'
+import type { WorkerSpawnMode } from '../shared/view-contract.ts'
 
 /** 挂载行 config 的声明形状（字段全部可选，volatile 可编辑）。 */
 export interface RouterRootConfig {
@@ -21,6 +21,12 @@ export interface RouterRootConfig {
   supervisorPreset?: string
   workerPreset?: string
   templates?: WorkerTemplate[]
+  /**
+   * worker 派生模式（v1.3 规格 §1）：cache-priority = 统一组合 + 分叉继承
+   * （默认）；minimal-face = 各预设最小工具 + 类型钉模型。volatile：设置页
+   * 可改，存量任务/会话不受影响。
+   */
+  workerSpawnMode?: WorkerSpawnMode
   /** 记忆摘要的模型路由对（都非空才生效；缺省用活任务会话的最近路由）。 */
   summarizationProvider?: string
   summarizationModel?: string
@@ -55,6 +61,7 @@ export const Config = Schema.object({
   routerPreset: Schema.string().default('dsh-router').volatile(),
   supervisorPreset: Schema.string().default('dsh-router-supervisor').volatile(),
   workerPreset: Schema.string().default('dsh-router-worker').volatile(),
+  workerSpawnMode: Schema.union(['cache-priority', 'minimal-face']).default('cache-priority').volatile(),
   summarizationProvider: Schema.string().default('').volatile(),
   summarizationModel: Schema.string().default('').volatile(),
   questionBudget: Schema.number().default(2).volatile(),

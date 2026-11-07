@@ -12,6 +12,7 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  SPAWN_MODE_MODEL_HINT,
   canDisableRecord,
   canEditRecord,
   dedupeOrdered,
@@ -23,6 +24,8 @@ import {
   normalizeTypeForm,
   originLabel,
   skillCatalogOf,
+  spawnModeDescription,
+  spawnModeLabel,
   typeFormFromRecord,
   typeManageReducer,
   validateTypeForm,
@@ -293,5 +296,49 @@ describe('reducer 往返（保存/启停/删除/加载/默认值）', () => {
     expect(saved.defaultsDraft).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
     const reset = typeManageReducer(saved, { type: 'defaults-reset' })
     expect(reset.defaultsDraft).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
+  })
+})
+
+/* ────────────────────────── v1.3 Task C2：派生模式 ────────────────────────── */
+
+describe('spawn-mode 文案（spawnModeLabel / spawnModeDescription / 提示）', () => {
+  it('两模式各有标签；语义说明按模式区分（缓存优先 vs 最小面）', () => {
+    expect(spawnModeLabel('cache-priority')).toContain('缓存优先')
+    expect(spawnModeLabel('minimal-face')).toContain('最小面')
+    expect(spawnModeDescription('cache-priority')).toContain('缓存')
+    expect(spawnModeDescription('cache-priority')).toContain('分叉')
+    expect(spawnModeDescription('minimal-face')).toContain('最小工具')
+    expect(spawnModeDescription('minimal-face')).toContain('钉')
+    expect(spawnModeDescription('cache-priority')).not.toBe(spawnModeDescription('minimal-face'))
+  })
+
+  it('「切模型即换缓存」提示常在且提到模型切换的缓存代价', () => {
+    expect(SPAWN_MODE_MODEL_HINT).toContain('切模型')
+    expect(SPAWN_MODE_MODEL_HINT).toContain('缓存')
+  })
+})
+
+describe('reducer：spawn-mode 状态（v1.3 C2）', () => {
+  it('初始 spawnMode 为 null（未加载）；spawn-loaded 落当前生效值', () => {
+    expect(initialTypeManageState().spawnMode).toBeNull()
+    const loaded = typeManageReducer(initialTypeManageState(), { type: 'spawn-loaded', mode: 'cache-priority' })
+    expect(loaded.spawnMode).toBe('cache-priority')
+  })
+
+  it('save-start 置 busy；save-done 落新值清 busy；失败保旧值并记 spawnError', () => {
+    const loaded = typeManageReducer(initialTypeManageState(), { type: 'spawn-loaded', mode: 'cache-priority' })
+    const starting = typeManageReducer(loaded, { type: 'spawn-save-start' })
+    expect(starting.spawnBusy).toBe(true)
+    const done = typeManageReducer(starting, { type: 'spawn-save-done', mode: 'minimal-face' })
+    expect(done.spawnMode).toBe('minimal-face')
+    expect(done.spawnBusy).toBe(false)
+
+    const failing = typeManageReducer(done, { type: 'spawn-save-start' })
+    const failed = typeManageReducer(failing, { type: 'spawn-failed', message: 'HTTP 400' })
+    expect(failed.spawnMode).toBe('minimal-face')
+    expect(failed.spawnBusy).toBe(false)
+    expect(failed.spawnError).toBe('HTTP 400')
+    const recovered = typeManageReducer(failed, { type: 'spawn-loaded', mode: 'minimal-face' })
+    expect(recovered.spawnError).toBeNull()
   })
 })

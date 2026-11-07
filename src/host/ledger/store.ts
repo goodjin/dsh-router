@@ -235,6 +235,21 @@ export class TaskLedger {
     })
   }
 
+  /**
+   * 记录任务执行会话首请求的缓存命中量（v1.3 C1，规格 §4）。一次性语义：
+   * 已有值不覆盖——观察器只对首条 assistant/message 调用，账本层再兜一道底。
+   */
+  async recordFirstCacheRead(id: string, tokens: number): Promise<TaskRecord> {
+    return this.commit(() => {
+      const task = this.mustGet(id)
+      if (task.firstRequestCacheReadTokens === undefined) {
+        task.firstRequestCacheReadTokens = tokens
+        task.updatedAt = this.clock()
+      }
+      return task
+    })
+  }
+
   /** 更新一句话进度（worker 汇报）。 */
   async updateProgress(id: string, text: string): Promise<TaskRecord> {
     return this.commit(() => {

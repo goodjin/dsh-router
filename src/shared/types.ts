@@ -15,7 +15,6 @@ export type RoleKind = 'router' | 'supervisor' | 'worker'
  * - minimal-face：插件复刻五步分叉（agents.create+buildForkSeed+worker 预设），
  *   组合维持各角色最小工具面（静态 yml 两行原样）。
  */
-export type WorkerSpawnMode = 'cache-priority' | 'minimal-face'
 
 /** 任务状态全集（迁移闭包见 machine.ts 的迁移表）。 */
 export type TaskStatus =
@@ -103,6 +102,12 @@ export interface TaskRecord {
   docVersion: number
   /** 完成记录（首次完成的快照，幂等去重返回它）。 */
   result?: TaskResult
+  /**
+   * 首请求缓存命中量（v1.3 C1，规格 §4）：任务会话首条 assistant/message 的
+   * `data.usage.cacheReadTokens`。缺省 = 适配器未上报（「未上报」如实投影，
+   * 不冒充 0——pi-ai 路径命中为 0 时省略字段，r11 §5）。
+   */
+  firstRequestCacheReadTokens?: number
   acceptancePolicy: AcceptancePolicy
   createdAt: number
   updatedAt: number

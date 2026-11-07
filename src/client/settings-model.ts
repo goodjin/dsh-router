@@ -13,9 +13,28 @@
  *   确认提示，二次 form-discard 才放弃。
  */
 
-import type { RouterDefaults, WorkerTypeRecord } from '../shared/view-contract.ts'
+import type { RouterDefaults, WorkerSpawnMode, WorkerTypeRecord } from '../shared/view-contract.ts'
 
 export type TypeRole = 'worker' | 'supervisor'
+
+/* ────────────────────────── v1.3 Task C2：派生模式文案 ────────────────────────── */
+
+/** 模式选择器标签。 */
+export function spawnModeLabel(mode: WorkerSpawnMode): string {
+  return mode === 'cache-priority' ? '缓存优先（默认）' : '最小面'
+}
+
+/** 模式语义说明（规格 §1 两列差异的如实表述）。 */
+export function spawnModeDescription(mode: WorkerSpawnMode): string {
+  return mode === 'cache-priority'
+    ? '三预设统一组合（同一段身份中立 persona + 同一套工具超集）；worker 由宿主分叉创建，继承来源会话的模型与历史——系统提示词前缀逐字节一致，前缀缓存可命中（只算新尾巴）。授权范围由身份卡声明 + 执行层硬闸把关。'
+    : '各预设保持最小工具白名单；worker 创建后按类型清单钉模型。系统提示词与来源会话不同，前缀缓存断裂（无缓存复用；历史仍完整继承）。授权范围同样由执行层硬闸把关。'
+}
+
+/** 「切模型即换缓存」提示（缓存优先下类型 models 仅作展示与手动切换建议）。 */
+export const SPAWN_MODE_MODEL_HINT =
+  '注意：切模型即换缓存——worker 手动切换模型（或换路由）后，前缀缓存立即失效，' +
+  '下一请求要全量重算。缓存优先模式下类型 models 仅作展示与手动切换建议，不是默认钉定。'
 
 /** 类型编辑表单（templateId=null 表示新建）。 */
 export interface TypeFormState {
@@ -172,6 +191,15 @@ export interface TypeManageState {
   defaultsDirty: boolean
   /** 正在保存默认值。 */
   defaultsBusy: boolean
+  /**
+   * 当前生效的 worker 派生模式（v1.3 C2；null = 未加载）。
+   * volatile 语义：保存即生效、不落盘，重启回到启动配置值——UI 文案如实标注。
+   */
+  spawnMode: WorkerSpawnMode | null
+  /** 派生模式保存进行中（选择器禁用）。 */
+  spawnBusy: boolean
+  /** 派生模式保存失败信息（保旧值显示，下次操作或重载清除）。 */
+  spawnError: string | null
   /** 打开的类型表单（null = 关闭）。 */
   editing: TypeFormState | null
   /** 打开表单时的快照（脏判断基线；新建时 = emptyTypeForm）。 */
@@ -197,6 +225,9 @@ export function initialTypeManageState(): TypeManageState {
     defaultsDraft: null,
     defaultsDirty: false,
     defaultsBusy: false,
+    spawnMode: null,
+    spawnBusy: false,
+    spawnError: null,
     editing: null,
     baseline: null,
     confirmDiscard: false,
@@ -229,6 +260,10 @@ export type TypeManageAction =
   | { type: 'defaults-save-start' }
   | { type: 'defaults-save-done'; defaults: RouterDefaults }
   | { type: 'defaults-reset' }
+  | { type: 'spawn-loaded'; mode: WorkerSpawnMode }
+  | { type: 'spawn-save-start' }
+  | { type: 'spawn-save-done'; mode: WorkerSpawnMode }
+  | { type: 'spawn-failed'; message: string }
 
 /** 关表单（清编辑/基线/确认/错误）。 */
 function closeForm(state: TypeManageState): TypeManageState {
@@ -315,6 +350,15 @@ export function typeManageReducer(state: TypeManageState, action: TypeManageActi
       return { ...state, defaultsBusy: false, defaults: action.defaults, defaultsDraft: { ...action.defaults }, defaultsDirty: false }
     case 'defaults-reset':
       return { ...state, defaultsDraft: state.defaults !== null ? { ...state.defaults } : state.defaultsDraft, defaultsDirty: false }
+    /* ── v1.3 C2：派生模式（volatile，保存即生效；失败保旧值不静默） ── */
+    case 'spawn-loaded':
+      return { ...state, spawnMode: action.mode, spawnError: null }
+    case 'spawn-save-start':
+      return { ...state, spawnBusy: true, spawnError: null }
+    case 'spawn-save-done':
+      return { ...state, spawnBusy: false, spawnMode: action.mode, spawnError: null }
+    case 'spawn-failed':
+      return { ...state, spawnBusy: false, spawnError: action.message }
     default:
       return state
   }

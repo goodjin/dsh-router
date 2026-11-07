@@ -635,6 +635,13 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async saveDefaults(value) {
       return value
     },
+    // v1.3 C2 spawn-mode 桩：本文件用例不触达，只为满足 deps 形状。
+    async getSpawnMode() {
+      return { mode: 'cache-priority' as const }
+    },
+    async saveSpawnMode(mode) {
+      return { mode }
+    },
     async getSessionPrompt() {
       return { prompt: '', isDefault: true }
     },
@@ -657,7 +664,7 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
 }
 
 describe('HTTP 路由（exact + admit）', () => {
-  it('十三条 exact 路由全部挂上（C4 redirect/ack + C3 worker 类型/默认值 + C5 会话提示词 + B4 控制三条）', () => {
+  it('十四条 exact 路由全部挂上（C4 redirect/ack + C3 worker 类型/默认值 + C5 会话提示词 + B4 控制三条 + v1.3 C2 spawn-mode）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -671,6 +678,7 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/worker-types/enabled',
       '/router/notifications/ack',
       '/router/defaults',
+      '/router/spawn-mode',
       '/router/prompt',
       '/router/tasks/control',
       '/router/breaker/unfreeze',
