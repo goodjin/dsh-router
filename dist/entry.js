@@ -30,6 +30,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import Schema from '@deepseek-ai/schemastery';
 import { TaskLedger } from "./host/ledger/store.js";
+import { LedgerError } from "./host/ledger/errors.js";
 import { TaskDocStore } from "./host/docs/task-docs.js";
 import { Scheduler } from "./host/ledger/scheduler.js";
 import { SessionBridge } from "./host/bridge/sessions.js";
@@ -47,11 +48,12 @@ import { dynamicPresetId } from "./host/presets/dynamic.js";
 import { DynamicPresetEngine } from "./host/presets/lifecycle.js";
 import { MemoryDocStore } from "./host/memory/store.js";
 import { ClosureIntentStore, OutcomeAdjudicator } from "./host/guard/adjudicator.js";
-import { NotificationStore } from "./host/guard/notifications.js";
+import { NotificationStore, anomalyActions } from "./host/guard/notifications.js";
 import { search as searchMemory } from "./host/memory/retrieval.js";
 import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from "./host/guard/breaker.js";
 import { DispatchBudgets } from "./host/guard/budgets.js";
+import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from "./host/guard/emergency.js";
 export { Config } from "./host/root-config.js";
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router';
@@ -187,6 +189,8 @@ export function apply(ctx, rawConfig) {
     // 派发预算（v1.2 规格 §3）：以轮次近似用户消息边界——running→true 即新轮
     //（下方 onStatusChange 接线；ask_user 的回答开启新轮，预算自然重计）。
     const budgets = new DispatchBudgets();
+    // guard 通知段（v1.2 B4 最小投影）：B3 的统一通知面未合并前，紧急暂停的异常
+    // 通知先落 <dataDir>/guard-notifications.json（guard-state.json 由熔断器独占，
     // worker 类型存储 + Router 默认值（v1.1 规格 §5/§6；首启种子化导入 v1 Config
     // 模板后 legacyImported 落盘，v1 templates 配置通道退役）。
     const typeStore = new WorkerTypeStore(fs, join(config.dataDir, 'worker-types.json'), {
@@ -296,6 +300,9 @@ export function apply(ctx, rawConfig) {
         presets: { supervisor: config.supervisorPreset, worker: config.workerPreset },
         forTemplate: resolvePresetForTemplate,
         types: { get: (templateId) => typeStore.get(templateId) },
+        // 紧急暂停的中断面（v1.2 B4，r8 §5）：agents.get(id)?.cancel —— 幂等、
+        // 原因留痕 turn/end、keepInbox 保住排队消息；冷会话天然 no-op。
+        interruptFace: ctx.agents,
         workerInstructions: () => workerInstructionsText(),
         logger: { warn: (message) => log.warn(message) },
         signal: undefined,
@@ -626,9 +633,12 @@ export function apply(ctx, rawConfig) {
                 if (dedup !== undefined)
                     await dedup.resolve();
                 const state = await assembled.workbench.state(workspaceId);
-                return dedup !== undefined
+                const withRedirect = dedup !== undefined
                     ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
                     : state;
+                // v1.2 B4 最小通知投影：guard 通知段非空才带键（lossless；C1 统一通知卡
+                // 合并后由此键承载全部卡）。
+                return withRedirect;
             },
             createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
             answerQuestion: async (questionId, answers) => {
@@ -686,6 +696,52 @@ export function apply(ctx, rawConfig) {
                     await sessionPrompts.set(sessionId, prompt);
             },
             ackNotification: (cardId) => notifications.ack(cardId),
+            /* ── 用户控制与紧急暂停（v1.2 B4）：用户发起，绕过模型侧预算；caller 记 'user' ── */
+            controlTask: async (taskId, action) => {
+                if (action === 'redispatch') {
+                    // redispatch 是再派发：受熔断约束（冻结时明确提示先解除；其余闸门
+                    // ——状态机/依赖/深度——由 supplementTask 的既有路径把守）。
+                    const breakerState = await breaker.state();
+                    if (breakerState.frozen) {
+                        throw new LedgerError('dispatch-frozen', `派发已冻结（${breakerState.reason ?? '原因未记录'}）：重派被拒——请先解除冻结（POST /router/breaker/unfreeze 或工作台「解除冻结」），再重派任务 ${taskId}`);
+                    }
+                    await assembled.core.supplementTask('user', taskId, ['用户重派：请按任务书当前版本推进（用户经控制路由发起）']);
+                    const record = assembled.core.getTask(taskId);
+                    return { status: record?.status ?? 'failed' };
+                }
+                return assembled.core.controlTask('user', taskId, action);
+            },
+            unfreezeBreaker: async () => {
+                const beforeState = await breaker.state();
+                const before = { frozen: beforeState.frozen };
+                if (beforeState.frozen) {
+                    if (beforeState.reason !== undefined)
+                        before.reason = beforeState.reason;
+                    if (beforeState.frozenAt !== undefined)
+                        before.frozenAt = beforeState.frozenAt;
+                }
+                await breaker.unfreeze();
+                const afterState = await breaker.state();
+                return { before, after: { frozen: afterState.frozen } };
+            },
+            emergencyPause: async () => runEmergencyPause({
+                targetSessionIds: async () => emergencyPauseTargets(await ledger.listAll()),
+                freeze: async (reason) => {
+                    await breaker.freeze(reason);
+                    const state = await breaker.state();
+                    return state.frozen && state.reason !== undefined
+                        ? { frozen: state.frozen, reason: state.reason }
+                        : { frozen: state.frozen };
+                },
+                interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
+                notify: async (input) => notifications.push({
+                    kind: 'anomaly',
+                    title: input.title,
+                    summary: input.summary,
+                    actions: anomalyActions(),
+                }),
+                logger: { warn: (message) => log.warn(message) },
+            }),
         });
     });
     function workerInstructionsText() {
