@@ -12,7 +12,7 @@ import { buildToolDefinitions } from "./host/tools/index.js";
 export const name = 'router-tools';
 export const inject = ['tools', 'routerCore'];
 export const Config = Schema.object({
-    role: Schema.union(['router', 'supervisor', 'worker']).required(),
+    role: Schema.union(['router', 'supervisor', 'worker', 'superset']).required(),
 });
 /** 按角色注册编排工具子集；返回联合注销器。 */
 export function apply(ctx, config) {

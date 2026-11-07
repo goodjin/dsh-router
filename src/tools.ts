@@ -10,20 +10,20 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { buildToolDefinitions } from './host/tools/index.ts'
-import type { RoleKind } from './shared/types.ts'
+import type { ToolRowRole } from './host/tools/index.ts'
 
 /** 本入口的插件名（诊断显示用；装载行的 name 是带子路径的说明符）。 */
 export const name = 'router-tools'
 
 export const inject = ['tools', 'routerCore'] as const
 
-/** 行配置：角色必填，决定注册哪个工具子集。 */
+/** 行配置：角色必填，决定注册哪个工具子集（'superset' = 全量+运行期角色闸，v1.3 A1）。 */
 export interface RouterToolsConfig {
-  role: RoleKind
+  role: ToolRowRole
 }
 
 export const Config = Schema.object({
-  role: Schema.union(['router', 'supervisor', 'worker']).required(),
+  role: Schema.union(['router', 'supervisor', 'worker', 'superset']).required(),
 })
 
 /** 本入口需要的宿主面（窄接口）。 */

@@ -91,6 +91,10 @@ function templatesOr(value) {
     }
     return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES;
 }
+/** 模式解析（v1.3 A1）：只认两个合法值，其余回默认 cache-priority。导出供测试。 */
+export function spawnModeOr(value) {
+    return value === 'minimal-face' ? 'minimal-face' : 'cache-priority';
+}
 function resolveRootConfig(raw) {
     const source = (typeof raw === 'object' && raw !== null ? raw : {});
     const home = process.env.DSH_HOME ?? join(homedir(), '.dsh');
@@ -111,6 +115,7 @@ function resolveRootConfig(raw) {
         breakerWindowMs: nonNegative(source.breakerWindowMs, DEFAULT_BREAKER_WINDOW_MS),
         breakerInfraThreshold: nonNegative(source.breakerInfraThreshold, DEFAULT_INFRA_THRESHOLD),
         breakerCreationThreshold: nonNegative(source.breakerCreationThreshold, DEFAULT_CREATION_THRESHOLD),
+        workerSpawnMode: spawnModeOr(source.workerSpawnMode),
         templates: templatesOr(source.templates),
     };
 }
@@ -321,7 +326,7 @@ export function apply(ctx, rawConfig) {
     const syncTypePresets = async (record) => {
         if (!record.enabled || record.origin === 'builtin')
             return;
-        const outcome = await engine.syncTypes([record]);
+        const outcome = await engine.syncTypes([record], config.workerSpawnMode);
         for (const failed of outcome.failed) {
             log.warn(`类型 ${failed} 的动态预设注册失败（派发会被拒；保存的类型数据不受影响）`);
         }
@@ -484,7 +489,7 @@ export function apply(ctx, rawConfig) {
             // 如实带出（不静默）。
             createRouterType: async (input) => {
                 const record = await typeStore.create({ ...input, origin: 'router', enabled: true });
-                const presetRegistered = await engine.ensureRegistered(record);
+                const presetRegistered = await engine.ensureRegistered(record, config.workerSpawnMode);
                 return { record, presetRegistered };
             },
         },
@@ -499,12 +504,14 @@ export function apply(ctx, rawConfig) {
         logger: { warn: (message) => log.warn(message) },
     });
     // 供预设树的工具行 / 上下文行 / prompt-section 行经作用域链注入；memory 一并挂上（brief 形状）。
+    // callerRoleOf（v1.3 A1）：superset 工具行执行层硬闸的角色数据源。
     ctx.provide('routerCore', {
         ...assembled.core,
         snapshotText: assembled.snapshotText,
         // v1.1 C5：会话级系统提示词文本源（prompt-section 行的 complete section 消费）。
         sessionPromptText,
         memory: { search: memoryFace.search },
+        callerRoleOf: (sessionId) => assembled.core.callerRoleOf(sessionId),
     });
     // 会话空闲：压缩驱动（pending 只由我方投递打标；idle 且无排队消息才动作）
     // + 记忆增量摘要（worker/主管会话后台跑，同会话同增量位只跑一次）。
@@ -597,9 +604,9 @@ export function apply(ctx, rawConfig) {
         void (async () => {
             const defaults = await defaultsStore.get();
             defaultsText = defaults.routerSystemPrompt; // 默认文本缓存刷新（section 同步读）
-            const routerOutcome = await engine.syncRouter();
+            const routerOutcome = await engine.syncRouter(config.workerSpawnMode);
             const enabledTypes = (await typeStore.list()).filter((record) => record.enabled);
-            const outcomes = await engine.syncTypes(enabledTypes);
+            const outcomes = await engine.syncTypes(enabledTypes, config.workerSpawnMode);
             if (outcomes.failed.length > 0) {
                 log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`);
             }

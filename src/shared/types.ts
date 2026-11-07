@@ -8,6 +8,15 @@
 /** 角色（权限维度）：router 主持、supervisor 可再派发、worker 只执行。 */
 export type RoleKind = 'router' | 'supervisor' | 'worker'
 
+/**
+ * worker 生成模式（v1.3 规格 §1；root-config volatile，默认 cache-priority）：
+ * - cache-priority：分叉创建（宿主 session/fork 继承来源历史+组合+模型），
+ *   三预设统一身份中立超集组合，身份经切换卡进入历史；
+ * - minimal-face：插件复刻五步分叉（agents.create+buildForkSeed+worker 预设），
+ *   组合维持各角色最小工具面（静态 yml 两行原样）。
+ */
+export type WorkerSpawnMode = 'cache-priority' | 'minimal-face'
+
 /** 任务状态全集（迁移闭包见 machine.ts 的迁移表）。 */
 export type TaskStatus =
   | 'draft'

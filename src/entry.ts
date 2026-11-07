@@ -55,6 +55,7 @@ import {
   type SessionObservationLike,
 } from './host/memory/adapter.ts'
 import type { FsAdapter } from './shared/fs-adapter.ts'
+import type { WorkerSpawnMode } from './shared/types.ts'
 import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD, type BreakerVisibility } from './host/guard/breaker.ts'
 import { DispatchBudgets } from './host/guard/budgets.ts'
@@ -122,6 +123,7 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   breakerWindowMs: number
   breakerInfraThreshold: number
   breakerCreationThreshold: number
+  workerSpawnMode: WorkerSpawnMode
 }
 
 /** 数值钳位：非数值回默认，负数取 0。 */
@@ -158,6 +160,11 @@ function templatesOr(value: unknown): WorkerTemplate[] {
   return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES
 }
 
+/** 模式解析（v1.3 A1）：只认两个合法值，其余回默认 cache-priority。导出供测试。 */
+export function spawnModeOr(value: unknown): WorkerSpawnMode {
+  return value === 'minimal-face' ? 'minimal-face' : 'cache-priority'
+}
+
 function resolveRootConfig(raw: unknown): ResolvedRootConfig {
   const source = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
@@ -178,6 +185,7 @@ function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     breakerWindowMs: nonNegative(source.breakerWindowMs, DEFAULT_BREAKER_WINDOW_MS),
     breakerInfraThreshold: nonNegative(source.breakerInfraThreshold, DEFAULT_INFRA_THRESHOLD),
     breakerCreationThreshold: nonNegative(source.breakerCreationThreshold, DEFAULT_CREATION_THRESHOLD),
+    workerSpawnMode: spawnModeOr(source.workerSpawnMode),
     templates: templatesOr(source.templates),
   }
 }
@@ -403,7 +411,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // builtin 不经引擎（映射静态预设，ensureRegistered 对它恒 false）。
   const syncTypePresets = async (record: WorkerTypeRecord): Promise<void> => {
     if (!record.enabled || record.origin === 'builtin') return
-    const outcome = await engine.syncTypes([record])
+    const outcome = await engine.syncTypes([record], config.workerSpawnMode)
     for (const failed of outcome.failed) {
       log.warn(`类型 ${failed} 的动态预设注册失败（派发会被拒；保存的类型数据不受影响）`)
     }
@@ -578,7 +586,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       // 如实带出（不静默）。
       createRouterType: async (input) => {
         const record = await typeStore.create({ ...input, origin: 'router', enabled: true })
-        const presetRegistered = await engine.ensureRegistered(record)
+        const presetRegistered = await engine.ensureRegistered(record, config.workerSpawnMode)
         return { record, presetRegistered }
       },
     },
@@ -594,12 +602,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   })
 
   // 供预设树的工具行 / 上下文行 / prompt-section 行经作用域链注入；memory 一并挂上（brief 形状）。
+  // callerRoleOf（v1.3 A1）：superset 工具行执行层硬闸的角色数据源。
   ctx.provide('routerCore', {
     ...assembled.core,
     snapshotText: assembled.snapshotText,
     // v1.1 C5：会话级系统提示词文本源（prompt-section 行的 complete section 消费）。
     sessionPromptText,
     memory: { search: memoryFace.search },
+    callerRoleOf: (sessionId: string) => assembled.core.callerRoleOf!(sessionId),
   })
 
   // 会话空闲：压缩驱动（pending 只由我方投递打标；idle 且无排队消息才动作）
@@ -692,9 +702,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     void (async () => {
       const defaults = await defaultsStore.get()
       defaultsText = defaults.routerSystemPrompt // 默认文本缓存刷新（section 同步读）
-      const routerOutcome = await engine.syncRouter()
+      const routerOutcome = await engine.syncRouter(config.workerSpawnMode)
       const enabledTypes = (await typeStore.list()).filter((record) => record.enabled)
-      const outcomes = await engine.syncTypes(enabledTypes)
+      const outcomes = await engine.syncTypes(enabledTypes, config.workerSpawnMode)
       if (outcomes.failed.length > 0) {
         log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`)
       }

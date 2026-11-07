@@ -7,7 +7,7 @@
  * workspace 解析。
  */
 
-import type { TaskRecord, TaskStatus } from '../shared/types.ts'
+import type { RoleKind, TaskRecord, TaskStatus } from '../shared/types.ts'
 import type { TaskCard, WorkerTemplate, WorkerTypeSummary } from '../shared/view-contract.ts'
 import type { BudgetSnapshot } from './guard/budgets.ts'
 import type { BreakerVisibility } from './guard/breaker.ts'
@@ -89,4 +89,11 @@ export interface RouterCore {
    * 调用方必须如实转告（v1.1 C2 create_worker_type）。
    */
   createWorkerType(callerSessionId: string, input: RouterTypeCreateInput): Promise<{ templateId: string; presetRegistered: boolean }>
+  /**
+   * 调用方会话的真实角色（v1.3 A1：superset 工具行的执行层硬闸数据源）。
+   * 账本有绑定 → 任务角色；Router 会话登记 → 'router'；查不到 → undefined
+   * （工具层按 'worker' 最严默认兜底）。允许异步实现（账本读）——工具层会
+   * await。缺席（旧接线）= 工具层全走兜底。
+   */
+  callerRoleOf?(sessionId: string): RoleKind | undefined | Promise<RoleKind | undefined>
 }

@@ -22,6 +22,8 @@
  */
 
 import { routerPrompt } from '../prompts/router.ts'
+import { unifiedPrompt } from '../prompts/unified.ts'
+import type { WorkerSpawnMode } from '../../shared/types.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 一条声明行（与 validate-row.ts 的 RowSpec 兼容，另含组行字段）。 */
@@ -53,9 +55,21 @@ export function dynamicPresetId(templateId: string): string {
 /** 动态预设排在静态三预设（10/20/30）之后。 */
 const DYNAMIC_ORDER = 100
 
+/** cache-priority 模式的统一 persona 文本（= prompts/unified.ts 全文，唯一源）。 */
+export function supersetPersona(): string {
+  return unifiedPrompt
+}
+
 export interface BuildWorkerOptions {
   /** record.skills 解析出的技能目录（有技能且目录非空才挂技能行）。 */
   customSkillDirs?: string[]
+  /** 组合模式（v1.3 A1；缺省 minimal-face = 现行组合，静态行为不变）。 */
+  mode?: WorkerSpawnMode
+}
+
+export interface BuildRouterOptions {
+  /** 组合模式（缺省 minimal-face = 现行 prompt-section 定义）。 */
+  mode?: WorkerSpawnMode
 }
 
 /** 压缩组（与静态三预设同款；isolate realm，r4 条件②的例外形态）。 */
@@ -106,36 +120,76 @@ function skillRows(customSkillDirs: string[]): RowSpec[] {
 }
 
 /**
+ * cache-priority 统一超集组合（v1.3 规格 §1/§2；每次调用产全新数组，调用方可
+ * 自由追加技能行不改基准）。三预设（Router 动态定义 / worker 类型动态定义 /
+ * 兜底场景的类型定义）在 cache 模式下全部由它组成——行级逐字节相同是前缀缓存
+ * 的前提，spawn-mode.spec 钉住。注意：
+ * - persona = unified 中立全文（身份进历史不进系统提示词，规格 §2.1）；
+ * - tools 行 role:'superset'：注册全部编排工具，角色闸在执行层按真实调用者
+ *   过 assertCallerRole（矩阵不变，规格 §1「执行层硬闸不变」）；
+ * - 执行工具行 / delegation 组 / context 行全部在场（「模型可见全部工具」），
+ *   context 行的快照文本全局一致，不破坏跨会话前缀一致；
+ * - 技能行不进基准（类型个性，追加在超集之后）。
+ */
+export function buildSupersetPlugins(): RowSpec[] {
+  const rows: RowSpec[] = [
+    {
+      id: 'persona',
+      name: '@deepseek-ai/dsh-persona',
+      config: { prefix: unifiedPrompt, complete: true },
+    },
+    { id: 'tools', name: '@goodjin2/dsh-router/tools', config: { role: 'superset' } },
+    { id: 'ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
+    // 动态行直接求值平台条件（与静态 yml 的 !!js 表达式同义）
+    { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash', disabled: process.platform === 'win32' },
+    { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
+    // 宿主必填（无默认；v1 缺它整树回滚的锚点键）
+    { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+    delegationGroup(),
+    { id: 'router-context', name: '@goodjin2/dsh-router/context' },
+  ]
+  rows.push(compactionGroup())
+  return rows
+}
+
+/**
  * worker 类型 → 动态预设定义。persona 用类型提示词 complete 整段替换；工具行
  * 按 role（worker 带宿主执行工具行，supervisor 带 delegation 组）；技能行按
  * 解析出的目录挂载；压缩组收尾。调用方（生命周期）注册前对全部行过
  * validateRowSpec，坏行拒绝注册。
  */
 export function buildWorkerPresetDefinition(t: WorkerTypeRecord, options: BuildWorkerOptions = {}): PresetDefinition {
-  const plugins: RowSpec[] = [
-    {
-      id: 'persona',
-      name: '@deepseek-ai/dsh-persona',
-      config: { prefix: t.systemPrompt, complete: true },
-    },
-    { id: 'tools', name: '@goodjin2/dsh-router/tools', config: { role: t.role } },
-    { id: 'ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
-  ]
-  if (t.role === 'worker') {
-    plugins.push(
-      // 动态行直接求值平台条件（与静态 yml 的 !!js 表达式同义）
-      { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash', disabled: process.platform === 'win32' },
-      { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
-      // 宿主必填（无默认；v1 缺它整树回滚的锚点键）
-      { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
-    )
-  } else {
-    plugins.push(delegationGroup())
+  const plugins: RowSpec[] =
+    options.mode === 'cache-priority'
+      ? [...buildSupersetPlugins()]
+      : [
+          {
+            id: 'persona',
+            name: '@deepseek-ai/dsh-persona',
+            config: { prefix: t.systemPrompt, complete: true },
+          },
+          { id: 'tools', name: '@goodjin2/dsh-router/tools', config: { role: t.role } },
+          { id: 'ask-user', name: '@deepseek-ai/dsh-tool-ask-user' },
+        ]
+  if (options.mode !== 'cache-priority') {
+    if (t.role === 'worker') {
+      plugins.push(
+        // 动态行直接求值平台条件（与静态 yml 的 !!js 表达式同义）
+        { id: 'tool-bash', name: '@deepseek-ai/dsh-tool-bash', disabled: process.platform === 'win32' },
+        { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
+        // 宿主必填（无默认；v1 缺它整树回滚的锚点键）
+        { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+      )
+    } else {
+      plugins.push(delegationGroup())
+    }
   }
   if (t.skills.length > 0 && options.customSkillDirs !== undefined && options.customSkillDirs.length > 0) {
     plugins.push(...skillRows(options.customSkillDirs))
   }
-  plugins.push(compactionGroup())
+  if (options.mode !== 'cache-priority') {
+    plugins.push(compactionGroup())
+  }
   return {
     id: dynamicPresetId(t.templateId),
     name: t.name,
@@ -151,9 +205,22 @@ export function buildWorkerPresetDefinition(t: WorkerTypeRecord, options: BuildW
  * 组装文本，默认值不烘焙进行定义，改默认无需重注册；多 complete 冲突由宿主
  * 组装期报错，所以动态定义里不得残留 persona 行，presets-dynamic/bundle 看守）。
  */
-export function buildRouterPresetDefinition(): PresetDefinition {
+export function buildRouterPresetDefinition(options: BuildRouterOptions = {}): PresetDefinition {
   const compaction = compactionGroup()
   compaction.id = 'router-compaction'
+  if (options.mode === 'cache-priority') {
+    // cache 模式：与 worker 类型同款统一超集（含 compaction 组，组 id 用基准
+    // 'compaction' 保持逐字节一致）。prompt-section 行退场——会话级提示词覆盖
+    // 与逐字节统一不可兼得，cache 模式身份进历史（规格 §2），覆盖编辑器在
+    // 该模式下不再生效（Part C 设置文案说明模式语义）。
+    return {
+      id: 'dsh-router',
+      name: 'Router',
+      description: '任务编排器：理解需求、拆解派发、追踪汇总',
+      order: 10,
+      plugins: buildSupersetPlugins(),
+    }
+  }
   return {
     id: 'dsh-router',
     name: 'Router',

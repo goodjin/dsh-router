@@ -26,6 +26,7 @@ import {
   type PresetDefinition,
   type RowSpec,
 } from './dynamic.ts'
+import type { WorkerSpawnMode } from '../../shared/types.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** agentPresets 注册表的最小面（r4 §1：register 返回注销器）。 */
@@ -103,13 +104,15 @@ export class DynamicPresetEngine {
 
   /**
    * 确保一个 worker 类型的动态预设按当前记录在册（创建/更新共用；builtin 类型
-   * 映射静态预设，不经引擎）。校验不过或注册抛错 → 告警并返回 false（不炸装载）。
+   * 映射静态预设，不经引擎）。mode 决定组合形态（v1.3 A1：cache-priority 出
+   * 统一超集）。校验不过或注册抛错 → 告警并返回 false（不炸装载）。
    */
-  async ensureRegistered(record: WorkerTypeRecord): Promise<boolean> {
+  async ensureRegistered(record: WorkerTypeRecord, mode: WorkerSpawnMode = 'minimal-face'): Promise<boolean> {
     if (record.origin === 'builtin') return false
     const id = dynamicPresetId(record.templateId)
     const definition = buildWorkerPresetDefinition(record, {
       customSkillDirs: this.deps.skillDirs?.(record),
+      mode,
     })
     try {
       const problems = await this.validate(definition.plugins)
@@ -126,14 +129,15 @@ export class DynamicPresetEngine {
   }
 
   /**
-   * 增量同步：启用清单里的每个类型确保在册（缺失补注册、变更重注册）。不在
-   * 清单里的已注册预设一律保留——禁用语义是「只拒新派发」（r4 §4）。
+   * 增量同步：启用清单里的每个类型确保在册（缺失补注册、变更重注册；mode 决定
+   * 组合形态，v1.3 A1）。不在清单里的已注册预设一律保留——禁用语义是「只拒新
+   * 派发」（r4 §4）。
    */
-  async syncTypes(types: readonly WorkerTypeRecord[]): Promise<SyncOutcome> {
+  async syncTypes(types: readonly WorkerTypeRecord[], mode: WorkerSpawnMode = 'minimal-face'): Promise<SyncOutcome> {
     const registered: string[] = []
     const failed: string[] = []
     for (const record of types) {
-      if (await this.ensureRegistered(record)) registered.push(dynamicPresetId(record.templateId))
+      if (await this.ensureRegistered(record, mode)) registered.push(dynamicPresetId(record.templateId))
       else if (record.origin !== 'builtin') failed.push(record.templateId)
     }
     return { registered, failed }
@@ -151,12 +155,13 @@ export class DynamicPresetEngine {
 
   /**
    * Router 预设同步：动态定义（C5：complete section 运行时按会话组装文本，
-   * 定义不烘焙默认值——签名因此不带 defaults）优先，校验或注册失败 → 静态
-   * 兜底定义（persona + prompts/router.ts 逐字）；兜底也失败 → 只告警。
+   * 定义不烘焙默认值——签名因此不带 defaults；mode='cache-priority' 时改出统一
+   * 超集组合，规格 §1）优先，校验或注册失败 → 静态兜底定义（persona +
+   * prompts/router.ts 逐字）；兜底也失败 → 只告警。
    * 返回值语义不变：'dynamic' | 'static' | 'failed'。
    */
-  async syncRouter(): Promise<'dynamic' | 'static' | 'failed'> {
-    const dynamic = buildRouterPresetDefinition()
+  async syncRouter(mode: WorkerSpawnMode = 'minimal-face'): Promise<'dynamic' | 'static' | 'failed'> {
+    const dynamic = buildRouterPresetDefinition({ mode })
     try {
       const problems = await this.validate(dynamic.plugins)
       if (problems.length > 0) throw new Error(`校验未过:\n${problems.join('\n')}`)

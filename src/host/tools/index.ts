@@ -92,6 +92,14 @@ export function toolsForRole(role: RoleKind): readonly OrchestrationToolName[] {
   return TOOL_NAMES.filter((name) => ROLE_TOOLS[role].includes(name))
 }
 
+/**
+ * 工具行的行级角色（v1.3 A1）：三个真实角色 + 'superset'。
+ * 'superset' 注册全部十个工具（cache-priority 统一组合用），执行时按调用方
+ * 真实角色（core.callerRoleOf，缺席兜底 'worker'）过 assertCallerRole 硬闸——
+ * 角色矩阵本体不变，只是角色从行配置改为运行期解析（规格 §1「执行层硬闸不变」）。
+ */
+export type ToolRowRole = RoleKind | 'superset'
+
 /** 任务归属校验要读账本的最小面（同步 get，核心装载后可用）。 */
 export interface CallerLedger {
   get(taskId: string): TaskRecord | undefined
@@ -579,14 +587,25 @@ export function dispatchTemplateSection(templates: readonly WorkerTemplate[]): s
 }
 
 /**
+ * 调用方真实角色（superset 行的运行期解析；核心实现是异步账本读，允许同步假件）。
+ * core 未接线 callerRoleOf → undefined，调用方按 'worker' 兜底——最严默认：
+ * 派发被拒、执行放行。
+ */
+function callerRoleAtRuntime(core: RouterCore, sid: string): RoleKind | undefined | Promise<RoleKind | undefined> {
+  const face = core as { callerRoleOf?: (sessionId: string) => RoleKind | undefined | Promise<RoleKind | undefined> }
+  return typeof face.callerRoleOf === 'function' ? face.callerRoleOf(sid) : undefined
+}
+
+/**
  * 按角色产出工具定义子集（只含该角色白名单内的工具；每个 execute 先跑
  * assertCallerRole 再转交核心——白名单在注册层已裁剪，这里是纵深防御）。
- * opts.templates 缺省时读 core.enabledTemplates()（实时清单；类型变更后由
+ * role='superset'（v1.3 A1）：注册全部工具，执行层按 callerRoleOf 的真实角色
+ * 过闸。opts.templates 缺省时读 core.enabledTemplates()（实时清单；类型变更后由
  * 调用方重建工具定义刷新描述——重注册机制在 Part C 接线）。
  */
 export function buildToolDefinitions(
   core: RouterCore,
-  role: RoleKind,
+  role: ToolRowRole,
   opts?: { templates?: readonly WorkerTemplate[] },
 ): ToolDefinition[] {
   const liveTemplates = (): readonly WorkerTemplate[] => {
@@ -594,7 +613,8 @@ export function buildToolDefinitions(
     const face = core as { enabledTemplates?: () => readonly WorkerTemplate[] }
     return typeof face.enabledTemplates === 'function' ? face.enabledTemplates() : []
   }
-  return toolsForRole(role).map((name) => {
+  const names: readonly OrchestrationToolName[] = role === 'superset' ? TOOL_NAMES : toolsForRole(role)
+  return names.map((name) => {
     const spec = TOOL_SPECS[name]
     return {
       name,
@@ -615,8 +635,13 @@ export function buildToolDefinitions(
       async execute(args: unknown, exec: unknown) {
         const sid = callerSessionId(exec)
         const record = args as Record<string, unknown>
+        // superset 行：角色运行期解析（缺席 = worker 最严默认）；具名角色行维持
+        // 行配置即角色（minimal-face 行为完全不变）。
+        const effectiveRole: RoleKind = role === 'superset'
+          ? ((await callerRoleAtRuntime(core, sid)) ?? 'worker')
+          : role
         assertCallerRole(
-          role,
+          effectiveRole,
           name,
           sid,
           { get: (taskId: string) => core.getTask(taskId) },
@@ -624,7 +649,7 @@ export function buildToolDefinitions(
         )
         // 执行层纵深防御（v1.1 C6 规格 §3.4）：主管之下禁再派主管——工具薄壳
         // 先拦一道（核心的 scheduler.dispatchGuard 会再拦一道）。
-        if (name === 'dispatch_task' && role === 'supervisor' && record.role === 'supervisor') {
+        if (name === 'dispatch_task' && effectiveRole === 'supervisor' && record.role === 'supervisor') {
           throw new LedgerError('role-forbidden', '主管之下不能再派主管：简单子任务用子代理，需要多轮交互或持久产品派 worker')
         }
         return spec.run(core, sid, record)

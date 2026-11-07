@@ -8,6 +8,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { BUILTIN_TEMPLATES } from './templates.ts'
+import type { WorkerSpawnMode } from '../shared/types.ts'
 
 /** 挂载行 config 的声明形状（字段全部可选，volatile 可编辑）。 */
 export interface RouterRootConfig {
@@ -35,6 +36,11 @@ export interface RouterRootConfig {
   breakerInfraThreshold?: number
   /** 熔断条件 b 阈值：窗口内创建任务数且零完成（缺省 10）。 */
   breakerCreationThreshold?: number
+  /**
+   * worker 生成模式（v1.3 规格 §1；缺省 cache-priority）。配置级开关：切换只影响
+   * 新派发的创建路径与预设组合，存量任务/会话不受影响（Review Focus 1）。
+   */
+  workerSpawnMode?: WorkerSpawnMode
 }
 
 import type { WorkerTemplate } from '../shared/view-contract.ts'
@@ -57,6 +63,7 @@ export const Config = Schema.object({
   breakerWindowMs: Schema.number().default(600_000).volatile(),
   breakerInfraThreshold: Schema.number().default(3).volatile(),
   breakerCreationThreshold: Schema.number().default(10).volatile(),
+  workerSpawnMode: Schema.union(['cache-priority', 'minimal-face']).default('cache-priority').volatile(),
   templates: Schema.array(
     Schema.object({
       templateId: Schema.string().required(),

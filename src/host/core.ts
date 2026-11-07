@@ -268,6 +268,18 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     return records.find((record) => record.sessionId === sessionId)
   }
 
+  /**
+   * 调用方会话的真实角色（v1.3 A1：superset 工具行的执行层硬闸数据源）。
+   * 账本绑定优先（任务会话=其角色）；Router 会话登记其次；都没有 → undefined
+   * （工具层按 worker 最严兜底）。
+   */
+  const callerRoleOf = async (sessionId: string): Promise<RoleKind | undefined> => {
+    const record = await taskBySession(sessionId)
+    if (record !== undefined) return record.role
+    if (ui.routerSessions().some((entry) => entry.sessionId === sessionId)) return 'router'
+    return undefined
+  }
+
   /** Router 会话所在 workspace（sessionIds 成员扫描；registry 是同步投影）。 */
   const workspaceOfSession = (sessionId: string): WorkspaceInfo | undefined =>
     hosts.workspaceRegistry.list().find((workspace) => workspace.sessionIds?.includes(sessionId))
@@ -686,6 +698,8 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     getTask(taskId: string): TaskRecord | undefined {
       return ledger.get(taskId)
     },
+
+    callerRoleOf,
   }
 
   const workbench: RouterWorkbench = {

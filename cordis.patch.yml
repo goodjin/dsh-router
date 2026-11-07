@@ -7,6 +7,12 @@
 #     routerCore、问答瀑布监听、HTTP 路由、worker 类型存储与动态预设引擎）。
 #     config 全部可缺省（volatile 默认值在宿主 schema 里，运行时另有防御性解析）。
 #   - 两条静态预设行：dsh-router-supervisor / dsh-router-worker（order 20/30）。
+#     v1.3 起它们是「最小面（minimal-face）模式」的组合载体：workerSpawnMode 配置
+#     （默认 cache-priority）切换分叉与组合形态——cache-priority 模式下 Router 与
+#     worker 类型动态预设改出统一超集组合（src/host/presets/dynamic.ts 的
+#     buildSupersetPlugins），分叉经宿主 session/fork 继承来源组合，静态两行不
+#     参与 cache 派发（宿主 agentPresets 无公开 unregister，同 id 不能接管；两行
+#     继续服务 minimal 派发、旧会话重开与手动挑选）。
 #     Router 预设（id 仍 dsh-router）改为运行时动态注册：默认提示词/默认模型来自
 #     设置，默认值可编辑后 unregister+register 即时生效；静态 yml 行与动态注册
 #     同 id 会撞 `Duplicate agent preset`（r4 §1），所以不再放这里——静态兜底
