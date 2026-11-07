@@ -191,6 +191,9 @@
               applyPatch: false
           - id: worker-tool-fs-search
             name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              # 宿主必填（无默认；双版本 standard/ptc 均传 false），缺了整树回滚
+              sampleOverCapGlobResults: false
           - id: worker-compaction
             name: cordis:group
             group: true
