@@ -365,15 +365,22 @@ export class TaskLedger {
    * 派发失败记账（v1.1 规格 §2-4）：retryCount+1、错误文本落 progress，任务保持
    * 原状态（draft/queued —— 不产生 cancelled + 无会话残留）；累计达 blockAt
    * （默认 3）自动 → blocked 并返回封顶后的记录，由调用方通知 Router。
+   * 幂等口径：已 blocked 的任务再记账不重复迁移（评审修复——并发下不抛
+   * blocked→blocked），retryCount 停在上限，错误文本照常更新。
    */
   async recordDispatchFailure(id: string, reason: string, opts?: { blockAt?: number }): Promise<TaskRecord> {
     return this.commit(() => {
       const task = this.mustGet(id)
-      task.retryCount = (task.retryCount ?? 0) + 1
+      const blockAt = opts?.blockAt ?? 3
+      const nextCount = (task.retryCount ?? 0) + 1
+      // 先校验后变更：封顶迁移非法时直接抛，内存不留「计数已加、迁移未动」的脏写。
+      if (nextCount >= blockAt && task.status !== 'blocked') {
+        assertTransition(task.status, 'blocked')
+      }
+      task.retryCount = task.status === 'blocked' ? Math.min(nextCount, blockAt) : nextCount
       task.progress = reason
       task.updatedAt = this.clock()
-      if (task.retryCount >= (opts?.blockAt ?? 3)) {
-        assertTransition(task.status, 'blocked')
+      if (nextCount >= blockAt && task.status !== 'blocked') {
         task.status = 'blocked'
       }
       return task

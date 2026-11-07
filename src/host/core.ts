@@ -229,6 +229,28 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
   let snapshotCache = ''
 
   /**
+   * 同一任务的派发/重派串行化锁（评审修复：并发补充同一任务时，后到者在锁内
+   * 重新过闸门，不破封顶、不重复派发）。JS 单线程下按 taskId 链式排队即可。
+   */
+  const taskLocks = new Map<string, Promise<unknown>>()
+  const withTaskLock = async <T>(taskId: string, fn: () => Promise<T>): Promise<T> => {
+    const previous = taskLocks.get(taskId) ?? Promise.resolve()
+    const run = previous.then(fn, fn)
+    taskLocks.set(taskId, run.then(() => undefined, () => undefined))
+    return run
+  }
+
+  /** 任务的依赖是否全部 completed（重派闸门：未满足的 queued 任务只升版等解锁）。 */
+  const depsSatisfied = async (taskId: string): Promise<boolean> => {
+    const task = ledger.get(taskId)
+    if (task === undefined) return false
+    if (task.dependsOn.length === 0) return true
+    const all = await ledger.listAll()
+    const byId = new Map(all.map((entry) => [entry.id, entry]))
+    return task.dependsOn.every((depId) => byId.get(depId)?.status === 'completed')
+  }
+
+  /**
    * 执行类工具（report_progress/complete_task/report_blocker）的归属复核：
    * 调用方必须是任务绑定的会话（纵深防御——assertCallerRole 已在工具层查过
    * 一次，这里用核心的账本再拦一道）。
@@ -313,33 +335,70 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const fromVersion = record.docVersion
       const newVersion = await ledger.supplement(taskId, additions)
       await deps.docsFor(record.cwd).supplement(taskId, fromVersion, additions)
-      const delivered = await bridge.supplementTo(taskId)
-      if (delivered.sessionId !== undefined) {
-        driver.onDispatched(delivered.sessionId)
-        driver.onDispatched(callerSessionId)
-      } else if (record.sessionId === undefined && (record.status === 'draft' || record.status === 'queued')) {
-        // 任务还没有执行会话（典型：首发派发失败回 draft）——补充即重派同一任务：
-        // retryCount 朝上限累计，达 3 自动 blocked（v1.1 规格 §2-4 的记账口径）。
-        try {
-          const { sessionId } = await bridge.dispatchTask(taskId)
-          if (sessionId !== undefined) {
-            driver.onDispatched(sessionId)
-          }
-          driver.onDispatched(callerSessionId)
-          const refreshed = ledger.get(taskId)!
-          await afterDispatch(
-            refreshed,
-            sessionId,
-            refreshed.projectId.startsWith('cwd:') ? undefined : refreshed.projectId,
-          )
-        } catch (error) {
-          const failed = await recordDispatchFailure(deps, ledger, taskId, record.title, error, callerSessionId)
+      let delivered: { sessionId: string | undefined }
+      try {
+        delivered = await bridge.supplementTo(taskId)
+      } catch (error) {
+        const live = ledger.get(taskId)!
+        // 首发未完成的任务（draft/queued）重投失败：与首发失败同口径记账——
+        // retryCount 朝上限累计，达 3 自动 blocked；running 等任务照原样抛。
+        if (live.sessionId !== undefined && (live.status === 'draft' || live.status === 'queued')) {
+          const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
           await refreshSnapshot()
           throw new LedgerError(
             'dispatch-failed',
-            `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : record.status}）: ${error instanceof Error ? error.message : String(error)}`,
+            `任务 ${taskId} 重投失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
           )
         }
+        throw error
+      }
+      if (delivered.sessionId !== undefined) {
+        driver.onDispatched(delivered.sessionId)
+        driver.onDispatched(callerSessionId)
+        const live = ledger.get(taskId)!
+        if (live.status === 'draft' || live.status === 'queued') {
+          // 首发投递未完成的任务补投成功：走表边到 dispatched、驱动打标、挂标签，
+          // 不留「有会话却停在 draft」的隐形任务（评审修复）。
+          if (live.status === 'draft') await ledger.transition(taskId, 'queued')
+          await ledger.transition(taskId, 'dispatched')
+          const dispatched = ledger.get(taskId)!
+          await afterDispatch(
+            dispatched,
+            delivered.sessionId,
+            dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
+          )
+        }
+      } else {
+        // 任务还没有执行会话：锁内重新过闸门再决定是否重派（评审修复——闸门
+        // 必须在锁内，并发补充时后到者看到的是前一次落定后的状态）。
+        await withTaskLock(taskId, async () => {
+          const live = ledger.get(taskId)!
+          const dispatchable =
+            live.sessionId === undefined
+            && (live.status === 'draft' || live.status === 'queued')
+            && (await depsSatisfied(taskId))
+          if (!dispatchable) return // 依赖未满足 / 已封顶 / 已有会话：只升版，不派发
+          try {
+            const { sessionId } = await bridge.dispatchTask(taskId)
+            if (sessionId !== undefined) {
+              driver.onDispatched(sessionId)
+            }
+            driver.onDispatched(callerSessionId)
+            const dispatched = ledger.get(taskId)!
+            await afterDispatch(
+              dispatched,
+              sessionId,
+              dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
+            )
+          } catch (error) {
+            const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
+            await refreshSnapshot()
+            throw new LedgerError(
+              'dispatch-failed',
+              `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+        })
       }
       await refreshSnapshot()
       return { docVersion: newVersion }
@@ -434,9 +493,12 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         const unlocked = await scheduler.onCompleted(taskId)
         for (const nextTask of unlocked) {
           try {
-            const delivered = await bridge.dispatchTask(nextTask.id)
-            const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
-            await afterDispatch(nextTask, delivered.sessionId, workspace)
+            // 与 supplement 重派共用同一把任务锁：并发补充/解锁不重复派发
+            await withTaskLock(nextTask.id, async () => {
+              const delivered = await bridge.dispatchTask(nextTask.id)
+              const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
+              await afterDispatch(nextTask, delivered.sessionId, workspace)
+            })
           } catch (error) {
             // 单个解锁任务的派发失败不拖垮完成本身：失败记账（retryCount 累计、
             // 达上限自动 blocked 并通知 Router），任务保持 queued 等下次解锁重试。

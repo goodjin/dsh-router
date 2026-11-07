@@ -365,3 +365,46 @@ describe('persistence 失败：内存回滚', () => {
     expect(p.saveCalls).toBe(saves)
   })
 })
+
+describe('recordDispatchFailure：派发失败记账（v1.1 A4）', () => {
+  it('累计封顶：第 3 次自动 blocked', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.recordDispatchFailure(t.id, '第1次失败')
+    await ledger.recordDispatchFailure(t.id, '第2次失败')
+    const capped = await ledger.recordDispatchFailure(t.id, '第3次失败')
+    expect(capped.status).toBe('blocked')
+    expect(capped.retryCount).toBe(3)
+    expect(capped.progress).toBe('第3次失败')
+  })
+
+  it('封顶后幂等：再记账不抛 blocked→blocked、retryCount 停在上限、错误文本照更新', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    for (const reason of ['第1次', '第2次', '第3次']) {
+      await ledger.recordDispatchFailure(t.id, reason)
+    }
+    const again = await ledger.recordDispatchFailure(t.id, '第4次')
+    expect(again.status).toBe('blocked')
+    expect(again.retryCount).toBe(3)
+    expect(again.progress).toBe('第4次')
+  })
+
+  it('封顶迁移非法时先校验后变更：内存不留半程脏写（计数未增、状态未动）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.transition(t.id, 'queued')
+    await ledger.transition(t.id, 'dispatched')
+    await ledger.transition(t.id, 'running')
+    await ledger.recordDispatchFailure(t.id, 'running 上第 1 次')
+    await ledger.recordDispatchFailure(t.id, 'running 上第 2 次')
+    // running→blocked 合法：第 3 次封顶
+    const capped = await ledger.recordDispatchFailure(t.id, 'running 上第 3 次')
+    expect(capped.status).toBe('blocked')
+    expect(capped.retryCount).toBe(3)
+    // blocked→再记账：幂等不抛
+    const again = await ledger.recordDispatchFailure(t.id, '第 4 次')
+    expect(again.status).toBe('blocked')
+    expect(again.retryCount).toBe(3)
+  })
+})

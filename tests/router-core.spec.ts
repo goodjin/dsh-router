@@ -58,11 +58,12 @@ interface HostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error } = {}) {
+function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined) } = {}) {
   const events: HostEvents = { created: [], prompts: [], renames: [] }
   const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
   let count = 0
   let createAttempts = 0
+  let promptAttempts = 0
   const hosts: RouterCoreHosts = {
     sessionController: {
       async create(createOpts) {
@@ -74,7 +75,9 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
         return { sessionId: `session-${count}` }
       },
       async prompt(request) {
-        if (opts.failPrompt !== undefined) throw opts.failPrompt
+        promptAttempts += 1
+        const failure = typeof opts.failPrompt === 'function' ? opts.failPrompt(promptAttempts) : opts.failPrompt
+        if (failure !== undefined) throw failure
         events.prompts.push({
           requestId: request.requestId,
           sessionId: request.sessionId,
@@ -184,7 +187,11 @@ function fakeMemory() {
 
 async function coreWith(
   records: TaskRecord[] = [],
-  opts: { memory?: RouterMemory | null; failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error } = {},
+  opts: {
+    memory?: RouterMemory | null
+    failCreate?: (attempt: number) => Error | undefined
+    failPrompt?: Error | ((attempt: number) => Error | undefined)
+  } = {},
 ) {
   const persistence = new MemoryPersistence()
   persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
@@ -708,5 +715,85 @@ describe('createRouterCore：快照缓存', () => {
     expect(snapshotText()).toContain('新任务')
     expect(snapshotText()).not.toContain('没有未结束任务')
     void core
+  })
+})
+
+/* ────────────────────────── 评审修复：重派记账/依赖闸门/并发串行 ────────────────────────── */
+
+describe('createRouterCore：评审修复（重派记账 / 依赖闸门 / 并发串行）', () => {
+  const INPUT = {
+    title: '修登录',
+    goal: '登录不再 500',
+    acceptance: ['回归通过'],
+    role: 'worker' as const,
+    templateId: 'coder',
+  }
+
+  it('依赖未满足的 queued 任务：supplement 只升版，不提前派发', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'worker', status: 'queued', dependsOn: ['T-999'], projectId: 'ws-1', cwd: '/proj' }),
+    ]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    const result = await core.supplementTask('router-s-1', 'T-001', ['补充约束'])
+    expect(result.docVersion).toBe(2)
+    expect(ledger.get('T-001')?.status).toBe('queued')
+    expect(ledger.get('T-001')?.sessionId).toBeUndefined()
+    expect(ledger.get('T-001')?.retryCount ?? 0).toBe(0)
+    expect(events.created).toEqual([])
+  })
+
+  it('会话已建的 draft 任务：重投失败同口径记账（rc+1、dispatch-failed）', async () => {
+    const { core, ledger } = await coreWith([], {
+      failPrompt: (attempt) => (attempt <= 2 ? new Error('prompt down') : undefined),
+    })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.sessionId).toBe('session-1')
+    expect(ledger.get('T-001')?.retryCount).toBe(1)
+    await expect(core.supplementTask('router-s-1', 'T-001', ['修正后重投'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.retryCount).toBe(2)
+    expect(ledger.get('T-001')?.status).toBe('draft')
+    expect(ledger.get('T-001')?.progress).toContain('prompt down')
+  })
+
+  it('会话已建的 draft 任务：重投成功 → dispatched + 挂标签 + 驱动打标', async () => {
+    const { core, ledger, ui, driver } = await coreWith([], {
+      failPrompt: (attempt) => (attempt === 1 ? new Error('prompt down once') : undefined),
+    })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.status).toBe('draft')
+    const result = await core.supplementTask('router-s-1', 'T-001', ['恢复后续投'])
+    expect(result.docVersion).toBe(2)
+    expect(ledger.get('T-001')?.status).toBe('dispatched')
+    expect(ui.tabs('ws-1').map((t) => t.sessionId)).toEqual(['session-1'])
+    expect(driver.marked).toContain('session-1')
+    expect(driver.marked).toContain('router-s-1')
+  })
+
+  it('running 任务的 supplement 重投不受影响（无状态迁移、失败照原样抛）', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs } = await coreWith(records, { failPrompt: new Error('re-prompt rejected') })
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    await expect(core.supplementTask('router-s-1', 'T-001', ['补充'])).rejects.toThrowError(/re-prompt rejected/)
+    expect(ledger.get('T-001')?.status).toBe('running')
+    expect(ledger.get('T-001')?.retryCount).toBeUndefined()
+    expect(ledger.get('T-001')?.docVersion).toBe(2)
+  })
+
+  it('并发补充同一任务：串行化重派，封顶不破（rc 停 3、只通知一次、无非法迁移）', async () => {
+    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    // 串行化后两次补充都获得重派机会（rc 1→2→3），但计数封顶、状态只封一次
+    const outcomes = await Promise.allSettled([
+      core.supplementTask('router-s-1', 'T-001', ['并发一']),
+      core.supplementTask('router-s-1', 'T-001', ['并发二']),
+    ])
+    expect(ledger.get('T-001')?.status).toBe('blocked')
+    expect(ledger.get('T-001')?.retryCount).toBe(3)
+    expect(events.prompts.filter((p) => p.requestId === 'dispatch-blocked-T-001')).toHaveLength(1)
+    for (const outcome of outcomes) {
+      expect(outcome.status).toBe('rejected')
+      expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: 'dispatch-failed' })
+    }
   })
 })
