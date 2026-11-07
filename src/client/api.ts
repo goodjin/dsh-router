@@ -6,6 +6,7 @@
  * - POST /router/router-session { workspaceId, name? } → { sessionId }
  * - POST /router/answer { questionId, answers } → { ok: true }；已答 409
  * - POST /router/tabs/close { workspaceId, sessionId } → { ok: true }
+ * - POST /router/redirect/ack { workspaceId, supersededSessionId } → { ok: true }（C4）
  * 错误统一 `{ error: string }` + 4xx/5xx，封装成带 status 的 RouterApiError；
  * 409 语义是「已答过」——调用方把它视为已完成（question-state 的 accept）。
  * fetch 可注入：默认 globalThis.fetch，测试给假实现。
@@ -34,7 +35,7 @@ export interface RouterApiDeps {
   timeoutMs?: number
 }
 
-/** 四条路由的封装面。 */
+/** 五条路由的封装面。 */
 export interface RouterApi {
   getState(workspaceId?: string): Promise<RouterState>
   /**
@@ -45,15 +46,18 @@ export interface RouterApi {
   /** 已答 409 会以 RouterApiError(status=409) 抛出——调用方视为已完成。 */
   postAnswer(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
+  /** 消费去重指令的回执（v1.1 Task C4）：幂等，失败抛 RouterApiError。 */
+  ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
 
-/** 四条路由的路径常量（与宿主 routes 一侧逐字对齐）。 */
+/** 五条路由的路径常量（与宿主 routes 一侧逐字对齐）。 */
 export const ROUTER_STATE_PATH = '/router/state'
 export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
+export const ROUTER_REDIRECT_ACK_PATH = '/router/redirect/ack'
 
 function defaultFetch(): FetchLike {
   return (input, init) => globalThis.fetch(input, init)
@@ -149,6 +153,10 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
 
     async closeWorkerTab(workspaceId: string, sessionId: string): Promise<void> {
       await postJson(ROUTER_TABS_CLOSE_PATH, { workspaceId, sessionId })
+    },
+
+    async ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void> {
+      await postJson(ROUTER_REDIRECT_ACK_PATH, { workspaceId, supersededSessionId })
     },
   }
 }

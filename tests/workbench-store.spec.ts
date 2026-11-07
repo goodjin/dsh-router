@@ -27,11 +27,13 @@ function fakeApi(states: RouterState[], overrides: Partial<RouterApi> = {}): Rou
   stateCalls: (string | undefined)[]
   closeCalls: [string, string][]
   answerCalls: [string, unknown][]
+  ackCalls: [string, string][]
 } {
   const impl = {
     stateCalls: [] as (string | undefined)[],
     closeCalls: [] as [string, string][],
     answerCalls: [] as [string, unknown][],
+    ackCalls: [] as [string, string][],
     getState: async (workspaceId?: string) => {
       impl.stateCalls.push(workspaceId)
       if (overrides.getState) return overrides.getState(workspaceId)
@@ -48,8 +50,23 @@ function fakeApi(states: RouterState[], overrides: Partial<RouterApi> = {}): Rou
       impl.closeCalls.push([workspaceId, sessionId])
       if (overrides.closeWorkerTab) return overrides.closeWorkerTab(workspaceId, sessionId)
     },
+    ackRedirect: async (workspaceId: string, supersededSessionId: string) => {
+      impl.ackCalls.push([workspaceId, supersededSessionId])
+      if (overrides.ackRedirect) return overrides.ackRedirect(workspaceId, supersededSessionId)
+    },
   }
   return impl as RouterApi & typeof impl
+}
+
+/** 假 uiWorkspace：记录 openSession 的目标。 */
+function fakeUiWorkspace() {
+  const openCalls: string[] = []
+  return { openCalls, openSession: (target: string) => { openCalls.push(target) } }
+}
+
+/** 冲刷微任务（ack 是 fire-and-forget 的 promise，断言前要让它结算）。 */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
 }
 
 /** 可手动放行的 promise（竞态测试用）。 */
@@ -391,6 +408,114 @@ describe('buildAnswers：草稿 → 官方答案词汇', () => {
       { id: 'q1', selected: ['A', 'B'] },
       { id: 'q2', selected: [] },
     ])
+  })
+})
+
+describe('redirect 消费：跳正主 + ack（v1.1 Task C4）', () => {
+  const withRedirect = (superseded = 'router-dup') => emptyState({
+    routerSessions: [{ sessionId: 'router-main', title: 'R' }],
+    redirect: { sessionId: 'router-main', supersededSessionId: superseded },
+  })
+
+  it('消费即跳：openSession(正主) 并 POST /router/redirect/ack', async () => {
+    const api = fakeApi([withRedirect()])
+    const ui = fakeUiWorkspace()
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }]), uiWorkspace: ui })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    await settle()
+    expect(ui.openCalls).toEqual(['router-main'])
+    expect(api.ackCalls).toEqual([['ws-1', 'router-dup']])
+  })
+
+  it('未消费前指令保持：同一 redirect 重复轮询只跳一次（幂等）', async () => {
+    let calls = 0
+    const api = fakeApi([], {
+      getState: async () => {
+        calls += 1
+        return withRedirect()
+      },
+    })
+    const ui = fakeUiWorkspace()
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }]), uiWorkspace: ui })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    await settle()
+    await store.pollOnce()
+    await settle()
+    await store.pollOnce()
+    await settle()
+    expect(ui.openCalls).toEqual(['router-main'])
+    expect(api.ackCalls).toEqual([['ws-1', 'router-dup']])
+  })
+
+  it('连续两次新建只跳一次（Review Focus 2）：已在正主时第二条指令只 ack 不跳', async () => {
+    const first = withRedirect('router-dup-1')
+    const second = withRedirect('router-dup-2')
+    const api = fakeApi([first, second])
+    const ui = fakeUiWorkspace()
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1', 'router-main'] }]), uiWorkspace: ui })
+    store.setCurrentSession('s1')
+    await store.pollOnce() // 消费第一条：跳 router-main、ack dup-1
+    await settle()
+    store.setCurrentSession('router-main') // 跳转后 uiSession 回流
+    await store.pollOnce() // 第二条：已在正主 → 只 ack dup-2
+    await settle()
+    expect(ui.openCalls).toEqual(['router-main'])
+    expect(api.ackCalls).toEqual([
+      ['ws-1', 'router-dup-1'],
+      ['ws-1', 'router-dup-2'],
+    ])
+  })
+
+  it('ack 失败：下轮重试 ack、不重复跳（告警通道留痕）', async () => {
+    let ackAttempts = 0
+    const api = fakeApi([withRedirect()], {
+      ackRedirect: async () => {
+        ackAttempts += 1
+        if (ackAttempts === 1) throw new Error('ack lost')
+      },
+    })
+    const ui = fakeUiWorkspace()
+    const reportCalls: string[] = []
+    const store = startWorkbenchStore({
+      api,
+      prefs: prefsStore(),
+      workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }]),
+      uiWorkspace: ui,
+      report: (message) => { reportCalls.push(message) },
+    })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    await settle()
+    expect(store.get().lastError).toContain('ack lost') // 瞬态可见
+    await store.pollOnce()
+    await settle()
+    expect(ui.openCalls).toEqual(['router-main']) // 不重复跳
+    expect(api.ackCalls).toEqual([['ws-1', 'router-dup'], ['ws-1', 'router-dup']])
+    expect(reportCalls.join(' ')).toContain('ack lost') // 告警通道留痕
+  })
+
+  it('当前会话已是正主：不跳、只 ack', async () => {
+    const api = fakeApi([withRedirect()])
+    const ui = fakeUiWorkspace()
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1', 'router-main'] }]), uiWorkspace: ui })
+    store.setCurrentSession('router-main')
+    await store.pollOnce()
+    await settle()
+    expect(ui.openCalls).toEqual([])
+    expect(api.ackCalls).toEqual([['ws-1', 'router-dup']])
+  })
+
+  it('redirect 缺席的轮询不触发跳转也不发 ack', async () => {
+    const api = fakeApi([emptyState({ routerSessions: [{ sessionId: 'router-main', title: 'R' }] })])
+    const ui = fakeUiWorkspace()
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1'] }]), uiWorkspace: ui })
+    store.setCurrentSession('s1')
+    await store.pollOnce()
+    await settle()
+    expect(ui.openCalls).toEqual([])
+    expect(api.ackCalls).toEqual([])
   })
 })
 

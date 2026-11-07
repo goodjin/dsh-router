@@ -6,6 +6,7 @@
  * - POST /router/router-session {workspaceId, name?} → { sessionId }
  * - POST /router/answer {questionId, answers[]} → { ok: true }；已答 409
  * - POST /router/tabs/close {workspaceId, sessionId} → { ok: true }
+ * - POST /router/redirect/ack {workspaceId, supersededSessionId} → { ok: true }（C4）
  * 错误统一 JSON `{ error: string }` + 4xx/5xx，封装成带 status 的 RouterApiError。
  * 测试注入假 fetch，不启网络。
  */
@@ -138,6 +139,28 @@ describe('POST /router/tabs/close', () => {
       }),
     })
     await expect(api.closeWorkerTab('ws-1', 'w-1')).resolves.toBeUndefined()
+  })
+})
+
+describe('POST /router/redirect/ack（C4）', () => {
+  it('POST {workspaceId, supersededSessionId}，成功返回', async () => {
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        expect(input).toBe('/router/redirect/ack')
+        expect(JSON.parse(String(init?.body))).toEqual({ workspaceId: 'ws-1', supersededSessionId: 's-dup' })
+        return jsonResponse(200, { ok: true })
+      }),
+    })
+    await expect(api.ackRedirect('ws-1', 's-dup')).resolves.toBeUndefined()
+  })
+
+  it('失败带 {error} 透出为 RouterApiError', async () => {
+    const api = createRouterApi({
+      fetch: jsonFetch(() => jsonResponse(400, { error: 'workspaceId 与 supersededSessionId 必填' })),
+    })
+    const error = await api.ackRedirect('ws-1', '').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(RouterApiError)
+    expect((error as RouterApiError).message).toContain('必填')
   })
 })
 

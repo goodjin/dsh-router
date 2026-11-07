@@ -10,7 +10,8 @@
  *     → ctx.provide('routerCore', …)（预设树里的工具行/上下文行经作用域链取用）
  *     → user-questions/request 瀑布全局监听（prepend：先于客户端兜底 UI 认领
  *       worker 提问，答案走 Router 界面浮窗）
- *     → 四条 HTTP exact 路由（webServer/connection 机会式注入）
+ *     → 五条 HTTP exact 路由（webServer/connection 机会式注入；state 前置
+ *       入口去重扫描，C4）
  *
  * 配置照 auto-resume 先例：Config 全部 volatile 可缺省，apply 内再做一层防御性
  * 解析（缺省补默认、负数取 0），宿主各版本 schema 默认值行为不一致时插件自己兜底。
@@ -29,6 +30,7 @@ import { Scheduler } from './host/ledger/scheduler.ts'
 import { SessionBridge, type WorkspaceInfo } from './host/bridge/sessions.ts'
 import { AnswerRelay } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
+import { RouterDedup, stateWithRedirect, type SessionSnapshotLike } from './host/bridge/dedup.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
@@ -65,11 +67,20 @@ interface RootContext {
   agents: RouterCoreHosts['agents']
   /** agentPresets 注册表（r4 §1：register 返回注销器，重复 id 当场抛）。 */
   agentPresets: AgentPresetsFace
-  workspaceRegistry: { list(): unknown[]; get(id: string): unknown }
+  workspaceRegistry: {
+    list(): unknown[]
+    get(id: string): unknown
+    /** C4 去重用（r2 §5：registry 原生 pin/归档面；缺席时去重静默降级）。 */
+    pinSession?(sessionId: string): Promise<unknown>
+    archiveSession?(sessionId: string, options?: { stopActivity?: boolean }): Promise<unknown>
+    archivedSessionIds?(): readonly string[]
+  }
   /** B8 起必需：压缩区域的用户消息锚点 + 记忆增量摘要的事件租约。 */
   sessionQuery: {
     observeSession(sessionId: string): Promise<SessionObservationLike>
     readSurface?(sessionId: string): Promise<{ events: { seq: number; type: string }[] } | undefined>
+    /** C4 去重用：整日志快照读（r2 §6）；缺席时去重静默降级。 */
+    readSession?(sessionId: string): Promise<unknown>
   }
   /** B8 起必需：记忆增量摘要的模型流（purpose:'compaction'）。 */
   llm: { stream(options: Record<string, unknown>): AsyncIterable<unknown> }
@@ -233,6 +244,47 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     list: () => (ctx.workspaceRegistry.list() as WorkspaceInfo[]),
     get: (id: string) => ctx.workspaceRegistry.get(id) as WorkspaceInfo | undefined,
   }
+
+  // 入口去重（v1.1 Task C4 / 规格 §4）：宿主没有创建前拦截钩子，事后收敛——
+  // /router/state 构建前扫描各 workspace，每项目最早的 dsh-router 预设会话为
+  // 正主（原生 pinSession 置顶），其余较新者归档并写 redirect 指令；客户端
+  // 消费跳转后 POST /router/redirect/ack 清除。readSession/pinSession 缺席
+  // （旧宿主）时去重整体降级为直通，不挡装载。
+  const dedup = ctx.sessionQuery.readSession !== undefined && ctx.workspaceRegistry.pinSession !== undefined
+    ? new RouterDedup({
+      workspaces: { list: () => (ctx.workspaceRegistry.list() as WorkspaceInfo[]) },
+      sessionQuery: {
+        readSession: async (sessionId) => {
+          const snapshot = await ctx.sessionQuery.readSession!(sessionId) as {
+            session?: { agentPreset?: unknown; createdAt?: unknown }
+            events?: { type?: unknown; data?: unknown }[]
+          } | null | undefined
+          if (snapshot === null || snapshot === undefined) return undefined
+          const events = snapshot.events ?? []
+          const mapped: SessionSnapshotLike = {
+            session: {
+              agentPreset: typeof snapshot.session?.agentPreset === 'string' ? snapshot.session.agentPreset : undefined,
+              createdAt: typeof snapshot.session?.createdAt === 'number' ? snapshot.session.createdAt : undefined,
+            },
+            events: events.map((event) => ({
+              type: typeof event.type === 'string' ? event.type : '',
+              data: (typeof event.data === 'object' && event.data !== null ? event.data : {}) as { agentPreset?: string },
+            })),
+          }
+          return mapped
+        },
+      },
+      registry: {
+        pinSession: (sessionId) => ctx.workspaceRegistry.pinSession!(sessionId),
+        archiveSession: (sessionId, options) => ctx.workspaceRegistry.archiveSession!(sessionId, options),
+        archivedSessionIds: () => ctx.workspaceRegistry.archivedSessionIds?.() ?? [],
+      },
+      routerPreset: config.routerPreset,
+      logger: { warn: (message) => log.warn(message) },
+    })
+    : undefined
+  if (dedup === undefined) log.warn('宿主缺 sessionQuery.readSession / workspaceRegistry.pinSession，入口去重降级为直通')
+
   const hosts: RouterCoreHosts = {
     sessionController: ctx.sessionController,
     agents: ctx.agents,
@@ -482,16 +534,28 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     })()
   }, 'dsh-router: 启动恢复与动态预设同步')
 
-  // 四条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
+  // 五条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
+  // C4：GET /router/state 前 先跑去重扫描（判定按会话缓存，稳态零读取），
+  // 返回前把该 workspace 未消费的 redirect 指令并进 state。
   ctx.inject?.(['webServer', 'connection'], (child) => {
     registerRouterRoutes(child as RouterRoutesContext, {
-      getState: (workspaceId) => assembled.workbench.state(workspaceId),
+      getState: async (workspaceId) => {
+        if (dedup !== undefined) await dedup.resolve()
+        const state = await assembled.workbench.state(workspaceId)
+        return dedup !== undefined
+          ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
+          : state
+      },
       createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
       answerQuestion: async (questionId, answers) => {
         await assembled.workbench.answerQuestion(questionId, answers)
         void assembled.refreshSnapshot()
       },
       closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
+      ackRedirect: (workspaceId, supersededSessionId) => {
+        dedup?.ackRedirect(workspaceId, supersededSessionId)
+        return Promise.resolve()
+      },
     })
   })
 
