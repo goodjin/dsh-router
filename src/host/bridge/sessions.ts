@@ -13,6 +13,7 @@ import type { TaskLedger } from '../ledger/store.ts'
 import type { TaskRecord } from '../../shared/types.ts'
 import type { TaskDocStore } from '../docs/task-docs.ts'
 import { parseModelRef } from '../model-ref.ts'
+import { tagInfraFailure } from '../guard/classify.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 宿主会话控制器的最小调用面（r2 §1/§2：sessionController.create/prompt）。 */
@@ -106,6 +107,19 @@ export class SessionBridge {
     return this.signal ?? AbortSignal.timeout(PROMPT_TIMEOUT_MS)
   }
 
+  /**
+   * infra 失败打标（v1.2 规格 §1）：宿主调用面（会话创建/登记/改名/投递）的
+   * 失败在抛出前打 `failureClass: 'infra'` 标——分类器（guard/classify）读到标
+   * 直接按 infra 计熔断，不靠错误形状推断（宿主可能抛任何形状的错误）。
+   */
+  private async tagged<T>(stage: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run()
+    } catch (error) {
+      throw tagInfraFailure(error, stage)
+    }
+  }
+
   /** 任务的执行预设 id（router 角色不该被派发，防御性拒绝；类型在册走动态预设）。 */
   private async presetFor(record: TaskRecord): Promise<string> {
     if (record.role === 'router') {
@@ -172,19 +186,25 @@ export class SessionBridge {
       const createOpts = workspace !== undefined
         ? { workspaceId: workspace.id, agentPreset }
         : { cwd: record.cwd, agentPreset }
-      sessionId = await this.host.create(createOpts, this.hostSignal())
-      await this.ledger.attachSession(taskId, sessionId)
-      await this.host.rename?.(sessionId, `${record.id} ${record.title}`)
-      await this.pinDefaultModel(sessionId, record.templateId ?? '')
+      const fresh = await this.tagged('会话创建失败', () => this.host.create(createOpts, this.hostSignal()))
+      sessionId = fresh
+      await this.tagged('会话登记失败', () => this.ledger.attachSession(taskId, fresh))
+      await this.tagged('会话改名失败', async () => {
+        await this.host.rename?.(fresh, `${record.id} ${record.title}`)
+      })
+      await this.pinDefaultModel(fresh, record.templateId ?? '')
     }
-    await this.host.prompt(
-      {
-        requestId: `dispatch-${taskId}-v${record.docVersion}`,
-        sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
-      },
-      this.hostSignal(),
+    const deliverySessionId: string = sessionId
+    await this.tagged('任务书投递失败', () =>
+      this.host.prompt(
+        {
+          requestId: `dispatch-${taskId}-v${record.docVersion}`,
+          sessionId: deliverySessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
+        },
+        this.hostSignal(),
+      ),
     )
     if (record.status === 'draft') await this.ledger.transition(taskId, 'queued')
     if (record.status === 'draft' || record.status === 'queued') {
@@ -202,16 +222,19 @@ export class SessionBridge {
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     if (record.sessionId === undefined) return { sessionId: undefined }
     const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
-    await this.host.prompt(
-      {
-        requestId: `dispatch-${taskId}-v${record.docVersion}`,
-        sessionId: record.sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
-      },
-      this.hostSignal(),
+    const existingSessionId: string = record.sessionId
+    await this.tagged('任务书投递失败', () =>
+      this.host.prompt(
+        {
+          requestId: `dispatch-${taskId}-v${record.docVersion}`,
+          sessionId: existingSessionId,
+          mode: 'queue',
+          content: [{ type: 'text', text: `${book}\n\n${this.workerInstructions()}` }],
+        },
+        this.hostSignal(),
+      ),
     )
-    return { sessionId: record.sessionId }
+    return { sessionId: existingSessionId }
   }
 
   /** 取消通知：steer 插到执行会话最近一步，尽快停下。无会话时静默跳过。 */

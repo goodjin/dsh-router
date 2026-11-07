@@ -215,6 +215,20 @@ describe('RouterCore ×熔断器：派发链路（规格 §2 冻结语义）', (
     })
   })
 
+  it('bridge 层打标优先于错误形状：宿主抛域形状错误也按 infra 计（会话创建阶段）', async () => {
+    // 宿主 API 抛出的是它自己的错误（哪怕形似域内拒绝）：会话创建失败是 infra，
+    // 由 bridge 在失败路径打标，不靠错误形状推断。
+    const { core, breaker } = await guardCoreWith({
+      budgets: null,
+      failCreate: () => new LedgerError('template-unavailable', 'host internal row broken'),
+    })
+    for (let i = 0; i < 3; i += 1) {
+      await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    }
+    expect((await breaker!.state()).frozen).toBe(true)
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-frozen' })
+  })
+
   it('task 类拒绝不计熔断：未知模板连拒 5 次，熔断不冻', async () => {
     const { core, breaker } = await guardCoreWith({ budgets: null })
     for (let i = 0; i < 5; i += 1) {
