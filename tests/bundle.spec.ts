@@ -316,9 +316,9 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(ids).toEqual([
       'router-workbench-tabs',
       'router-question-overlay',
+      'router-notification-overlay',
       'router-back-button',
       'router-prompt-editor',
-      'router-notification-overlay',
       'router-prompt-action',
       'router-create-entry',
       'router-settings',
