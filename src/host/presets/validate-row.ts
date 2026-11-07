@@ -40,8 +40,38 @@ export type ValidateLoad = (name: string) => Promise<unknown>
 export interface HostLoaderOpts {
   /** 宿主安装目录里 @deepseek-ai/dsh 的 package.json 路径（DSH_HOST_BASE 同义）。 */
   base?: string
+  /** 多个宿主基准按序试（运行时动态注册用：桌面 asar + CLI 安装都在场时逐个回退）。 */
+  bases?: string[]
   /** 本插件仓库根（本包行的解析基准；缺省按本文件位置上溯三级）。 */
   pluginRoot?: string
+}
+
+/**
+ * 全部宿主安装目录探测（多基准版）：DSH_HOST_BASE（设了就只用它）→ 桌面 asar →
+ * ~/.local/share / nvm / homebrew 的 CLI 安装。桌面 asar 只有 Electron 进程读得
+ * 进，纯 node 进程 import 会失败——所以运行时校验要按序逐个试（makeHostLoader
+ * 的 bases 参数），不能只取第一个。
+ */
+export function discoverAllHostBases(): string[] {
+  const override = process.env.DSH_HOST_BASE
+  if (override !== undefined && override !== '' && existsSync(override)) return [override]
+  const bases: string[] = []
+  if (process.platform === 'darwin') {
+    const asar = '/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/package.json'
+    if (existsSync(asar)) bases.push(asar)
+  }
+  const home = homedir()
+  for (const pattern of [
+    join(home, '.local/share/node-*/lib/node_modules/@deepseek-ai/dsh/package.json'),
+    join(home, '.nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh/package.json'),
+    '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json',
+    '/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json',
+  ]) {
+    for (const hit of globSync(pattern)) {
+      if (existsSync(hit) && !bases.includes(hit)) bases.push(hit)
+    }
+  }
+  return bases
 }
 
 /** 首行文本（报错只留指向性的一行；Error 取 message，不带 "Error: " 前缀）。 */
@@ -51,34 +81,12 @@ function firstLine(value: unknown): string {
 }
 
 /**
- * 宿主安装目录探测（顺序即优先级）：
- * DSH_HOST_BASE → 桌面 app.asar → ~/.local/share 与 nvm/homebrew 的 CLI 安装。
- * 探不到返回 undefined（调用方按「导入失败」报，不静默通过）。
+ * 首个宿主安装目录探测（顺序即优先级）：DSH_HOST_BASE → 桌面 app.asar →
+ * ~/.local/share 与 nvm/homebrew 的 CLI 安装。探不到返回 undefined（调用方按
+ * 「导入失败」报，不静默通过）。多基准版见 discoverAllHostBases。
  */
 export function discoverHostBase(): string | undefined {
-  const override = process.env.DSH_HOST_BASE
-  if (override !== undefined && override !== '' && existsSync(override)) return override
-  const candidates: string[] = []
-  if (process.platform === 'darwin') {
-    candidates.push('/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/package.json')
-  }
-  const home = homedir()
-  candidates.push(
-    join(home, '.local/share/node-*/lib/node_modules/@deepseek-ai/dsh/package.json'),
-    join(home, '.nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh/package.json'),
-    '/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json',
-    '/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json',
-  )
-  for (const candidate of candidates) {
-    if (candidate.includes('*')) {
-      for (const hit of globSync(candidate)) {
-        if (existsSync(hit)) return hit
-      }
-    } else if (existsSync(candidate)) {
-      return candidate
-    }
-  }
-  return undefined
+  return discoverAllHostBases()[0]
 }
 
 /**
@@ -93,12 +101,12 @@ export function makeHostLoader(opts: HostLoaderOpts = {}): ValidateLoad {
   const pluginRoot =
     opts.pluginRoot ?? fileURLToPath(new URL('../../../', import.meta.url))
   const candidatesFor = (name: string): string[] => {
-    const host = opts.base ?? discoverHostBase()
+    const hosts = opts.bases ?? (opts.base !== undefined ? [opts.base] : discoverAllHostBases())
     // 本包的行先试插件根（Node 自引用，最贴近真实装载），再退宿主基准——
     // 与容器核查器同序：报错保留第一条（最贴近插件自己那份解析）。
     return name.startsWith('@deepseek-ai/')
-      ? (host !== undefined ? [host] : [])
-      : [join(pluginRoot, 'package.json'), ...(host !== undefined ? [host] : [])]
+      ? hosts
+      : [join(pluginRoot, 'package.json'), ...hosts]
   }
   return async (name: string) => {
     const candidates = candidatesFor(name)

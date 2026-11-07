@@ -78,12 +78,46 @@ export interface WorkerTabInfo {
   running: boolean
 }
 
-/** worker 模板（派发时选专业类型）。 */
+/** worker 模板（v1 遗留形状；派发描述与 v1 客户端 templates 字段继续用它）。 */
 export interface WorkerTemplate {
   templateId: string
   name: string
   description: string
   role: 'supervisor' | 'worker'
+}
+
+/** worker 类型（v1.1 规格 §5 的一等实体；WorkerTypeStore 的落盘与交换形状）。 */
+export interface WorkerTypeRecord {
+  templateId: string
+  name: string
+  description: string
+  role: 'supervisor' | 'worker'
+  /** 允许模型列表（"provider/model"，有序；首个为该类型会话默认模型）。 */
+  models: string[]
+  systemPrompt: string
+  /** 初始技能（已装技能包勾选；预设内真实挂载）。 */
+  skills: string[]
+  enabled: boolean
+  origin: 'builtin' | 'user' | 'router'
+  createdAt: number
+  updatedAt: number
+}
+
+/** worker 类型摘要投影（RouterState.types / 类型清单；不含提示词等重字段）。 */
+export interface WorkerTypeSummary {
+  templateId: string
+  name: string
+  description: string
+  role: 'supervisor' | 'worker'
+  enabled: boolean
+  origin: 'builtin' | 'user' | 'router'
+}
+
+/** Router 默认值（规格 §6：默认系统提示词、默认模型）。 */
+export interface RouterDefaults {
+  routerSystemPrompt: string
+  /** "provider/model"；空串 = 不钉（跟随宿主默认）。 */
+  routerModel: string
 }
 
 /** GET /router/state 的完整返回。 */
@@ -93,4 +127,6 @@ export interface RouterState {
   questions: QuestionCard[]
   tabs: WorkerTabInfo[]
   templates: WorkerTemplate[]
+  /** worker 类型摘要（v1.1；含 enabled/origin，管理栏目 C3 消费）。 */
+  types?: WorkerTypeSummary[]
 }

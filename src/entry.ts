@@ -33,7 +33,9 @@ import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
 import { workerInstructions as WORKER_INSTRUCTIONS } from './host/prompts/worker-instructions.ts'
-import { BUILTIN_TEMPLATES } from './host/templates.ts'
+import { BUILTIN_GENERAL_ID, BUILTIN_TEMPLATES, RouterDefaultsStore, WorkerTypeStore } from './host/templates.ts'
+import { dynamicPresetId } from './host/presets/dynamic.ts'
+import { DynamicPresetEngine, type AgentPresetsFace } from './host/presets/lifecycle.ts'
 import { MemoryDocStore } from './host/memory/store.ts'
 import { search as searchMemory } from './host/memory/retrieval.ts'
 import {
@@ -53,13 +55,16 @@ export { Config } from './host/root-config.ts'
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router'
 
-/** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。 */
-export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm']
+/** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
+ *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
+export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets']
 
 /** 宿主上下文的最小面（窄接口；webServer/connection 走机会式注入）。 */
 interface RootContext {
   sessionController: RouterCoreHosts['sessionController']
   agents: RouterCoreHosts['agents']
+  /** agentPresets 注册表（r4 §1：register 返回注销器，重复 id 当场抛）。 */
+  agentPresets: AgentPresetsFace
   workspaceRegistry: { list(): unknown[]; get(id: string): unknown }
   /** B8 起必需：压缩区域的用户消息锚点 + 记忆增量摘要的事件租约。 */
   sessionQuery: {
@@ -204,6 +209,26 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   }
   const ui = new UiStateStore(jsonFilePersistence<UiStateFile>(join(config.dataDir, 'ui-state.json')))
 
+  // worker 类型存储 + Router 默认值（v1.1 规格 §5/§6；首启种子化导入 v1 Config
+  // 模板后 legacyImported 落盘，v1 templates 配置通道退役）。
+  const typeStore = new WorkerTypeStore(fs, join(config.dataDir, 'worker-types.json'), {
+    seedTemplates: config.templates,
+  })
+  const defaultsStore = new RouterDefaultsStore(fs, join(config.dataDir, 'router-defaults.json'))
+
+  /** templateId → 预设 id：启用类型走动态预设；内置通用 worker 走静态预设
+   *  （保证任何情况下可派发）；禁用/未知 → undefined（回退静态角色预设，
+   *  由核心的 assertTemplateUsable 拒绝派发）。 */
+  const resolvePresetForTemplate = async (
+    templateId: string,
+    role: 'supervisor' | 'worker',
+  ): Promise<string | undefined> => {
+    const record = await typeStore.get(templateId)
+    if (record === undefined || !record.enabled || record.role !== role) return undefined
+    if (record.origin === 'builtin') return role === 'worker' ? config.workerPreset : config.supervisorPreset
+    return dynamicPresetId(templateId)
+  }
+
   const workspaceRegistry: RouterCoreHosts['workspaceRegistry'] = {
     list: () => (ctx.workspaceRegistry.list() as WorkspaceInfo[]),
     get: (id: string) => ctx.workspaceRegistry.get(id) as WorkspaceInfo | undefined,
@@ -228,10 +253,27 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       rename: async (sessionId, title) => {
         await ctx.sessionController.rename({ sessionId, title })
       },
+      // 规格 §5 默认模型钉法（r4 修正）：宿主 selectModel（UI ModelSelect 同通路）；
+      // 宿主缺席时桥降级为不钉（类型清单仍如实记录）。
+      selectModel: typeof ctx.sessionController.selectModel === 'function'
+        ? (request, signal) => ctx.sessionController.selectModel!(request, signal)
+        : undefined,
     },
     presets: { supervisor: config.supervisorPreset, worker: config.workerPreset },
+    forTemplate: resolvePresetForTemplate,
+    types: { get: (templateId) => typeStore.get(templateId) },
     workerInstructions: () => workerInstructionsText(),
+    logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
+  })
+
+  // 动态预设引擎：类型/默认值变更 → unregister+register 增量同步；每次注册的
+  // 注销器自接线 ctx.effect（r4 条件①）；Router 动态注册失败回退静态定义。
+  const engine = new DynamicPresetEngine({
+    presets: ctx.agentPresets,
+    effect: (factory, label) => ctx.effect(factory, label),
+    skillDirs: () => undefined, // 初始技能目录解析（C3 设置页接入已装技能包时落地）
+    logger: { info: (message: string) => log.info(message), warn: (message: string) => log.warn(message) },
   })
 
   const relay = new AnswerRelay({ ledger, newId: () => randomUUID(), now: () => Date.now() })
@@ -379,6 +421,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     ui,
     hosts,
     config,
+    types: { enabled: () => typeStore.enabledTemplates(), summaries: () => typeStore.summaries() },
+    routerDefaults: { get: () => defaultsStore.get() },
     newId: () => randomUUID(),
     isRunning: (sessionId) => bridge.isRunning(sessionId),
     maxActiveCards: config.maxActiveCards,
@@ -417,9 +461,18 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     return outcome
   }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
 
-  // 启动恢复：UI 状态装载 + 账本孤儿问题清理 + 快照缓存预热。
+  // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
+  // 状态装载 + 账本孤儿问题清理 + 快照缓存预热。
   ctx.effect(() => {
     void (async () => {
+      const defaults = await defaultsStore.get()
+      const routerOutcome = await engine.syncRouter(defaults)
+      const enabledTypes = (await typeStore.list()).filter((record) => record.enabled)
+      const outcomes = await engine.syncTypes(enabledTypes)
+      if (outcomes.failed.length > 0) {
+        log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`)
+      }
+      log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走静态预设）`)
       await ui.load()
       await ledger.listAll()
       const recovered = await assembled.recoverOrphans()
@@ -427,7 +480,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       await assembled.refreshSnapshot()
       log.info('routerCore 就绪')
     })()
-  }, 'dsh-router: 启动恢复')
+  }, 'dsh-router: 启动恢复与动态预设同步')
 
   // 四条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
   ctx.inject?.(['webServer', 'connection'], (child) => {

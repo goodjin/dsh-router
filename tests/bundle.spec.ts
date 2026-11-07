@@ -112,37 +112,48 @@ describe('package.json 满足浏览器半边的接线条件', () => {
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools 与 ./context', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
     // 子路径行是宿主行（node 里 import 构建产物）；浏览器半边只有裸包名一条。
-    // tools 行每个预设各一条（×3）、context 只在 Router 预设（×1）；其它任何
-    // 子路径（尤其指向浏览器产物的）都会静默失效，直接禁止。
+    // v1.1 C1 起 Router 预设动态注册：静态 yml 只剩 supervisor/worker 两条预设，
+    // tools 行各一条（×2）；context 行只在动态 Router 定义里（presets-dynamic
+    // 看守）。其它任何子路径（尤其指向浏览器产物的）都会静默失效，直接禁止。
     const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
-    expect(subpathRows.sort()).toEqual(['context', 'tools', 'tools', 'tools'])
+    expect(subpathRows.sort()).toEqual(['tools', 'tools'])
   })
 
-  it('有三条预设行，config.id 互异且即三个预设 id', () => {
+  it('有两条静态预设行，config.id 互异且即两个静态预设 id', () => {
     const presetRows = [...PATCH_TEXT.matchAll(/- id:\s*(dsh-router-[\w-]*)\n\s*name:\s*'@deepseek-ai\/dsh-agent-preset'\n\s*config:\n\s*id:\s*([\w-]+)/g)]
-    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router', 'dsh-router-supervisor', 'dsh-router-worker'])
-    expect(new Set(presetRows.map((m) => m[2])).size).toBe(3)
+    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router-supervisor', 'dsh-router-worker'])
+    expect(new Set(presetRows.map((m) => m[2])).size).toBe(2)
   })
 
-  it('预设树内的工具行按角色分流（role: router/supervisor/worker 各一次）', () => {
-    for (const role of ['router', 'supervisor', 'worker']) {
+  it('预设树内的工具行按角色分流（role: supervisor/worker 各一次；router 行在动态 Router 定义）', () => {
+    for (const role of ['supervisor', 'worker']) {
       expect(PATCH_TEXT, `role: ${role} 行缺失`).toMatch(new RegExp(`name:\\s*'@goodjin2/dsh-router/tools'\\n\\s+config:\\n\\s+role: ${role}`))
     }
   })
 
-  it('context 行只在 Router 预设（快照上下文不进主管/worker）', () => {
-    expect(PATCH_TEXT.match(/name:\s*'@goodjin2\/dsh-router\/context'/g)?.length).toBe(1)
+  it('context 行只在动态 Router 定义（静态 yml 里没有）', () => {
+    expect(PATCH_TEXT.match(/name:\s*'@goodjin2\/dsh-router\/context'/g)?.length ?? 0).toBe(0)
   })
 
-  it('三个预设都挂压缩组（isolate 的 cordis:group，Router 不再缺席）', () => {
-    // Router 预设必须与主管/worker 同款：压缩引擎在会话自身作用域缺席时，
-    // 驱动的 compactRegion 永远抛错空转（B2 裁定 5 的缺口在此看守）。
-    for (const id of ['router-compaction', 'supervisor-compaction', 'worker-compaction']) {
+  it('两条静态预设都挂压缩组（isolate 的 cordis:group；动态 Router 定义同款由 presets-dynamic 看守）', () => {
+    // 压缩引擎在会话自身作用域缺席时，驱动的 compactRegion 永远抛错空转
+    //（B2 裁定 5 的缺口在此看守）。
+    for (const id of ['supervisor-compaction', 'worker-compaction']) {
       expect(PATCH_TEXT, `压缩组 ${id} 缺失`).toMatch(new RegExp(`-\\s+id:\\s*${id}\\n\\s+name:\\s*cordis:group\\n\\s+group:\\s*true\\n\\s+isolate:\\n\\s+compaction:\\s*true\\n\\s+toolResultPruner:\\s*true`))
+    }
+  })
+
+  it('supervisor 预设挂 r6 双绿子代理行：control 裸行 + spawn 行；禁 ./list-agents、禁死键', () => {
+    expect(PATCH_TEXT).toMatch(/- id:\s*supervisor-tool-subagent-control\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
+    expect(PATCH_TEXT).toMatch(/- id:\s*supervisor-tool-subagent\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s+config:\n\s+provider:\s*spawn\n\s+toolName:\s*subagent\n\s+maxDepth:\s*2\n/)
+    // 禁的是行（子路径导出 0.2.2 已删）；注释里的事故说明不算
+    expect(PATCH_TEXT).not.toMatch(/name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'/)
+    for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
+      expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
     }
   })
 })
@@ -168,8 +179,9 @@ function personaPrefix(yml: string, personaRowId: string): string {
 }
 
 describe('persona 文本与 TS 模板逐字同步', () => {
-  it('router-persona === routerPrompt', () => {
-    expect(personaPrefix(PATCH_TEXT, 'router-persona')).toBe(routerPrompt)
+  it('router-persona：静态 yml 行已移除（v1.1 动态注册），routerPrompt 与静态兜底定义同源（presets-dynamic 看守）', () => {
+    expect(PATCH_TEXT).not.toMatch(/id:\s*router-persona\b/)
+    expect(routerPrompt.length).toBeGreaterThan(0)
   })
   it('supervisor-persona === supervisorPrompt', () => {
     expect(personaPrefix(PATCH_TEXT, 'supervisor-persona')).toBe(supervisorPrompt)

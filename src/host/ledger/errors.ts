@@ -38,6 +38,14 @@ export type LedgerErrorCode =
   | 'template-unavailable'
   /** HTTP 请求体不合法（路由参数校验）。 */
   | 'bad-request'
+  /** worker 类型存储：类型名与已有类型重复（规格 §6 重名拒绝）。 */
+  | 'template-exists'
+  /** worker 类型存储：templateId 不存在。 */
+  | 'template-not-found'
+  /** worker 类型存储：内置通用 worker 受保护（不可删/不可改/不可禁用）。 */
+  | 'builtin-protected'
+  /** worker 类型存储：输入不合法（空名字等）。 */
+  | 'invalid-input'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

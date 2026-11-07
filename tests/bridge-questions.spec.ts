@@ -634,3 +634,137 @@ describe('HTTP 路由：请求校验', () => {
     expect(captured.status).toBe(400)
   })
 })
+
+/* ────────────────────────── 会话桥：类型预设与模型钉定（v1.1 C1） ────────────────────────── */
+
+import { parseModelRef } from '../src/host/model-ref.ts'
+
+describe('parseModelRef："provider/model" 引用解析', () => {
+  it('首个 / 分隔 provider；无 / 视为不合法（返回 undefined，不钉）', () => {
+    expect(parseModelRef('deepseek-official/deepseek-flash')).toEqual({ provider: 'deepseek-official', model: 'deepseek-flash' })
+    expect(parseModelRef('acp/minimax-cn/MiniMax-M3.1')).toEqual({ provider: 'acp', model: 'minimax-cn/MiniMax-M3.1' })
+    expect(parseModelRef('just-a-model')).toBeUndefined()
+    expect(parseModelRef('')).toBeUndefined()
+  })
+})
+
+describe('SessionBridge：按类型选预设与默认模型钉定（v1.1 C1）', () => {
+  /** 带类型面 + selectModel 的桥（在 bridgeWith 之上扩展）。 */
+  async function typedBridge(taskPatch: Partial<TaskRecord> = {}, opts: {
+    forTemplate?: (templateId: string, role: 'supervisor' | 'worker') => Promise<string | undefined>
+    typeRecord?: { templateId: string; models: string[] } | null
+    failSelectModel?: Error
+  } = {}) {
+    const base = await bridgeWith(taskPatch)
+    const modelSelects: { sessionId: string; provider: string; model: string }[] = []
+    const warns: string[] = []
+    const { ledger, docs } = { ledger: base.ledger, docs: base.docs }
+    const { host, events, presets } = fakeHost()
+    const sequence: string[] = []
+    const typedHost: SessionBridgeHost = {
+      ...host,
+      async create(opts2) {
+        sequence.push('create')
+        return host.create(opts2)
+      },
+      async prompt(request) {
+        sequence.push('prompt')
+        return host.prompt(request)
+      },
+      async selectModel(request) {
+        sequence.push('selectModel')
+        modelSelects.push(request) // 先记调用（失败用例靠它断言「调用过」）
+        if (opts.failSelectModel !== undefined) throw opts.failSelectModel
+        return { selected: request }
+      },
+    }
+    const bridge = new SessionBridge({
+      ledger,
+      docsFor: () => docs,
+      workspaces: fakeWorkspaces([{ id: 'ws-1', path: '/tmp/proj' }]),
+      host: typedHost,
+      presets,
+      workerInstructions: () => '指引',
+      signal: new AbortController().signal,
+      forTemplate: opts.forTemplate,
+      types: opts.typeRecord === null
+        ? undefined
+        : (() => {
+            const typeRecord = opts.typeRecord
+            return {
+              get: async (templateId: string) =>
+                typeRecord !== undefined && typeRecord.templateId === templateId
+                  ? typeRecord as never
+                  : ({ templateId, models: [] } as never),
+            }
+          })(),
+      logger: { warn: (m) => warns.push(m) },
+    })
+    return { ...base, bridge, modelSelects, warns, sequence, events }
+  }
+
+  it('类型在册：按 forTemplate 解析的动态预设建会话', async () => {
+    const { bridge, events } = await typedBridge({ templateId: 'docs-writer' }, {
+      forTemplate: async (templateId, role2) => (templateId === 'docs-writer' && role2 === 'worker' ? 'dsh-router-worker-docs-writer' : undefined),
+    })
+    await bridge.dispatchTask('T-001')
+    expect(events.created[0]!.opts.agentPreset).toBe('dsh-router-worker-docs-writer')
+  })
+
+  it('类型解析不出 → 回退静态角色预设（未知的 templateId 也不炸派发）', async () => {
+    const { bridge, events, presets } = await typedBridge({ templateId: 'ghost' }, {
+      forTemplate: async () => undefined,
+    })
+    await bridge.dispatchTask('T-001')
+    expect(events.created[0]!.opts.agentPreset).toBe(presets.worker)
+  })
+
+  it('默认模型钉定：建会话后、首轮投递前 selectModel(models[0])', async () => {
+    const { bridge, modelSelects, sequence } = await typedBridge({ templateId: 'coder' }, {
+      typeRecord: { templateId: 'coder', models: ['deepseek-official/deepseek-flash'] },
+    })
+    await bridge.dispatchTask('T-001')
+    expect(modelSelects).toEqual([{ sessionId: 'session-1', provider: 'deepseek-official', model: 'deepseek-flash' }])
+    expect(sequence.indexOf('create')).toBeLessThan(sequence.indexOf('selectModel'))
+    expect(sequence.indexOf('selectModel')).toBeLessThan(sequence.indexOf('prompt'))
+  })
+
+  it('钉定失败（模型不可用等）不炸派发：任务照常投递、只告警', async () => {
+    const { bridge, modelSelects, warns, events } = await typedBridge({ templateId: 'coder' }, {
+      typeRecord: { templateId: 'coder', models: ['p/m'] },
+      failSelectModel: new Error('session/model-unavailable'),
+    })
+    const result = await bridge.dispatchTask('T-001')
+    expect(result.sessionId).toBe('session-1')
+    expect(modelSelects).toHaveLength(1) // 调用过（被假件抛错）
+    expect(events.prompts).toHaveLength(1)
+    expect(warns.some((m) => m.includes('session-1') && m.includes('model-unavailable'))).toBe(true)
+  })
+
+  it('类型无模型清单 → 不调用 selectModel', async () => {
+    const { bridge, modelSelects } = await typedBridge({ templateId: 'coder' }, {
+      typeRecord: { templateId: 'coder', models: [] },
+    })
+    await bridge.dispatchTask('T-001')
+    expect(modelSelects).toHaveLength(0)
+  })
+
+  it('模型串缺 provider（无 /）→ 不调用 selectModel（防御）', async () => {
+    const { bridge, modelSelects, warns } = await typedBridge({ templateId: 'coder' }, {
+      typeRecord: { templateId: 'coder', models: ['just-a-model'] },
+    })
+    await bridge.dispatchTask('T-001')
+    expect(modelSelects).toHaveLength(0)
+    expect(warns.some((m) => m.includes('just-a-model'))).toBe(true)
+  })
+
+  it('重派（已有会话）不重建也不重复钉定', async () => {
+    const { bridge, modelSelects, sequence } = await typedBridge({ templateId: 'coder', sessionId: 'session-9', status: 'running' }, {
+      typeRecord: { templateId: 'coder', models: ['p/m'] },
+    })
+    await bridge.dispatchTask('T-001')
+    expect(sequence).not.toContain('create')
+    expect(sequence).not.toContain('selectModel')
+    expect(modelSelects).toHaveLength(0)
+  })
+})

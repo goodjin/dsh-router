@@ -59,34 +59,36 @@ function patchRows(): Record<string, unknown>[] {
  *
  * - worker-tool-fs-search：宿主必填 `sampleOverCapGlobResults`（无默认），双版本
  *   standard/ptc 均传 `false` —— v1 缺它导致整树回滚（本 fixture 的锚点行）。
- * - router/supervisor/worker-tools：本包自己的行 Config 要求 `role`（缺了注册
+ * - supervisor/worker-tools：本包自己的行 Config 要求 `role`（缺了注册
  *   不出任何编排工具，行会静默空转）。
+ * - supervisor-tool-subagent：宿主 schema 唯一必填键 `provider`（r6 §0.4 实测
+ *   缺它 FAIL）；maxDepth: 2 允许二级派发（spawn 有 depthLimit 能力）。
  * - worker-tool-fs：`applyPatch: false` 与桌面 standard/ptc 同款；CLI 0.2.1-rc.2
  *   standard 不带 config（该键可选）——按双宿主要求的并集保留，非必填不进 fixture。
- * - 其余行（persona/context/ask-user/compaction 组及其子行/bash）：双版本宿主
- *   standard 预设均无必填 config（bash 只有 disabled 表达式，与宿主同款），
- *   以空登记纳入完整性守卫。
+ * - 其余行（persona/ask-user/delegation 组及其 control 子行/compaction 组及其
+ *   子行/bash）：双版本宿主 standard 预设均无必填 config（control 包两版本都不
+ *   导出 Config；bash 只有 disabled 表达式，与宿主同款），以空登记纳入完整性守卫。
+ * - v1.1 C1 起 Router 预设动态注册，静态 yml 行已移除（动态行的审计在
+ *   presets-dynamic.spec.ts，同一套 validateRowSpec）。
  */
 export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 宿主工具行：双宿主必填 */
   'worker-tool-fs-search': { sampleOverCapGlobResults: false },
   /* 本包自己的行 Config 必填 */
-  'router-tools': { role: 'router' },
   'supervisor-tools': { role: 'supervisor' },
   'worker-tools': { role: 'worker' },
+  /* 宿主 schema 必填（r6 实测） */
+  'supervisor-tool-subagent': { provider: 'spawn' },
   /* 无必填 config 的行：空登记（完整性守卫） */
   'dsh-router-client': {},
-  'dsh-router-preset': {},
   'dsh-router-supervisor-preset': {},
   'dsh-router-worker-preset': {},
-  'router-persona': {},
-  'router-ask-user': {},
-  'router-context': {},
-  'router-compaction': {},
   'compaction-basic': {},
   'command-compact': {},
   'tool-result-pruner': {},
   'supervisor-persona': {},
+  'supervisor-delegation': {},
+  'supervisor-tool-subagent-control': {},
   'supervisor-ask-user': {},
   'supervisor-compaction': {},
   'worker-persona': {},

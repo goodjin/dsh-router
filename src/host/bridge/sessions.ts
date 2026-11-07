@@ -12,6 +12,8 @@ import { LedgerError } from '../ledger/errors.ts'
 import type { TaskLedger } from '../ledger/store.ts'
 import type { TaskRecord } from '../../shared/types.ts'
 import type { TaskDocStore } from '../docs/task-docs.ts'
+import { parseModelRef } from '../model-ref.ts'
+import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 宿主会话控制器的最小调用面（r2 §1/§2：sessionController.create/prompt）。 */
 export interface SessionBridgeHost {
@@ -26,6 +28,12 @@ export interface SessionBridgeHost {
   onStatus(callback: (sessionId: string, running: boolean) => void): void
   /** session/rename（r2 §1.1：标题只能事后改）。 */
   rename?(sessionId: string, title: string): Promise<void>
+  /**
+   * v1.1 规格 §5 默认模型钉法（r4 修正的有界探查结论）：宿主
+   * sessionController.selectModel（两版本都有，UI ModelSelect 的同一条通路），
+   * 建会话后即设该类型 models[0]。缺席或失败都不挡派发。
+   */
+  selectModel?(request: { sessionId: string; provider: string; model: string }, signal?: AbortSignal): Promise<unknown>
 }
 
 /** workspaceRegistry 的最小面（r2 §5）。 */
@@ -47,8 +55,17 @@ export interface SessionBridgeDeps {
   /** registry 可选缺席（缺席即全部回退 cwd 创建）。 */
   workspaces?: WorkspaceFace
   host: SessionBridgeHost
-  /** 按任务角色选预设 id。 */
+  /** 按任务角色选预设 id；类型在册时用 forTemplate 解析动态预设（v1.1 C1）。 */
   presets: { supervisor: string; worker: string }
+  /**
+   * templateId → 预设 id 解析（entry 接线：启用类型 → dsh-router-worker-<类型>，
+   * builtin 通用 worker → 静态预设）。缺席或解析不出 → 回退静态角色预设。
+   */
+  forTemplate?(templateId: string, role: 'supervisor' | 'worker'): Promise<string | undefined>
+  /** worker 类型存储的最小面（默认模型钉定用；缺席 = 不钉）。 */
+  types?: { get(templateId: string): Promise<WorkerTypeRecord | undefined> }
+  /** 钉定失败等非致命问题的日志口（缺席静默）。 */
+  logger?: { warn(message: string): void }
   /** 执行指引文本（prompts/worker-instructions 的产物）。 */
   workerInstructions(): string
   /** 投递用的中止信号（缺席时每次调用自造 2 分钟超时）。 */
@@ -64,6 +81,9 @@ export class SessionBridge {
   private workspaces: WorkspaceFace | undefined
   private host: SessionBridgeHost
   private presets: SessionBridgeDeps['presets']
+  private forTemplate: SessionBridgeDeps['forTemplate']
+  private types: SessionBridgeDeps['types']
+  private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
   private signal: AbortSignal | undefined
   private running = new Map<string, boolean>()
@@ -75,6 +95,9 @@ export class SessionBridge {
     this.workspaces = deps.workspaces
     this.host = deps.host
     this.presets = deps.presets
+    this.forTemplate = deps.forTemplate
+    this.types = deps.types
+    this.logger = deps.logger
     this.workerInstructions = deps.workerInstructions
     this.signal = deps.signal
   }
@@ -83,12 +106,42 @@ export class SessionBridge {
     return this.signal ?? AbortSignal.timeout(PROMPT_TIMEOUT_MS)
   }
 
-  /** 任务的执行预设 id（router 角色不该被派发，防御性拒绝）。 */
-  private presetFor(record: TaskRecord): string {
+  /** 任务的执行预设 id（router 角色不该被派发，防御性拒绝；类型在册走动态预设）。 */
+  private async presetFor(record: TaskRecord): Promise<string> {
     if (record.role === 'router') {
       throw new LedgerError('role-forbidden', `任务 ${record.id} 指派了不可执行的角色 router`)
     }
+    if (record.role !== 'supervisor' && record.role !== 'worker') {
+      throw new LedgerError('role-forbidden', `任务 ${record.id} 指派了未知角色 ${String(record.role)}`)
+    }
+    if (this.forTemplate !== undefined && typeof record.templateId === 'string' && record.templateId !== '') {
+      const resolved = await this.forTemplate(record.templateId, record.role)
+      if (resolved !== undefined && resolved !== '') return resolved
+    }
     return this.presets[record.role]
+  }
+
+  /**
+   * 默认模型钉定（v1.1 规格 §5 / r4 修正的有界探查）：新会话创建后、首轮投递
+   * 前把该类型 models[0]（"provider/model"）设进去——宿主
+   * sessionController.selectModel 正是界面 ModelSelect 的同一条通路。缺席、
+   * 引用不合法、宿主调用失败都只告警，不挡派发（会话保持宿主默认路由）。
+   */
+  private async pinDefaultModel(sessionId: string, templateId: string): Promise<void> {
+    if (this.host.selectModel === undefined || this.types === undefined || templateId === '') return
+    try {
+      const record = await this.types.get(templateId)
+      const ref = record?.models[0]
+      if (ref === undefined) return
+      const parsed = parseModelRef(ref)
+      if (parsed === undefined) {
+        this.logger?.warn(`类型 ${templateId} 的默认模型引用不合法（应为 "provider/model"）：${ref}，跳过钉定`)
+        return
+      }
+      await this.host.selectModel({ sessionId, provider: parsed.provider, model: parsed.model })
+    } catch (error) {
+      this.logger?.warn(`会话 ${sessionId} 默认模型钉定失败（保持宿主默认路由）: ${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
   /** workspace 解析：projectId 回查 → 已有执行会话扫成员 → undefined（回退 cwd）。 */
@@ -115,12 +168,14 @@ export class SessionBridge {
     let sessionId = record.sessionId
     if (sessionId === undefined) {
       const workspace = this.resolveWorkspace(record)
+      const agentPreset = await this.presetFor(record)
       const createOpts = workspace !== undefined
-        ? { workspaceId: workspace.id, agentPreset: this.presetFor(record) }
-        : { cwd: record.cwd, agentPreset: this.presetFor(record) }
+        ? { workspaceId: workspace.id, agentPreset }
+        : { cwd: record.cwd, agentPreset }
       sessionId = await this.host.create(createOpts, this.hostSignal())
       await this.ledger.attachSession(taskId, sessionId)
       await this.host.rename?.(sessionId, `${record.id} ${record.title}`)
+      await this.pinDefaultModel(sessionId, record.templateId ?? '')
     }
     await this.host.prompt(
       {

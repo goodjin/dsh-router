@@ -1,90 +1,34 @@
 # @goodjin2/dsh-router 的挂载配置。
 #
-# 结构（契约依据 docs/research/r1-presets-tools.md / r2-sessions.md / r3-client-ui.md）：
+# 结构（契约依据 docs/research/r1-presets-tools.md / r2-sessions.md / r3-client-ui.md
+# 与 v1.1 的 r4-dynamic-presets.md / r6-subagent-row.md 取证）：
 #   - dsh-router-client：裸包名行——既把浏览器半边送进启动图（name 必须恰好等于
 #     包名，带子路径的行不算浏览器行），也是宿主根服务行（dist/entry.js 组装
-#     routerCore、问答瀑布监听、HTTP 路由）。config 全部可缺省（volatile 默认值在
-#     宿主 schema 里，运行时另有防御性解析）。
-#   - 三条预设行：preset id 分别是 dsh-router / dsh-router-supervisor /
-#     dsh-router-worker（花名册 order 10/20/30，config.id 互异）。预设树内只
-#     register 工具、不 provide 服务（泄漏审计会让整棵树回滚）。
-#   - persona 行 complete: true 整段替换默认提示词；文本与
-#     src/host/prompts/{router,supervisor,worker}.ts 逐字同步（bundle.spec 看守），
-#     改一侧必须同步另一侧。
+#     routerCore、问答瀑布监听、HTTP 路由、worker 类型存储与动态预设引擎）。
+#     config 全部可缺省（volatile 默认值在宿主 schema 里，运行时另有防御性解析）。
+#   - 两条静态预设行：dsh-router-supervisor / dsh-router-worker（order 20/30）。
+#     Router 预设（id 仍 dsh-router）改为运行时动态注册：默认提示词/默认模型来自
+#     设置，默认值可编辑后 unregister+register 即时生效；静态 yml 行与动态注册
+#     同 id 会撞 `Duplicate agent preset`（r4 §1），所以不再放这里——静态兜底
+#     定义改由 src/host/presets/dynamic.ts 的 staticRouterDefinition() 携带
+#     （逐行等价 v1 yml 行，persona 文本与 prompts/router.ts 同源，无第二份文本）。
+#     预设树内只 register 工具、不 provide 服务（泄漏审计会让整棵树回滚）。
+#   - persona 行 complete: true 整段替换默认提示词；supervisor/worker 文本与
+#     src/host/prompts/{supervisor,worker}.ts 逐字同步（bundle.spec 看守），改一侧
+#     必须同步另一侧。Router 的动态 persona 文本源自 defaults（缺省 prompts/router.ts）。
+#   - supervisor 预设的 delegation 组按 r6 §5 双宿主都绿的清单挂子代理工具行：
+#     tool-subagent-control 裸行（0.2.2 起 list_agents 就在这行里，绝不单挂
+#     ./list-agents 子路径行）+ tool-subagent（provider: spawn, maxDepth: 2）；
+#     禁写 modelSelectionSettings / modelSelection / modelDiscovery / backgroundMode
+#     四个跨版本死键。
 #
-# 改过任何行之后必须跑容器核查（两个宿主都要绿）：
+# 改过任何行之后必须跑双核查（两个宿主都要绿）：
 #   node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
+#   node scripts/check-subrows.mjs
 
 - insert:
     - id: dsh-router-client
       name: '@goodjin2/dsh-router'
-    - id: dsh-router-preset
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: dsh-router
-        name: Router
-        description: 任务编排器：理解需求、拆解派发、追踪汇总
-        order: 10
-        plugins:
-          - id: router-persona
-            name: '@deepseek-ai/dsh-persona'
-            config:
-              prefix: |-
-                你是 Router，一个长期在线的任务编排器，由 {{model}} 驱动。用户的每一句话都说给你；真正的执行工作由独立的执行会话完成。
-
-                ## 你的职责与边界
-
-                - 理解需求、澄清模糊处、把需求整理成任务（目标、验收条件、约束）、派发、追踪、汇总汇报。
-                - 你不亲自执行任务里的具体工作（不写代码、不跑命令）：这些属于执行会话。你的产出是清楚的任务书与准确的进度汇报。
-                - 可以连续接收多条需求：派发完成后不要等待执行结果，继续处理用户的下一条消息。执行会话的进展通过任务快照与通知到达你这里。
-
-                ## 你的上下文
-
-                - 你每轮能看到：本角色提示词 + 长期记忆摘要 + 活动任务快照（系统自动注入的「活动任务」一节）+ 本轮用户消息。
-                - 完整历史会话日志不在你的窗口里。任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言。
-                - 活动快照覆盖全部未结束任务（含失败待处理）；已完成的任务从快照消失，需要追溯时用 search_history 或查询归档文档。
-
-                ## 你的工具
-
-                - dispatch_task：派发新任务。需求明确后尽快派发。goal 写清要什么、为什么；acceptance 写可验证的完成判据；constraints 写边界与禁做事项；materials 给输入材料（路径、链接）。需要再拆层时指派 supervisor 角色（注意递归深度限制），单纯执行任务指派 worker。
-                - supplement_task：给已有任务补充约束或修正方向。任务书会升版并重投原执行会话；不要为补充重新派发新任务。
-                - query_tasks：查询任务短卡（按状态或任务 ID）。回答用户「进行得怎么样」前先查。
-                - control_task：暂停、恢复、取消某个任务。取消时执行会话会收到立即停止的通知。
-                - search_history：检索项目或全局记忆。完成的任务结果、用户的决定、已验证的事实会自动进入记忆；回答「之前做过什么、定过什么」类问题前先检索，命中为空就如实说没有记录，不要编造。
-                - ask_user：向用户澄清。只问真正影响任务书内容的问题；执行会话的问题不会经过你，它们会直接汇集到用户界面的浮窗，由用户直接回答。
-
-                ## 完成协议
-
-                - 执行会话必须用 complete_task 工具申请交付；是否完成由验收策略决定：auto 校验通过即完成，否则进入待验收（review-pending），等待主管或用户确认。
-                - 你不代替执行会话完成任务，也不要催促它们跳过协议。任务被驳回返工时，用 supplement_task 传达修改要求。
-                - 执行会话用 report_blocker 报告阻塞时，任务会标记为受阻：把阻塞转告用户，协调解决后视情况用 control_task 恢复或补充材料。
-              complete: true
-
-          - id: router-tools
-            name: '@goodjin2/dsh-router/tools'
-            config:
-              role: router
-          - id: router-ask-user
-            name: '@deepseek-ai/dsh-tool-ask-user'
-          - id: router-context
-            name: '@goodjin2/dsh-router/context'
-          - id: router-compaction
-            name: cordis:group
-            group: true
-            isolate:
-              compaction: true
-              toolResultPruner: true
-            config:
-              - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
-              - id: command-compact
-                name: '@deepseek-ai/dsh-command-compact'
-              - id: tool-result-pruner
-                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-                config:
-                  thresholdChars: 8192
-                  headChars: 4096
-                  tailChars: 1024
     - id: dsh-router-supervisor-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:
@@ -125,6 +69,26 @@
               role: supervisor
           - id: supervisor-ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: supervisor-delegation
+            name: cordis:group
+            group: true
+            isolate:
+              workflowEngine: true
+            config:
+              # 控制与发现工具；裸行无 config（该包两版本都不导出 Config）。
+              # 0.2.2 起 list_agents 就在这行里，绝不再单挂 .../list-agents 行
+              #（r6 §2：0.2.2 删了子路径导出，挂了=never started=整树回滚）。
+              - id: supervisor-tool-subagent-control
+                name: '@deepseek-ai/dsh-tool-subagent-control'
+              # 一次性进程内子代理（空会话起步，默认继承父路由）。
+              # 不写 modelSelection*/modelDiscovery/backgroundMode（跨版本死键）；
+              # maxDepth 2 允许二级派发（spawn 有 depthLimit 能力，挂载安全）。
+              - id: supervisor-tool-subagent
+                name: '@deepseek-ai/dsh-tool-subagent'
+                config:
+                  provider: spawn
+                  toolName: subagent
+                  maxDepth: 2
           - id: supervisor-compaction
             name: cordis:group
             group: true

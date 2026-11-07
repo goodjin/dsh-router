@@ -29,10 +29,13 @@ import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../
 import type {
   AskUserQuestionAnswerItem,
   QuestionCard,
+  RouterDefaults,
   RouterState,
   TaskCard,
   WorkerTemplate,
+  WorkerTypeSummary,
 } from '../shared/view-contract.ts'
+import { parseModelRef } from './model-ref.ts'
 
 /** 宿主服务的最小面（entry.ts 接真实服务；测试给假件）。 */
 export interface RouterCoreHosts {
@@ -45,6 +48,11 @@ export interface RouterCoreHosts {
       content: { type: 'text'; text: string }[]
     }, signal?: AbortSignal): Promise<unknown>
     rename(request: { sessionId: string; title: string }, signal?: AbortSignal): Promise<unknown>
+    /**
+     * v1.1 规格 §5：会话模型设置通路（两版本 sessionController 都有；UI
+     * ModelSelect 走的同一入口）。缺席 = 不钉默认模型（降级实现）。
+     */
+    selectModel?(request: { sessionId: string; provider: string; model: string }, signal?: AbortSignal): Promise<unknown>
   }
   /** 只在装配层用（压缩驱动取存活 agent）；核心逻辑不消费。 */
   agents: { get(sessionId: string): unknown }
@@ -55,6 +63,19 @@ export interface RouterCoreHosts {
   }
   /** api-session/status 订阅口（会话桥 watchStatus 的落点）。 */
   onSessionStatus(callback: (sessionId: string, running: boolean) => void): void
+}
+
+/** worker 类型存储的投影面（entry.ts 接 WorkerTypeStore；测试给假投影）。 */
+export interface WorkerTypesFace {
+  /** 启用类型的同步投影（dispatch 校验与工具描述的实时清单）。 */
+  enabled(): WorkerTemplate[]
+  /** 全类型摘要（RouterState.types；含 enabled/origin）。 */
+  summaries(): WorkerTypeSummary[]
+}
+
+/** Router 默认值面（规格 §6；缺省 = 不钉默认模型、提示词走静态兜底）。 */
+export interface RouterDefaultsFace {
+  get(): Promise<RouterDefaults>
 }
 
 /** 预设与模板配置。 */
@@ -86,6 +107,10 @@ export interface RouterCoreAssemblyDeps {
   ui: UiStateStore
   hosts: RouterCoreHosts
   config: RouterCoreConfig
+  /** 类型存储投影（v1.1 C1；缺席 = config.templates 兜底）。 */
+  types?: WorkerTypesFace
+  /** Router 默认值（v1.1 C1；缺席/模型空 = 不钉默认模型）。 */
+  routerDefaults?: RouterDefaultsFace
   newId(): string
   signal?: AbortSignal
   isRunning(sessionId: string): boolean
@@ -270,13 +295,17 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     })
   }
 
+  /**
+   * 当前启用类型的实时清单：类型存储在册时用它的同步投影（WorkerTypeStore 在
+   * 启动装载后维护），缺席退回 v1 Config 模板（降级兼容）。
+   */
+  const enabledTemplates = (): WorkerTemplate[] => (deps.types !== undefined ? deps.types.enabled() : [...config.templates])
+
   const core: RouterCore = {
-    enabledTemplates() {
-      return [...config.templates]
-    },
+    enabledTemplates,
 
     async dispatchTask(callerSessionId, input) {
-      assertTemplateUsable(input.templateId, config.templates)
+      assertTemplateUsable(input.templateId, enabledTemplates())
       const callerTask = await taskBySession(callerSessionId)
       const callerRole: RoleKind = callerTask?.role ?? 'router'
       const parentTaskId = input.parentTaskId
@@ -548,7 +577,10 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
             running: deps.isRunning(row.sessionId),
           }
         }),
-        templates: config.templates,
+        templates: enabledTemplates(),
+        types: deps.types !== undefined
+          ? deps.types.summaries()
+          : config.templates.map((template) => ({ ...template, enabled: true, origin: 'user' as const })),
       }
     },
 
@@ -558,6 +590,21 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         { workspaceId, agentPreset: config.routerPreset },
         deps.signal,
       )
+      // 规格 §6：Router 默认模型来自设置——经宿主 selectModel（UI 同通路）钉进
+      // 本会话；缺席/为空/失败都不挡创建（会话保持宿主默认路由）。
+      const defaults = await deps.routerDefaults?.get()
+      const ref = defaults?.routerModel ?? ''
+      const parsed = ref !== '' ? parseModelRef(ref) : undefined
+      if (parsed !== undefined && hosts.sessionController.selectModel !== undefined) {
+        try {
+          await hosts.sessionController.selectModel(
+            { sessionId: created.sessionId, provider: parsed.provider, model: parsed.model },
+            deps.signal,
+          )
+        } catch (error) {
+          deps.logger?.warn(`Router 会话默认模型钉定失败（保持宿主默认路由）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
       await hosts.sessionController.rename({ sessionId: created.sessionId, title }, deps.signal)
       await ui.addRouterSession(created.sessionId, workspaceId, title)
       return { sessionId: created.sessionId }

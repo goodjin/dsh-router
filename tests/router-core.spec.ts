@@ -58,8 +58,9 @@ interface HostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined) } = {}) {
+function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined); failSelectModel?: Error } = {}) {
   const events: HostEvents = { created: [], prompts: [], renames: [] }
+  const modelSelects: { sessionId: string; provider: string; model: string }[] = []
   const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
   let count = 0
   let createAttempts = 0
@@ -90,6 +91,11 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
         events.renames.push({ sessionId: request.sessionId, title: request.title })
         return {}
       },
+      async selectModel(request) {
+        modelSelects.push(request)
+        if (opts.failSelectModel !== undefined) throw opts.failSelectModel
+        return { selected: request }
+      },
     },
     agents: { get: () => undefined },
     workspaceRegistry: {
@@ -100,7 +106,7 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
       statusCbs.push(callback)
     },
   }
-  return { hosts, events, statusCbs }
+  return { hosts, events, statusCbs, modelSelects }
 }
 
 function fakeDriver(): CompactionDriver & { marked: string[] } {
@@ -189,6 +195,11 @@ async function coreWith(
   records: TaskRecord[] = [],
   opts: {
     memory?: RouterMemory | null
+    /** v1.1 C1：类型存储投影面（缺省 = config.templates 兜底）。 */
+    types?: { enabled(): WorkerTemplate[]; summaries(): { templateId: string; name: string; description: string; role: 'supervisor' | 'worker'; enabled: boolean; origin: 'builtin' | 'user' | 'router' }[] }
+    /** v1.1 C1：Router 默认值（缺省 = 不钉默认模型）。 */
+    routerDefaults?: { get(): Promise<{ routerSystemPrompt: string; routerModel: string }> }
+    failSelectModel?: Error
     failCreate?: (attempt: number) => Error | undefined
     failPrompt?: Error | ((attempt: number) => Error | undefined)
   } = {},
@@ -198,7 +209,7 @@ async function coreWith(
   const ledger = new TaskLedger(persistence, () => 1000)
   await ledger.listAll()
   const docs = memoryDocs()
-  const { hosts, events } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt })
+  const { hosts, events, modelSelects } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt, failSelectModel: opts.failSelectModel })
   const ui = fakeUi()
   await ui.load()
   const bridge = new SessionBridge({
@@ -237,6 +248,8 @@ async function coreWith(
       workerPreset: 'dsh-router-worker',
       templates: TEMPLATES,
     },
+    types: opts.types,
+    routerDefaults: opts.routerDefaults,
     newId: () => `q-${++questionSeq}`,
     signal: new AbortController().signal,
     isRunning: () => false,
@@ -245,7 +258,7 @@ async function coreWith(
   }
   const assembled = createRouterCore(assemblyDeps)
   await assembled.refreshSnapshot()
-  return { ledger, docs, bridge, relay, driver, events, ui, memoryState, ...assembled }
+  return { ledger, docs, bridge, relay, driver, events, modelSelects, ui, memoryState, ...assembled }
 }
 
 /* ────────────────────────── 派发 ────────────────────────── */
@@ -795,5 +808,74 @@ describe('createRouterCore：评审修复（重派记账 / 依赖闸门 / 并发
       expect(outcome.status).toBe('rejected')
       expect((outcome as PromiseRejectedResult).reason).toMatchObject({ code: 'dispatch-failed' })
     }
+  })
+})
+
+/* ────────────────────────── v1.1 C1：类型投影与默认值 ────────────────────────── */
+
+const STORE_TYPES = {
+  enabled: () => [
+    { templateId: 'general', name: '通用 worker', description: '内置', role: 'worker' as const },
+    { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' as const },
+  ],
+  summaries: () => [
+    { templateId: 'general', name: '通用 worker', description: '内置', role: 'worker' as const, enabled: true, origin: 'builtin' as const },
+    { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' as const, enabled: true, origin: 'user' as const },
+    { templateId: 'lead', name: '主管', description: '再拆分', role: 'supervisor' as const, enabled: false, origin: 'user' as const },
+  ],
+}
+
+describe('createRouterCore：v1.1 类型投影', () => {
+  it('enabledTemplates 来自类型存储投影（禁用类型不在清单，dispatch 校验随之收紧）', async () => {
+    const { core } = await coreWith([], { types: STORE_TYPES })
+    expect(core.enabledTemplates().map((t) => t.templateId)).toEqual(['general', 'coder'])
+    await expect(core.dispatchTask('router-s-1', {
+      title: 'x', goal: 'x', acceptance: ['x'], role: 'worker', templateId: 'lead',
+    })).rejects.toMatchObject({ code: 'template-unavailable', available: ['general', 'coder'] })
+  })
+
+  it('state().types 摘要投影带 enabled/origin；templates 仍为启用类型', async () => {
+    const { workbench } = await coreWith([], { types: STORE_TYPES })
+    const state = await workbench.state('ws-1')
+    expect(state.types).toEqual(STORE_TYPES.summaries())
+    expect(state.templates.map((t) => t.templateId)).toEqual(['general', 'coder'])
+  })
+
+  it('没接类型存储时退回 config.templates（types 投影从 config 推导，client 兼容不破）', async () => {
+    const { core, workbench } = await coreWith()
+    expect(core.enabledTemplates()).toEqual(TEMPLATES)
+    const state = await workbench.state('ws-1')
+    expect(state.templates).toEqual(TEMPLATES)
+    expect(state.types).toEqual(TEMPLATES.map((t) => ({ ...t, enabled: true, origin: 'user' })))
+  })
+})
+
+describe('createRouterCore：Router 默认值钉定', () => {
+  it('createRouterSession 在建会话后把 defaults.routerModel 设进该会话', async () => {
+    const { workbench, events, modelSelects } = await coreWith([], {
+      routerDefaults: { get: async () => ({ routerSystemPrompt: 'x', routerModel: 'deepseek-official/deepseek-flash' }) },
+    })
+    await workbench.createRouterSession('ws-1', 'Router')
+    expect(events.created[0]!.opts.agentPreset).toBe('dsh-router')
+    expect(modelSelects).toEqual([{ sessionId: 'session-1', provider: 'deepseek-official', model: 'deepseek-flash' }])
+  })
+
+  it('钉定失败只告警，不挡 Router 会话创建', async () => {
+    const { workbench, modelSelects } = await coreWith([], {
+      routerDefaults: { get: async () => ({ routerSystemPrompt: 'x', routerModel: 'p/m' }) },
+      failSelectModel: new Error('session/model-unavailable'),
+    })
+    const created = await workbench.createRouterSession('ws-1')
+    expect(created.sessionId).toBe('session-1')
+    expect(modelSelects).toHaveLength(1)
+  })
+
+  it('defaults 未接或模型为空 → 不调用 selectModel（跟随宿主默认）', async () => {
+    const bare = await coreWith([], {})
+    await bare.workbench.createRouterSession('ws-1')
+    expect(bare.modelSelects).toHaveLength(0)
+    const empty = await coreWith([], { routerDefaults: { get: async () => ({ routerSystemPrompt: 'x', routerModel: '' }) } })
+    await empty.workbench.createRouterSession('ws-1')
+    expect(empty.modelSelects).toHaveLength(0)
   })
 })
