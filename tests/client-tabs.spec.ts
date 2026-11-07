@@ -13,10 +13,31 @@ import {
   buildTabList,
   removeWorkerTab,
 } from '../src/client/tabs-model.ts'
-import type { RouterState, WorkerTabInfo } from '../src/shared/view-contract.ts'
+import { backButtonVisible, backTargetSessionId } from '../src/client/back-button.tsx'
+import {
+  HOVER_DARKEN_FILTER,
+  hoverDarkenStyle,
+  LIGHT_TOOLTIP_STYLE,
+} from '../src/client/ui-kit.tsx'
+import type { RouterState, TaskCard, WorkerTabInfo } from '../src/shared/view-contract.ts'
 
 function workerTab(sessionId: string, title: string, overrides: Partial<WorkerTabInfo> = {}): WorkerTabInfo {
   return { sessionId, title, running: false, ...overrides }
+}
+
+function supervisorTask(sessionId: string, overrides: Partial<TaskCard> = {}): TaskCard {
+  return {
+    taskId: 'T-SUP',
+    title: '主管任务',
+    goal: '拆解并汇总',
+    status: 'running',
+    role: 'supervisor',
+    templateId: 'tpl-supervisor',
+    waitingQuestions: 0,
+    docVersion: 0,
+    sessionId,
+    ...overrides,
+  }
 }
 
 function state(overrides: Partial<RouterState> = {}): RouterState {
@@ -107,5 +128,86 @@ describe('activeTabIndex：当前会话 id → 标签下标', () => {
     const tabs = buildTabList(state())
     expect(activeTabIndex(tabs, 'some-other-session')).toBe(-1)
     expect(activeTabIndex(tabs, undefined)).toBe(-1)
+  })
+})
+
+describe('backButtonVisible：返回按钮可见性三态（规格 §8）', () => {
+  it('worker 会话（tabs 集合）+ 本项目有 Router → 显示', () => {
+    expect(backButtonVisible('w-a', state())).toBe(true)
+  })
+
+  it('主管会话（tasks 里带 sessionId 的任务）→ 显示', () => {
+    const supervisor = state({ tasks: [supervisorTask('sup-1')] })
+    expect(backButtonVisible('sup-1', supervisor)).toBe(true)
+  })
+
+  it('当前是 Router 会话 → 隐藏（已在 Router，不显示返回）', () => {
+    expect(backButtonVisible('router-1', state())).toBe(false)
+  })
+
+  it('普通会话（不在 worker/主管集合）或无当前会话 → 隐藏', () => {
+    expect(backButtonVisible('some-other-session', state())).toBe(false)
+    expect(backButtonVisible(undefined, state())).toBe(false)
+  })
+
+  it('本项目无 Router 会话 → worker 会话也隐藏（无处可返）', () => {
+    expect(backButtonVisible('w-a', state({ routerSessions: [] }))).toBe(false)
+  })
+
+  it('状态还没轮询到（null/undefined）→ 隐藏', () => {
+    expect(backButtonVisible('w-a', null)).toBe(false)
+    expect(backButtonVisible('w-a', undefined)).toBe(false)
+  })
+})
+
+describe('backTargetSessionId：返回目标（本项目 Router 会话）', () => {
+  it('取 Router 会话列表第一个（服务端顺序）', () => {
+    expect(backTargetSessionId(state({
+      routerSessions: [
+        { sessionId: 'router-2', title: '第二个' },
+        { sessionId: 'router-1', title: 'Router' },
+      ],
+    }))).toBe('router-2')
+  })
+
+  it('无 Router 会话或无状态 → undefined（组件不渲染按钮）', () => {
+    expect(backTargetSessionId(state({ routerSessions: [] }))).toBeUndefined()
+    expect(backTargetSessionId(null)).toBeUndefined()
+    expect(backTargetSessionId(undefined)).toBeUndefined()
+  })
+})
+
+/** sRGB 十六进制 → 相对亮度（0 黑 → 1 白），样式基线的客观判据。 */
+function luminanceOf(color: string): number {
+  const match = /^#([0-9a-f]{6})$/i.exec(color.trim())
+  expect(match, `颜色应为 #rrggbb 十六进制，收到：${color}`).not.toBeNull()
+  const value = Number.parseInt(match![1]!, 16)
+  const channels = [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff]
+  const linear = channels.map((channel) => {
+    const s = channel / 255
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4
+  })
+  return 0.2126 * linear[0]! + 0.7152 * linear[1]! + 0.0722 * linear[2]!
+}
+
+describe('ui-kit 样式基线（规格 §9：悬浮提示浅色浮层、hover 稍深）', () => {
+  it('悬浮提示底色是固定浅色（禁黑底）：#rrggbb、亮度高，文字为深色', () => {
+    const background = String(LIGHT_TOOLTIP_STYLE.background)
+    expect(/^#[0-9a-f]{6}$/i.test(background), `悬浮提示底色应为固定浅色十六进制，收到：${background}`).toBe(true)
+    expect(luminanceOf(background), `底色太深（疑似黑底）：${background}`).toBeGreaterThan(0.5)
+    expect(luminanceOf(String(LIGHT_TOOLTIP_STYLE.color)), '提示文字应为深色以保证可读').toBeLessThan(0.2)
+  })
+
+  it('hover 反馈是「稍变深」的亮度滤镜（brightness < 1），不是反色、不是换底色', () => {
+    expect(HOVER_DARKEN_FILTER).toMatch(/^brightness\(0?\.\d+\)$/)
+    const factor = Number.parseFloat(HOVER_DARKEN_FILTER.replace('brightness(', '').replace(')', ''))
+    expect(factor, '滤镜应明显但不突兀（0.8–1 之间）').toBeGreaterThan(0.8)
+    expect(factor, 'brightness < 1 才是变深').toBeLessThan(1)
+    expect(HOVER_DARKEN_FILTER).not.toMatch(/invert/i)
+  })
+
+  it('hoverDarkenStyle：未 hover 不带滤镜，hover 带上统一滤镜', () => {
+    expect(hoverDarkenStyle(false).filter).toBeUndefined()
+    expect(hoverDarkenStyle(true).filter).toBe(HOVER_DARKEN_FILTER)
   })
 })

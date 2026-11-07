@@ -1,29 +1,33 @@
 /**
- * 问题浮窗（规格 §3.3：worker 的问题汇聚到浮动卡片区）。
+ * 问题浮窗（规格 §3.3：worker 的问题汇聚到浮动卡片区；§8：chip 点击 = 展开
+ * + 跳到该 worker 会话作答）。
  *
  * 挂点 `shell.overlay`（list、root、frame 级浮层、click-through、
  * replaceRisk none——R3 报告 §1.6/§8.2 的标准答案）：每张问题卡一枚收起
- * chip（任务名 + 问题计数），点击展开，逐问渲染单选/多选/自由文本；
- * 提交 → POST /router/answer，先「正在送达」，成功移除、失败保留已填内容、
- * 409 视为已完成；多卡垂直排队互不覆盖；收起不是回答。
- * 层本身 click-through：滚动列只占住自己那一窄条指针事件，列外不挡；
- * 默认收起（chip），点击展开；多卡垂直排队互不覆盖；收起不是回答。
+ * chip（任务名 + 问题计数），点击展开并跳到问题所属 worker 会话，逐问渲染
+ * 单选/多选/自由文本；提交 → POST /router/answer，先「正在送达」，成功移除、
+ * 失败保留已填内容、409 视为已完成；多卡垂直排队互不覆盖；收起不是回答；
+ * 提交后停留在当前会话（没有任何自动跳回）。小窗是全局浮层，跳走后仍悬浮
+ * 可答。层本身 click-through：滚动列只占住自己那一窄条指针事件，列外不挡。
+ * 样式走 ui-kit 基线：悬浮提示浅色（禁原生 title）、hover 稍深（规格 §9）。
  */
 
 import { useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { ClientPrefsStore } from './client-prefs.ts'
-import { chipSummary, visibleCards } from './question-state.ts'
-import type { QuestionCardView } from './question-state.ts'
+import { chipClickAction, chipSummary, visibleCards } from './question-state.ts'
+import type { QuestionCardView, QuestionDraftItem } from './question-state.ts'
 import type { WorkbenchStore } from './workbench-store.ts'
 import { QUESTION_OVERLAY_ID, QUESTION_OVERLAY_ORDER, QUESTION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
+import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 import type { AskUserQuestionItem } from '../shared/view-contract.ts'
 
 /** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
 export interface QuestionOverlayFace {
   store: WorkbenchStore
   prefs: ClientPrefsStore
+  uiWorkspace: { openSession(target: string): void }
 }
 
 export type QuestionOverlayProps = QuestionOverlayFace
@@ -38,7 +42,9 @@ export function registerQuestionCards(slots: SlotsHost, face: QuestionOverlayFac
 
 const STACK_STYLE: CSSProperties = {
   position: 'fixed',
-  top: 52,
+  // 第一行（52–88）让给「返回 Router」浮动按钮（back-button.tsx 同右栏），
+  // 按钮与问题卡同现时按钮在上、卡列在下，互不覆盖。
+  top: 88,
   right: 16,
   display: 'flex',
   flexDirection: 'column',
@@ -141,6 +147,52 @@ const COLLAPSE_STYLE: CSSProperties = {
   cursor: 'pointer',
 }
 
+/** 单个选项行（独立组件：hover 稍深要走 useHoverDarken 的 hook，不能进 map 回调）。 */
+function OptionButton(props: {
+  questionId: string
+  itemId: string
+  multiSelect: boolean
+  draftItem: QuestionDraftItem
+  store: WorkbenchStore
+  label: string
+  description?: string
+  disabled: boolean
+}): ReactNode {
+  const { questionId, itemId, multiSelect, draftItem, store, label, description, disabled } = props
+  const selected = draftItem.selected.includes(label)
+  const [darken, bind] = useHoverDarken()
+  return (
+    <button
+      type="button"
+      role={multiSelect ? undefined : 'radio'}
+      aria-checked={multiSelect ? undefined : selected}
+      data-question-option={label}
+      data-question-option-selected={selected || undefined}
+      style={{ ...optionRowStyle(selected), ...darken }}
+      disabled={disabled}
+      {...bind}
+      onClick={() => {
+        if (multiSelect) {
+          // 多选：点选切换，互不覆盖。
+          const next = selected
+            ? draftItem.selected.filter((candidate) => candidate !== label)
+            : [...draftItem.selected, label]
+          store.setAnswer(questionId, itemId, { selected: next })
+        } else {
+          // 单选：换选即覆盖，并清掉自定义文本（custom 会覆盖选中项）。
+          store.setAnswer(questionId, itemId, { selected: [label], custom: null })
+        }
+      }}
+    >
+      <span aria-hidden>{multiSelect ? (selected ? '☑' : '☐') : selected ? '◉' : '○'}</span>
+      <span>
+        {label}
+        {description ? <span style={{ opacity: 0.7 }}> — {description}</span> : null}
+      </span>
+    </button>
+  )
+}
+
 /** 单个问题条目：题干 +（单选|多选）选项 + 自由文本「其他」。 */
 function QuestionItem(props: { entry: QuestionCardView; item: AskUserQuestionItem; store: WorkbenchStore }): ReactNode {
   const { entry, item, store } = props
@@ -152,39 +204,19 @@ function QuestionItem(props: { entry: QuestionCardView; item: AskUserQuestionIte
       {item.header ? <div style={MINOR_TEXT_STYLE}>{item.header}</div> : null}
       <div style={{ fontWeight: 600 }}>{item.question}</div>
       {item.detail ? <div style={{ fontSize: 12, opacity: 0.75 }}>{item.detail}</div> : null}
-      {(item.options ?? []).map((option) => {
-        const selected = draft.selected.includes(option.label)
-        return (
-          <button
-            key={option.label}
-            type="button"
-            role={item.multiSelect === true ? undefined : 'radio'}
-            aria-checked={item.multiSelect === true ? undefined : selected}
-            data-question-option={option.label}
-            data-question-option-selected={selected || undefined}
-            style={optionRowStyle(selected)}
-            disabled={disabled}
-            onClick={() => {
-              if (item.multiSelect === true) {
-                // 多选：点选切换，互不覆盖。
-                const next = selected
-                  ? draft.selected.filter((label) => label !== option.label)
-                  : [...draft.selected, option.label]
-                store.setAnswer(questionId, item.id, { selected: next })
-              } else {
-                // 单选：换选即覆盖，并清掉自定义文本（custom 会覆盖选中项）。
-                store.setAnswer(questionId, item.id, { selected: [option.label], custom: null })
-              }
-            }}
-          >
-            <span aria-hidden>{item.multiSelect === true ? (selected ? '☑' : '☐') : selected ? '◉' : '○'}</span>
-            <span>
-              {option.label}
-              {option.description ? <span style={{ opacity: 0.7 }}> — {option.description}</span> : null}
-            </span>
-          </button>
-        )
-      })}
+      {(item.options ?? []).map((option) => (
+        <OptionButton
+          key={option.label}
+          questionId={questionId}
+          itemId={item.id}
+          multiSelect={item.multiSelect === true}
+          draftItem={draft}
+          store={store}
+          label={option.label}
+          description={option.description}
+          disabled={disabled}
+        />
+      ))}
       <input
         data-question-custom
         placeholder="其他（自由填写）"
@@ -202,20 +234,36 @@ function QuestionItem(props: { entry: QuestionCardView; item: AskUserQuestionIte
 }
 
 /** 一张问题卡：收起为 chip（任务名 + 计数），展开为逐问表单。 */
-function QuestionCardEntry(props: { entry: QuestionCardView; store: WorkbenchStore }): ReactNode {
-  const { entry, store } = props
+function QuestionCardEntry(props: {
+  entry: QuestionCardView
+  store: WorkbenchStore
+  uiWorkspace: { openSession(target: string): void }
+}): ReactNode {
+  const { entry, store, uiWorkspace } = props
   const questionId = entry.card.questionId
+  // hooks 全部在分支 return 之前（Rules of Hooks：折叠态翻转不得改变 hook 顺序）。
+  const [chipDarken, chipBind] = useHoverDarken()
+  const [collapseDarken, collapseBind] = useHoverDarken()
+  const [submitDarken, submitBind] = useHoverDarken()
+  // 规格 §8：chip 点击 = 展开 + 跳到该问题所属的 worker 会话（动作是纯函数，
+  // question-state.spec 断言）；小窗保持全局悬浮，提交成功后出队、不跳回。
+  const openChip = (): void => {
+    const action = chipClickAction(entry.card)
+    store.toggleCollapsed(questionId)
+    uiWorkspace.openSession(action.sessionId)
+  }
   if (entry.collapsed) {
     return (
       <div
         data-router-question-chip={questionId}
         data-router-question-count={entry.card.questions.length}
-        style={CHIP_STYLE}
+        style={{ ...CHIP_STYLE, ...chipDarken }}
         role="button"
         tabIndex={0}
-        onClick={() => store.toggleCollapsed(questionId)}
+        {...chipBind}
+        onClick={openChip}
         onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') store.toggleCollapsed(questionId)
+          if (event.key === 'Enter' || event.key === ' ') openChip()
         }}
       >
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -233,16 +281,19 @@ function QuestionCardEntry(props: { entry: QuestionCardView; store: WorkbenchSto
           {chipSummary(entry.card)}
         </strong>
         <span style={{ flex: '1 1 auto' }} />
-        <button
-          type="button"
-          data-router-question-collapse
-          title="收起（不是回答）"
-          aria-label={`收起问题 ${chipSummary(entry.card)}`}
-          style={COLLAPSE_STYLE}
-          onClick={() => store.toggleCollapsed(questionId)}
-        >
-          ▾
-        </button>
+        {/* 浅色悬浮提示替代原生 title（规格 §9 禁黑底原生浮层）。 */}
+        <LightTooltip label="收起（不是回答）">
+          <button
+            type="button"
+            data-router-question-collapse
+            aria-label={`收起问题 ${chipSummary(entry.card)}`}
+            style={{ ...COLLAPSE_STYLE, ...collapseDarken }}
+            {...collapseBind}
+            onClick={() => store.toggleCollapsed(questionId)}
+          >
+            ▾
+          </button>
+        </LightTooltip>
       </div>
       {entry.card.sessionTitle ? (
         <div style={MINOR_TEXT_STYLE}>来自 {entry.card.sessionTitle}</div>
@@ -259,7 +310,8 @@ function QuestionCardEntry(props: { entry: QuestionCardView; store: WorkbenchSto
         type="button"
         data-router-question-submit
         disabled={submitting}
-        style={{ ...SUBMIT_STYLE, opacity: submitting ? 0.6 : 1 }}
+        style={{ ...SUBMIT_STYLE, opacity: submitting ? 0.6 : 1, ...submitDarken }}
+        {...submitBind}
         onClick={() => { void store.submitAnswer(questionId) }}
       >
         {submitting ? '正在送达…' : entry.phase === 'failed' ? '重新提交' : '提交回答'}
@@ -278,7 +330,12 @@ export function QuestionCards(props: QuestionOverlayProps): ReactNode {
   return (
     <div data-router-question-overlay style={STACK_STYLE}>
       {cards.map((entry) => (
-        <QuestionCardEntry key={entry.card.questionId} entry={entry} store={props.store} />
+        <QuestionCardEntry
+          key={entry.card.questionId}
+          entry={entry}
+          store={props.store}
+          uiWorkspace={props.uiWorkspace}
+        />
       ))}
     </div>
   )

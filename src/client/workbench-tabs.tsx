@@ -16,6 +16,7 @@ import { activeTabIndex, buildTabList } from './tabs-model.ts'
 import type { RouterTabEntry } from './tabs-model.ts'
 import { WORKBENCH_TABS_ID, WORKBENCH_TABS_ORDER, WORKBENCH_TABS_SLOT } from './surface-ids.ts'
 import type { WorkbenchStore } from './workbench-store.ts'
+import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 
 /** slots 服务的最小面（结构化；真实 face 由 index.ts 传入）。 */
 export interface SlotsHost {
@@ -132,41 +133,67 @@ export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
       {tabs.map((entry, index) => {
         const closing = state.closingSessionIds.includes(entry.sessionId)
         return (
-          <span
+          <TabEntry
             key={`${entry.kind}:${entry.sessionId}`}
-            data-router-tab={entry.kind}
-            data-session-id={entry.sessionId}
-            role="tab"
-            aria-selected={index === activeIndex}
-            style={tabStyle(index === activeIndex, closing)}
-            onClick={() => {
+            entry={entry}
+            active={index === activeIndex}
+            closing={closing}
+            onOpen={() => {
               // 只响应点击；新派发/轮询绝不主动切换（规格 §3.2 不抢焦点）。
               if (!closing && entry.sessionId !== state.currentSessionId) {
                 props.uiWorkspace.openSession(entry.sessionId)
               }
             }}
-          >
-            {statusDot(entry)}
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160 }}>{entry.title}</span>
-            {entry.kind === 'worker' ? (
-              <button
-                type="button"
-                data-router-tab-close
-                title="关闭标签（不停止任务）"
-                aria-label={`关闭标签 ${entry.title}`}
-                disabled={closing}
-                style={CLOSE_STYLE}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  void props.store.closeWorkerTab(entry.sessionId)
-                }}
-              >
-                ×
-              </button>
-            ) : null}
-          </span>
+            onClose={() => { void props.store.closeWorkerTab(entry.sessionId) }}
+          />
         )
       })}
     </nav>
+  )
+}
+
+/** 一格标签（独立组件：hover 稍深要走 useHoverDarken 的 hook，不能进 map 回调）。 */
+function TabEntry(props: {
+  entry: RouterTabEntry
+  active: boolean
+  closing: boolean
+  onOpen(): void
+  onClose(): void
+}): ReactNode {
+  const { entry, active, closing } = props
+  const [darken, bind] = useHoverDarken()
+  const [closeDarken, closeBind] = useHoverDarken()
+  return (
+    <span
+      data-router-tab={entry.kind}
+      data-session-id={entry.sessionId}
+      role="tab"
+      aria-selected={active}
+      style={{ ...tabStyle(active, closing), ...darken }}
+      {...bind}
+      onClick={() => { if (!closing) props.onOpen() }}
+    >
+      {statusDot(entry)}
+      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 160 }}>{entry.title}</span>
+      {entry.kind === 'worker' ? (
+        // 浅色悬浮提示替代原生 title（规格 §9 禁黑底原生浮层）。
+        <LightTooltip label="关闭标签（不停止任务）">
+          <button
+            type="button"
+            data-router-tab-close
+            aria-label={`关闭标签 ${entry.title}`}
+            disabled={closing}
+            style={{ ...CLOSE_STYLE, ...closeDarken }}
+            {...closeBind}
+            onClick={(event) => {
+              event.stopPropagation()
+              props.onClose()
+            }}
+          >
+            ×
+          </button>
+        </LightTooltip>
+      ) : null}
+    </span>
   )
 }

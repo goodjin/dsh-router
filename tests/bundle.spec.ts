@@ -270,12 +270,14 @@ describe('lib/client.js 是页面能装的产物', () => {
       expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
     }
 
-    // 按页面物化的方式真跑一遍 apply：四个表面注册齐、自报一行、生命周期经 effect。
+    // 按页面物化的方式真跑一遍 apply：表面注册齐（shell.overlay 两个注册项：
+    // 问题浮窗 + 返回按钮）、自报一行、生命周期经 effect。
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
       'settings.section',
+      'shell.overlay',
       'shell.overlay',
       'sidebar.footer.action',
     ].sort())
@@ -283,6 +285,7 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(ids).toEqual([
       'router-workbench-tabs',
       'router-question-overlay',
+      'router-back-button',
       'router-create-entry',
       'router-settings',
     ])

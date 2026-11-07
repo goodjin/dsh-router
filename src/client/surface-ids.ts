@@ -15,6 +15,11 @@ export const QUESTION_OVERLAY_SLOT = 'shell.overlay'
 export const QUESTION_OVERLAY_ID = 'router-question-overlay'
 export const QUESTION_OVERLAY_ORDER = 30
 
+/** 全局「返回 Router」浮动按钮（list、root、frame 级浮层——问题浮窗同槽位的第二项）。 */
+export const BACK_BUTTON_SLOT = 'shell.overlay'
+export const BACK_BUTTON_ID = 'router-back-button'
+export const BACK_BUTTON_ORDER = 35
+
 /** 侧栏底部动作位（list、root——Settings 旁的增量入口）。 */
 export const CREATE_ENTRY_SLOT = 'sidebar.footer.action'
 export const CREATE_ENTRY_ID = 'router-create-entry'
