@@ -56,6 +56,12 @@ describe('root-config：workerSpawnMode（volatile，默认 cache-priority）', 
     expect(spawnModeOr('cache-priority')).toBe('cache-priority')
     expect(spawnModeOr('minimal-face')).toBe('minimal-face')
   })
+
+  it('volatile 描述符解引用（评审 F1）：loader 经 Config validate 传 {get} 时 minimal-face 不被误解析', () => {
+    expect(spawnModeOr({ get: () => 'minimal-face' })).toBe('minimal-face')
+    expect(spawnModeOr({ get: () => 'cache-priority' })).toBe('cache-priority')
+    expect(spawnModeOr({ get: () => 'bogus' })).toBe('cache-priority')
+  })
 })
 
 /* ────────────────────────── 统一超集组合 ────────────────────────── */

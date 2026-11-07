@@ -64,20 +64,31 @@ describe('switchCard：三段齐（①身份职责=类型系统提示词 ②工�
     expect(card).not.toContain('create_worker_type')
   })
 
-  it('supervisor 卡：列 supervisor 白名单 + 子代理工具；禁主管链工具不出现', () => {
+  it('worker 卡：含宿主执行工具（bash/fs/fs-search）与技能挂载提示（评审 F3/F6）', () => {
+    const card = switchCard(type, 'worker')
+    expect(card).toContain('bash')
+    expect(card).toContain('fs')
+    expect(card).toContain('fs-search')
+    expect(card).toMatch(/技能/)
+  })
+
+  it('supervisor 卡：列 supervisor 白名单 + 子代理工具 + 执行工具；禁主管链工具不出现', () => {
     const card = switchCard({ name: '主管型', systemPrompt: '主管提示词' }, 'supervisor')
     for (const tool of toolsForRole('supervisor')) {
       expect(card, tool).toContain(tool)
     }
     expect(card).toContain('subagent')
+    expect(card).toContain('bash')
     expect(card).not.toContain('create_worker_type')
   })
 
-  it('router 卡（改派）：列 router 白名单', () => {
-    const card = switchCard({ name: '编排者', systemPrompt: '编排提示词' }, 'router')
+  it('router 卡：列 router 白名单 + 子代理通道（cache 超集挂 delegation，A4 准则）', () => {
+    const card = routerIdentityCard()
     for (const tool of toolsForRole('router')) {
       expect(card, tool).toContain(tool)
     }
+    expect(card).toContain('subagent')
+    expect(card).toMatch(/轻[^。]{0,40}子代理|轻活/)
   })
 })
 
@@ -283,12 +294,77 @@ describe('dispatchTask 投递内容（v1.3 规格 §2.3/§2.4）', () => {
   })
 })
 
+/* ────────────────────────── 收编正主：登记 + 补发（评审 F4） ────────────────────────── */
+
+describe('adoptCanonicalRouterSessions：收编正主先登记 Router 会话再补发身份卡', () => {
+  it('未登记的正主：先 register（带 workspace）再 deliver', async () => {
+    const { adoptCanonicalRouterSessions } = await import('../src/host/bridge/dedup-adopt.ts')
+    const calls: string[] = []
+    await adoptCanonicalRouterSessions({
+      canonicals: [{ workspaceId: 'ws-1', sessionId: 'picker-1' }],
+      known: () => false,
+      register: async (sessionId, workspaceId) => {
+        calls.push(`register:${sessionId}:${workspaceId}`)
+      },
+      deliver: async (sessionId) => {
+        calls.push(`deliver:${sessionId}`)
+      },
+    })
+    expect(calls).toEqual(['register:picker-1:ws-1', 'deliver:picker-1'])
+  })
+
+  it('已登记的正主只补发身份卡（不重写登记名）；deliver 抛错不外泄（entry 有告警兜底）', async () => {
+    const { adoptCanonicalRouterSessions } = await import('../src/host/bridge/dedup-adopt.ts')
+    const calls: string[] = []
+    await expect(
+      adoptCanonicalRouterSessions({
+        canonicals: [{ workspaceId: 'ws-1', sessionId: 'ours-1' }],
+        known: (sessionId) => sessionId === 'ours-1',
+        register: async () => {
+          calls.push('register')
+        },
+        deliver: async () => {
+          throw new Error('投递失败')
+        },
+      }),
+    ).resolves.toBeUndefined()
+    expect(calls).toEqual([])
+  })
+})
+
+/* ────────────────────────── 观察租约释放（评审 F7） ────────────────────────── */
+
+describe('releaseObservation：.dispose 与 [Symbol.dispose] 双通道释放', () => {
+  it('两个通道都调（宿主观察租约用 Symbol.dispose，适配器此前只转发 .dispose）', async () => {
+    const { releaseObservation } = await import('../src/host/bridge/sessions.ts')
+    const calls: string[] = []
+    const sym = (Symbol as unknown as { dispose?: symbol }).dispose
+    const observation: unknown = {
+      dispose: () => {
+        calls.push('prop')
+      },
+      ...(sym !== undefined ? { [sym]: () => void calls.push('symbol') } : {}),
+    }
+    releaseObservation(observation)
+    expect(calls).toContain('prop')
+    expect(sym === undefined || calls.includes('symbol')).toBe(true)
+  })
+
+  it('空观察/无任何释放面时不抛（冷会话 undefined）', async () => {
+    const { releaseObservation } = await import('../src/host/bridge/sessions.ts')
+    expect(() => releaseObservation(undefined)).not.toThrow()
+    expect(() => releaseObservation({})).not.toThrow()
+  })
+})
+
+
 /* ────────────────────────── dedup 正主清单（收编补发数据源） ────────────────────────── */
 
-describe('RouterDedup.canonicalSessionIds', () => {
-  it('暴露已 pin 的正主会话清单（供身份卡收编补发；无正主时为空）', async () => {
+describe('dedup 正主清单（收编补发数据源）', () => {
+  it('暴露已 pin 的正主会话清单（workspace 配对；无正主时为空）', async () => {
     const { RouterDedup } = await import('../src/host/bridge/dedup.ts')
     const pinned: string[] = []
+    const archived: string[] = []
     const dedup = new RouterDedup({
       workspaces: {
         list: () => [{ id: 'ws-1', sessionIds: ['dup-1', 'canon-1'] }],
@@ -303,13 +379,45 @@ describe('RouterDedup.canonicalSessionIds', () => {
         pinSession: async (sessionId) => {
           pinned.push(sessionId)
         },
-        archiveSession: async () => ({}),
+        archiveSession: async (sessionId) => {
+          archived.push(sessionId)
+        },
         archivedSessionIds: [],
       },
       routerPreset: 'dsh-router',
     })
     await dedup.resolve()
-    expect(dedup.canonicalSessionIds()).toEqual(['canon-1'])
+    expect(dedup.canonicalSessions()).toEqual([{ workspaceId: 'ws-1', sessionId: 'canon-1' }])
     expect(pinned).toContain('canon-1')
+    expect(archived).toContain('dup-1')
+  })
+
+  it('分叉/种子会话不是 Router（评审 F2）：agentPreset=dsh-router 但 isSeeded=true 不进正主、不归档', async () => {
+    const { RouterDedup } = await import('../src/host/bridge/dedup.ts')
+    const archived: string[] = []
+    const dedup = new RouterDedup({
+      workspaces: {
+        // seeded-1（fork worker，继承 router 预设）比真 Router 更早：若误认会反客为主
+        list: () => [{ id: 'ws-1', sessionIds: ['seeded-1', 'real-1'] }],
+      },
+      sessionQuery: {
+        readSession: async (sessionId) =>
+          sessionId === 'seeded-1'
+            ? { session: { agentPreset: 'dsh-router', createdAt: 1, isSeeded: true }, events: [] }
+            : { session: { agentPreset: 'dsh-router', createdAt: 2 }, events: [] },
+      },
+      registry: {
+        pinSession: async () => ({}),
+        archiveSession: async (sessionId) => {
+          archived.push(sessionId)
+        },
+        archivedSessionIds: [],
+      },
+      routerPreset: 'dsh-router',
+    })
+    await dedup.resolve()
+    expect(dedup.canonicalSessions()).toEqual([{ workspaceId: 'ws-1', sessionId: 'real-1' }])
+    // seeded（fork worker）既不是正主候选、也不进归档收编
+    expect(archived).toEqual([])
   })
 })

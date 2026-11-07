@@ -35,16 +35,34 @@ const ROLE_LABEL: Record<RoleKind, string> = {
 /** ask_user 是宿主原生工具（不在本插件白名单内），三身份都可用。 */
 const ASK_USER_LINE = '- ask_user：向用户提问。只问真正必要的问题；问题直达用户界面浮窗，回答直接回到你的工具结果里。'
 
+/**
+ * 宿主执行工具行（评审 F3）：统一超集给执行身份挂了 bash/fs/fs-search——清单里
+ * 必须逐一列名，否则「禁用提醒」会挡住正常执行。router（编排件）按设计不列：
+ * 它的产出是任务书与汇报，不是命令与文件（规格 §6 承接的误用风险）。
+ */
+const EXECUTION_TOOL_LINES: readonly string[] = [
+  '- bash：执行 shell 命令（跑测试、构建、查环境事实）。',
+  '- fs：读写文件（读代码与材料、写交付物）。',
+  '- fs-search：按文件名或内容搜索（找代码、找配置、找输入材料）。',
+]
+
+/** 技能挂载提示（评审 F6）：技能行按类型挂载，卡面如实声明「以会话实际在场为准」。 */
+const SKILLS_NOTE = '- 若本类型配置了技能，会话里另有技能加载与技能调用工具，按会话实际挂载为准；没有挂载就如实用 report_blocker 说明。'
+
 /** 本插件白名单内一个工具的卡面行（描述与注册定义同源）。 */
 function toolLine(name: string): string {
   return `- ${name}：${orchestrationToolDescription(name as never)}`
 }
 
-/** 本身份可用工具清单（逐一列名；含 ask_user，主管加子代理）。 */
+/** 本身份可用工具清单（逐一列名；含 ask_user，主管加子代理，执行身份加宿主执行工具）。 */
 function toolSection(role: RoleKind): string {
   const lines = toolsForRole(role).map(toolLine)
   if (role === 'supervisor') {
     lines.push('- subagent：一次性子代理（进程内 spawn，空会话起步）：轻量收尾快的工作用它，提示词写自包含，结果随完成通知回来。')
+  }
+  if (role !== 'router') {
+    lines.push(...EXECUTION_TOOL_LINES)
+    lines.push(SKILLS_NOTE)
   }
   lines.push(ASK_USER_LINE)
   return lines.join('\n')
@@ -62,10 +80,11 @@ export function routerIdentityCard(): string {
 - 无需执行的事实问题直接回答，不建任务、不派发。答不准的先向用户澄清，再决定是否需要执行。
 - 简单单步任务直接派 worker：一个执行会话一次做完，不要升级主管。多步、需要协调多方、或有依赖拆分的任务才派 supervisor；单点工作永远不要套两层。
 - 派发前拿不准类型时先用 list_worker_types 查询，templateId 以它为准；没有合适的类型就先 create_worker_type 再派。
+- 派发通道按轻重选（缓存优先模式下你会挂有 subagent 工具；没挂就以会话实际工具为准）：轻活（一次查询、单点小改、格式转换这类收尾快、不留持久产出的）直接用 subagent 开一次性子代理，提示词写自包含，不要为它建任务；重活或持久活（多轮交互、要向用户提问、要留文件或仓库改动的）才建任务派发（dispatch_task）。
 - 任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言。回答「进行得怎么样」前先查。
 - 完成的任务结果与用户决定会自动进入记忆：回答「之前做过什么、定过什么」类问题前先 search_history，命中为空就如实说没有记录，不要编造。
 
-## 本身份可用工具（逐一列名；范围外的调用会被系统拒绝——不要尝试）
+## 本身份可用工具（逐一列名；以会话实际挂载为准，范围外的调用会被系统拒绝——不要尝试）
 
 ${toolSection('router')}
 `

@@ -29,7 +29,7 @@ import type { WorkspaceInfo } from './sessions.ts'
 import type { RouterRedirect, RouterState } from '../../shared/view-contract.ts'
 /** readSession 快照的最小面（宿主 SessionLogSnapshot：header + 事件）。 */
 export interface SessionSnapshotLike {
-  session?: { agentPreset?: string; createdAt?: number }
+  session?: { agentPreset?: string; createdAt?: number; isSeeded?: boolean }
   events?: ReadonlyArray<{ type: string; data?: { agentPreset?: string } }>
 }
 
@@ -96,6 +96,10 @@ export class RouterDedup {
 
   /** 事件/头部双证据判定（取证结论见文件头）。 */
   private snapshotSaysRouter(snapshot: SessionSnapshotLike): boolean {
+    // 评审 F2：分叉子会话（cache=宿主 fork；minimal=agents.create 五步）的 header
+    // 都带 isSeeded=true，且会继承来源的 agentPreset（cache 模式下正是 'dsh-router'）
+    // ——它们是任务会话，绝不是 Router 正主候选，也不进归档收编。
+    if (snapshot.session?.isSeeded === true) return false
     if (snapshot.session?.agentPreset === this.deps.routerPreset) return true
     return snapshot.events?.some(
       (event) => event.type === 'agent-preset/selected' && event.data?.agentPreset === this.deps.routerPreset,
@@ -190,11 +194,11 @@ export class RouterDedup {
   }
 
   /**
-   * 已 pin 的正主会话清单（去重跨 workspace；v1.3 A2 供 Router 身份卡的收编
+   * 已 pin 的正主会话清单（workspace 配对；v1.3 A2 供 Router 身份卡的收编
    * 补发——picker 自建的 Router 会话被 dedup 判定为正主后补发一次身份卡）。
    */
-  canonicalSessionIds(): readonly string[] {
-    return [...new Set(this.pinnedCanonical.values())]
+  canonicalSessions(): readonly { workspaceId: string; sessionId: string }[] {
+    return [...this.pinnedCanonical].map(([workspaceId, sessionId]) => ({ workspaceId, sessionId }))
   }
 
   /** 客户端消费回执：按被归档会话清掉对应指令（没有匹配就静默）。 */

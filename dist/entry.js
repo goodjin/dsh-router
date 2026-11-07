@@ -33,10 +33,11 @@ import { TaskLedger } from "./host/ledger/store.js";
 import { LedgerError } from "./host/ledger/errors.js";
 import { TaskDocStore } from "./host/docs/task-docs.js";
 import { Scheduler } from "./host/ledger/scheduler.js";
-import { SessionBridge } from "./host/bridge/sessions.js";
+import { SessionBridge, releaseObservation } from "./host/bridge/sessions.js";
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from "./host/bridge/questions.js";
 import { UiStateStore } from "./host/bridge/tabs.js";
 import { RouterDedup, stateWithRedirect } from "./host/bridge/dedup.js";
+import { adoptCanonicalRouterSessions } from "./host/bridge/dedup-adopt.js";
 import { CompactionDriver } from "./host/context/compaction-driver.js";
 import { registerRouterRoutes } from "./host/routes.js";
 import { createRouterCore } from "./host/core.js";
@@ -91,9 +92,16 @@ function templatesOr(value) {
     }
     return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES;
 }
-/** 模式解析（v1.3 A1）：只认两个合法值，其余回默认 cache-priority。导出供测试。 */
+/**
+ * 模式解析（v1.3 A1；评审 F1 修正）：宿主 loader 经 Config["~standard"].validate
+ * 把 volatile 字段包成 {get} 惰性描述符再传 apply——先解引用再认字面值，只认两个
+ * 合法值，其余回默认 cache-priority。导出供测试。
+ */
 export function spawnModeOr(value) {
-    return value === 'minimal-face' ? 'minimal-face' : 'cache-priority';
+    const resolved = typeof value === 'object' && value !== null && typeof value.get === 'function'
+        ? value.get()
+        : value;
+    return resolved === 'minimal-face' ? 'minimal-face' : 'cache-priority';
 }
 function resolveRootConfig(raw) {
     const source = (typeof raw === 'object' && raw !== null ? raw : {});
@@ -246,6 +254,8 @@ export function apply(ctx, rawConfig) {
                         session: {
                             agentPreset: typeof snapshot.session?.agentPreset === 'string' ? snapshot.session.agentPreset : undefined,
                             createdAt: typeof snapshot.session?.createdAt === 'number' ? snapshot.session.createdAt : undefined,
+                            // 评审 F2：分叉/种子会话识别的第三证据（header.isSeeded）。
+                            isSeeded: snapshot.session?.isSeeded === true,
                         },
                         events: events.map((event) => ({
                             type: typeof event.type === 'string' ? event.type : '',
@@ -341,7 +351,8 @@ export function apply(ctx, rawConfig) {
             observeSession: async (sessionId) => {
                 const observation = await ctx.sessionQuery.observeSession(sessionId);
                 const events = (observation.events ?? []);
-                return { events, dispose: observation.dispose };
+                // 评审 F7：宿主租约经 [Symbol.dispose] 释放——双通道包装，五步路径不漏租约。
+                return { events, dispose: () => releaseObservation(observation) };
             },
             buildForkSeed: async (events, boundary) => {
                 const fn = await loadForkSeed();
@@ -710,11 +721,15 @@ export function apply(ctx, rawConfig) {
             getState: async (workspaceId) => {
                 if (dedup !== undefined) {
                     await dedup.resolve();
-                    // v1.3 A2：收编补发——正主可能是 picker 自建的 Router 预设会话，
-                    // 身份卡由桥按已发标记幂等补发一次（含我们自建的：重启后标记在盘）。
-                    for (const canonicalSessionId of dedup.canonicalSessionIds()) {
-                        await deliverRouterCard(canonicalSessionId);
-                    }
+                    // v1.3 A2 + 评审 F4：收编正主——picker 自建的 Router 预设会话先登记进
+                    // ui.routerSessions（否则 superset 角色解析查不到，编排工具全被拒），
+                    // 再按已发标记幂等补发身份卡。
+                    await adoptCanonicalRouterSessions({
+                        canonicals: dedup.canonicalSessions(),
+                        known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
+                        register: (sessionId, wsId) => ui.addRouterSession(sessionId, wsId, 'Router'),
+                        deliver: (sessionId) => deliverRouterCard(sessionId),
+                    });
                 }
                 const state = await assembled.workbench.state(workspaceId);
                 const withRedirect = dedup !== undefined

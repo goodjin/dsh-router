@@ -86,6 +86,8 @@ interface HarnessOptions {
   presetNotFound?: boolean
   /** agents.create 拒绝。 */
   createFails?: Error
+  /** 不给 resolvePreset/mountPreset 面（评审 F5：五步能力检查应回退创建）。 */
+  omitPresetFaces?: boolean
 }
 
 function harness(opts: HarnessOptions) {
@@ -146,8 +148,10 @@ function harness(opts: HarnessOptions) {
       ? async () => {
           throw new Error('agent-preset/not-found: Unknown agent preset: dsh-router-worker')
         }
-      : async (presetId) => ({ id: presetId }),
-    mountPreset: async () => ({}),
+      : opts.omitPresetFaces === true
+        ? undefined
+        : async (presetId) => ({ id: presetId }),
+    mountPreset: opts.omitPresetFaces === true ? undefined : async () => ({}),
     attachWorkspace: async (workspaceId, sessionId) => {
       captured.attachCalls.push({ workspaceId, sessionId })
     },
@@ -310,6 +314,14 @@ describe('minimal-face：五步复刻（规格 §3.2）', () => {
     const error = await h.bridge.dispatchTask(record.id, { forkFrom: 'router-session-1' }).catch((e: unknown) => e)
     expect(classifyDispatchFailure(error).class).toBe('infra')
     expect(h.captured.agentsCreateCalls).toHaveLength(0)
+  })
+
+  it('resolvePreset/mountPreset 缺面（评审 F5）→ 不做五步，回退创建路径（不裸跑 agents.create）', async () => {
+    const h = harness({ mode: 'minimal-face', omitPresetFaces: true })
+    const record = await createTask(h)
+    await h.bridge.dispatchTask(record.id, { forkFrom: 'router-session-1' })
+    expect(h.captured.agentsCreateCalls).toHaveLength(0)
+    expect(h.captured.createCalls).toHaveLength(1)
   })
 
   it('无分叉源 → 回退既有创建路径（host.create + 钉模型）', async () => {

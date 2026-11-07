@@ -28,10 +28,11 @@ import { TaskLedger, type LedgerFile, type LedgerPersistence } from './host/ledg
 import { LedgerError } from './host/ledger/errors.ts'
 import { TaskDocStore } from './host/docs/task-docs.ts'
 import { Scheduler } from './host/ledger/scheduler.ts'
-import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace } from './host/bridge/sessions.ts'
+import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace, releaseObservation } from './host/bridge/sessions.ts'
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
 import { RouterDedup, stateWithRedirect, type SessionSnapshotLike } from './host/bridge/dedup.ts'
+import { adoptCanonicalRouterSessions } from './host/bridge/dedup-adopt.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
@@ -160,9 +161,16 @@ function templatesOr(value: unknown): WorkerTemplate[] {
   return parsed.length > 0 ? parsed : BUILTIN_TEMPLATES
 }
 
-/** 模式解析（v1.3 A1）：只认两个合法值，其余回默认 cache-priority。导出供测试。 */
+/**
+ * 模式解析（v1.3 A1；评审 F1 修正）：宿主 loader 经 Config["~standard"].validate
+ * 把 volatile 字段包成 {get} 惰性描述符再传 apply——先解引用再认字面值，只认两个
+ * 合法值，其余回默认 cache-priority。导出供测试。
+ */
 export function spawnModeOr(value: unknown): WorkerSpawnMode {
-  return value === 'minimal-face' ? 'minimal-face' : 'cache-priority'
+  const resolved = typeof value === 'object' && value !== null && typeof (value as { get?: unknown }).get === 'function'
+    ? (value as { get: () => unknown }).get()
+    : value
+  return resolved === 'minimal-face' ? 'minimal-face' : 'cache-priority'
 }
 
 function resolveRootConfig(raw: unknown): ResolvedRootConfig {
@@ -320,7 +328,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       sessionQuery: {
         readSession: async (sessionId) => {
           const snapshot = await ctx.sessionQuery.readSession!(sessionId) as {
-            session?: { agentPreset?: unknown; createdAt?: unknown }
+            session?: { agentPreset?: unknown; createdAt?: unknown; isSeeded?: unknown }
             events?: { type?: unknown; data?: unknown }[]
           } | null | undefined
           if (snapshot === null || snapshot === undefined) return undefined
@@ -329,6 +337,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
             session: {
               agentPreset: typeof snapshot.session?.agentPreset === 'string' ? snapshot.session.agentPreset : undefined,
               createdAt: typeof snapshot.session?.createdAt === 'number' ? snapshot.session.createdAt : undefined,
+              // 评审 F2：分叉/种子会话识别的第三证据（header.isSeeded）。
+              isSeeded: snapshot.session?.isSeeded === true,
             },
             events: events.map((event) => ({
               type: typeof event.type === 'string' ? event.type : '',
@@ -430,7 +440,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
           dispose?: () => void
         }
         const events = (observation.events ?? []) as { seq: number; type: string; time?: number; data?: unknown }[]
-        return { events, dispose: observation.dispose }
+        // 评审 F7：宿主租约经 [Symbol.dispose] 释放——双通道包装，五步路径不漏租约。
+        return { events, dispose: () => releaseObservation(observation) }
       },
       buildForkSeed: async (events, boundary) => {
         const fn = await loadForkSeed()
@@ -811,11 +822,15 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       getState: async (workspaceId) => {
         if (dedup !== undefined) {
           await dedup.resolve()
-          // v1.3 A2：收编补发——正主可能是 picker 自建的 Router 预设会话，
-          // 身份卡由桥按已发标记幂等补发一次（含我们自建的：重启后标记在盘）。
-          for (const canonicalSessionId of dedup.canonicalSessionIds()) {
-            await deliverRouterCard(canonicalSessionId)
-          }
+          // v1.3 A2 + 评审 F4：收编正主——picker 自建的 Router 预设会话先登记进
+          // ui.routerSessions（否则 superset 角色解析查不到，编排工具全被拒），
+          // 再按已发标记幂等补发身份卡。
+          await adoptCanonicalRouterSessions({
+            canonicals: dedup.canonicalSessions(),
+            known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
+            register: (sessionId, wsId) => ui.addRouterSession(sessionId, wsId, 'Router'),
+            deliver: (sessionId) => deliverRouterCard(sessionId),
+          })
         }
         const state = await assembled.workbench.state(workspaceId)
         const withRedirect = dedup !== undefined

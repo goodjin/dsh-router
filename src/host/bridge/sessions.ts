@@ -153,6 +153,33 @@ export interface AgentInterruptFace {
 /** 紧急暂停的取消原因（留痕 turn/end；auto-resume 对 hook cause 永不自动续跑）。 */
 export const EMERGENCY_STOP_REASON = 'emergency-stop'
 
+/**
+ * 宿主观察租约的释放（评审 F7）：宿主 observeSession 的租约经显式资源管理释放
+ * （`[Symbol.dispose]`），部分版本同时带 `.dispose` 方法——两个通道都调，缺哪个
+ * 跳哪个；undefined/空观察静默。minimal 五步路径用（不释放会泄漏 prepared
+ * session 缓存租约）。
+ */
+export function releaseObservation(observation: unknown): void {
+  if (observation === null || observation === undefined) return
+  if (typeof observation !== 'object') return
+  const record = observation as { dispose?: unknown } & Record<symbol, unknown>
+  if (typeof record.dispose === 'function') {
+    try {
+      record.dispose()
+    } catch {
+      // 释放失败不外泄（租约泄漏由宿主自身超时回收兜底）
+    }
+  }
+  const disposeSymbol = (Symbol as unknown as { dispose?: symbol }).dispose
+  if (disposeSymbol !== undefined && typeof record[disposeSymbol] === 'function') {
+    try {
+      (record[disposeSymbol] as () => void)()
+    } catch {
+      // 同上
+    }
+  }
+}
+
 /** 单会话中断结果（逐项如实：accepted 或 failed 带 detail）。 */
 export interface InterruptOutcome {
   sessionId: string
@@ -333,6 +360,10 @@ export class SessionBridge {
       || host.observeSession === undefined
       || host.newSessionId === undefined
       || host.agentsCreate === undefined
+      // 评审 F5：resolvePreset/mountPreset 缺席时五步会裸跑 agents.create（无预设
+      // 挂载，worker 没有工具面）——按面不全处理，回退既有创建路径。
+      || host.resolvePreset === undefined
+      || host.mountPreset === undefined
     ) {
       return undefined
     }
