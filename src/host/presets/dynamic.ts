@@ -55,6 +55,9 @@ export function dynamicPresetId(templateId: string): string {
 /** 动态预设排在静态三预设（10/20/30）之后。 */
 const DYNAMIC_ORDER = 100
 
+/** Router 动态预设 id（会话保存的就是它；v1.3.1 热修供自愈巡检引用）。 */
+export const ROUTER_PRESET_ID = 'dsh-router'
+
 /** cache-priority 模式的统一 persona 文本（= prompts/unified.ts 全文，唯一源）。 */
 export function supersetPersona(): string {
   return unifiedPrompt

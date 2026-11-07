@@ -310,7 +310,6 @@ describe('lib/client.js 是页面能装的产物', () => {
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
-      'sidebar.footer.action',
     ].sort())
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toEqual([
@@ -320,7 +319,6 @@ describe('lib/client.js 是页面能装的产物', () => {
       'router-back-button',
       'router-prompt-editor',
       'router-prompt-action',
-      'router-create-entry',
       'router-settings',
     ])
     expect(captured.infos.join(' ')).toMatch(/client loaded/i)

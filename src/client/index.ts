@@ -17,7 +17,6 @@
  * - shell.overlay                → 「返回 Router」浮动按钮（worker/主管会话时显示）
  * - shell.overlay                → 系统提示词编辑浮层（C5：提示词按钮点开）
  * - conversation.session.header.actions → 「提示词」按钮（仅 Router 会话渲染，C5）
- * - sidebar.footer.action        → 「新建 Router」入口
  * - settings.section             → 插件设置段（只读 + 预留写通道）
  *
  * 自报一行状态（仓库纪律：会静默失败的程序动手时就要留能自报的入口）；
@@ -27,7 +26,6 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
-import { registerCreateRouter } from './create-router.tsx'
 import { registerPromptAction, registerPromptEditor } from './prompt-editor.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
@@ -171,11 +169,6 @@ export function apply(ctx?: PluginContext): void {
     registerPromptAction(slotsHost, { store })
   } catch (error) {
     log.warn(`prompt action failed to register: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  try {
-    registerCreateRouter(slotsHost, { store, api, uiWorkspace, workspacesList: safeCtx.workspaces?.list })
-  } catch (error) {
-    log.warn(`create entry failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
     registerSettingsSection(slotsHost, { prefs, api })

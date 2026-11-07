@@ -507,6 +507,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // 类型写路径后的引擎增量同步（C3 路由 deps 用）：只同步「启用」类型
   //（syncTypes 的调用方约定是喂启用清单；禁用 = 保留注册只拒派发，r4 §4）。
   // builtin 不经引擎（映射静态预设，ensureRegistered 对它恒 false）。
+  // v1.3.1 巡检：注册表缺位最长 60 秒内自愈（UI 冷恢复路径等不来入口钩子）。
+  ctx.effect(() => {
+    const timer = setInterval(() => { void engine.ensureRouterPresent(spawnMode()) }, 60_000)
+    return () => clearInterval(timer)
+  }, 'dsh-router: 预设注册表巡检')
+
   const syncTypePresets = async (record: WorkerTypeRecord): Promise<void> => {
     if (!record.enabled || record.origin === 'builtin') return
     const outcome = await engine.syncTypes([record], spawnMode())
@@ -857,11 +863,13 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         const withRedirect = dedup !== undefined
           ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
           : state
-        // v1.2 B4 最小通知投影：guard 通知段非空才带键（lossless；C1 统一通知卡
-        // 合并后由此键承载全部卡）。
-        return withRedirect
+        // v1.3.1 诊断：预设注册表可见性（切模型报「未知 preset」时一眼定位缺位）。
+        const registeredIds = engine.registeredIds()
+        return { ...withRedirect, presets: { routerRegistered: registeredIds.includes('dsh-router'), typePresetIds: registeredIds } }
       },
       createRouterSession: async (workspaceId, name) => {
+        // v1.3.1 自愈：创建前确保 Router 预设在册（重应用窗口/注册失败遗留）。
+        await engine.ensureRouterPresent(spawnMode())
         const created = await assembled.workbench.createRouterSession(workspaceId, name)
         // v1.3 A2 规格 §2.2：Router 会话创建成功后投递一次身份卡（幂等）。
         await deliverRouterCard(created.sessionId)

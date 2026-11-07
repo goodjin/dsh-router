@@ -4,7 +4,7 @@
  *
  * 宿主侧 src/entry.ts 声明 inject 与防御性 Config；浏览器半边 src/client/index.ts
  * 是真正的工厂：name/inject/apply 齐全，apply 用注入的服务注册全部界面表面
- * （conversation.header.leading / shell.overlay / sidebar.footer.action /
+ * （conversation.header.leading / shell.overlay /
  * settings.section，键名以 R3 报告为准），并把轮询生命周期挂进 ctx.effect。
  * 组件绝不收 ctx——表面经 registration 的 inject 工厂拿到业务 face。
  */
@@ -113,7 +113,6 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
-      'sidebar.footer.action',
       'conversation.header.leading',
       'conversation.session.header.actions',
     ].sort())
@@ -124,7 +123,6 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(ids).toContain('router-prompt-editor')
     expect(ids).toContain('router-notification-overlay')
     expect(ids).toContain('router-prompt-action')
-    expect(ids).toContain('router-create-entry')
     expect(ids).toContain('router-settings')
     expect(new Set(ids).size).toBe(ids.length)
     // 登记的 name 必须就是槽位键（slots.register 的 name 指向被注入的 slot）。
@@ -167,7 +165,6 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
   it('浏览器面全部组件不再用原生 title 悬浮提示（规格 §9 禁原生黑浮层）', () => {
     const files = [
       'back-button.tsx',
-      'create-router.tsx',
       'prompt-editor.tsx',
       'question-cards.tsx',
       'settings.tsx',

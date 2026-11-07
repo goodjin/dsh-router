@@ -44,11 +44,6 @@ export const PROMPT_ACTION_SLOT = 'conversation.session.header.actions'
 export const PROMPT_ACTION_ID = 'router-prompt-action'
 export const PROMPT_ACTION_ORDER = 50
 
-/** 侧栏底部动作位（list、root——Settings 旁的增量入口）。 */
-export const CREATE_ENTRY_SLOT = 'sidebar.footer.action'
-export const CREATE_ENTRY_ID = 'router-create-entry'
-export const CREATE_ENTRY_ORDER = 40
-
 /** 设置段（list、root——一个 entry 一整页设置）。 */
 export const SETTINGS_SLOT = 'settings.section'
 export const SETTINGS_ID = 'router-settings'

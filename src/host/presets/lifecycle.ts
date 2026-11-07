@@ -25,7 +25,7 @@ import {
   staticRouterDefinition,
   type PresetDefinition,
   type RowSpec,
-} from './dynamic.ts'
+ ROUTER_PRESET_ID, } from './dynamic.ts'
 import type { WorkerSpawnMode } from '../../shared/view-contract.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
@@ -89,7 +89,20 @@ export class DynamicPresetEngine {
     // 先撤旧再注册同 id（更新场景）；未注册时注销是 no-op。
     const previous = this.disposers.get(def.id)
     if (previous !== undefined) await previous()
-    const unregister = await this.deps.presets.register(def)
+    let unregister: () => Promise<void>
+    try {
+      unregister = await this.deps.presets.register(def)
+    } catch (error) {
+      // Duplicate 容忍（v1.3.1 热修）：同 id 已在注册表=上一代 fiber 的注册仍在
+      // （重应用窗口）。视为「已在册」成功返回，不注销既有注册——避免把上一代
+      // 留下的可用预设打掉造成 agent-preset/not-found。
+      const message = error instanceof Error ? error.message : String(error)
+      if (message.includes('Duplicate') || message.includes('duplicate')) {
+        this.deps.logger?.info(`预设 ${def.id} 已在注册表（上一代注册仍在），沿用既有注册`)
+        return def.id
+      }
+      throw error
+    }
     this.disposers.set(def.id, unregister)
     // r4 条件①：注销器必须自接线 ctx.effect——插件行 fiber dispose 时由宿主
     // 触发，保证热重载/进程回收不留幽灵预设（重复触发是 no-op，安全）。
@@ -177,6 +190,17 @@ export class DynamicPresetEngine {
         return 'failed'
       }
     }
+  }
+
+  /**
+   * 自愈（v1.3.1 热修）：Router 预设不在册（重应用窗口/注册失败遗留）则按当前
+   * 模式重注册。所有创建/派发/收编入口与周期巡检都先调它——注册表缺位在到达
+   * 任何 UI 冷恢复路径之前就被补上。
+   */
+  async ensureRouterPresent(mode: WorkerSpawnMode = 'minimal-face'): Promise<boolean> {
+    if (this.disposers.has(ROUTER_PRESET_ID)) return true
+    this.deps.logger?.warn(`Router 预设 ${ROUTER_PRESET_ID} 不在册（重应用窗口或注册失败遗留），自愈重注册`)
+    return (await this.syncRouter(mode)) !== 'failed'
   }
 
   /** 停机/重载辅助：注销全部由本引擎注册的预设（正常路径由 ctx.effect 接管）。 */
