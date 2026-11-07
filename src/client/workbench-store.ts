@@ -23,7 +23,7 @@ import {
   emptyBoard,
 } from './question-state.ts'
 import type { QuestionBoardState, QuestionDraftItem } from './question-state.ts'
-import type { RouterState } from '../shared/view-contract.ts'
+import type { RouterRedirect, RouterState } from '../shared/view-contract.ts'
 
 export { buildAnswerItems as buildAnswers }
 
@@ -62,6 +62,8 @@ export interface WorkbenchStoreDeps {
   isHidden?: () => boolean
   /** 诊断出口（apply 里接 logger.warn）；缺省静默。 */
   report?: (message: string) => void
+  /** 会话导航（openSession）——消费 redirect 指令用；缺席只 ack 不跳。 */
+  uiWorkspace?: { openSession(target: string): void }
 }
 
 /** 工作台 store 的公开面（全部操作经它，组件不发自己的请求）。 */
@@ -126,6 +128,13 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
   // workspace 快照、关标签/提交完成前发出的快照一律丢弃。
   let pollSeq = 0
   let mutationSeq = 0
+  // redirect 消费记忆（v1.1 Task C4）：跳过的指令按被归档会话记键，同一指令
+  // 重复轮询（未 ack 前 state 每拍都带）绝不二次跳转；ack 在途不重发，成功后
+  // 记入已清集（服务端竞态回发同一指令也不再重发 ack），失败留在在途集下一拍
+  // 重发——直到服务端清除为止（幂等）。
+  const consumedJumpKeys = new Set<string>()
+  const ackedKeys = new Set<string>()
+  const acksInFlight = new Set<string>()
   const listeners = new Set<() => void>()
 
   function emit(): void {
@@ -141,6 +150,42 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
 
   function workspaceItems(): ReadonlyArray<{ workspaceId: string; sessionIds: readonly string[] }> {
     return deps.workspacesList?.getSnapshot().items ?? []
+  }
+
+  /**
+   * 消费一条去重跳转指令（Review Focus 2）：跳到正主（已在正主就不跳），
+   * 然后 POST /router/redirect/ack 清除。按被归档会话 id 记键：
+   * - 同一指令重复出现（未 ack 前）只跳一次；
+   * - ack 在途不重发、成功后不再重发（已清），失败下一拍重试；
+   * - 连续两条指令（连续两次新建）：第一条跳过之后用户已在正主，第二条只
+   *   ack 不再跳——两次新建只跳一次。
+   */
+  function consumeRedirect(redirect: RouterRedirect): void {
+    const key = redirect.supersededSessionId
+    if (!consumedJumpKeys.has(key)) {
+      consumedJumpKeys.add(key)
+      if (state.currentSessionId !== redirect.sessionId) {
+        deps.uiWorkspace?.openSession(redirect.sessionId)
+      }
+    }
+    if (acksInFlight.has(key) || ackedKeys.has(key)) return
+    const workspaceId = currentWorkspaceIdOf(workspaceItems(), state.currentSessionId)
+    if (workspaceId === undefined) {
+      // 解析不出 workspace 不 ack（指令留在服务端，下一拍重试）。
+      report('router: 无法确定当前工作区，redirect ack 已顺延')
+      return
+    }
+    acksInFlight.add(key)
+    api.ackRedirect(workspaceId, key)
+      .then(() => {
+        acksInFlight.delete(key)
+        ackedKeys.add(key) // 已清：服务端回发同一指令也不再重发 ack
+      })
+      .catch((error) => {
+        acksInFlight.delete(key) // 下一拍重试
+        report(`router redirect/ack failed: ${errorMessage(error)}`)
+        apply(() => ({ ...state, lastError: `清除跳转指令失败：${errorMessage(error)}` }))
+      })
   }
 
   return {
@@ -186,6 +231,8 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
           lastError: null,
           board: syncedWithServer(state.board, next.questions),
         }))
+        // 快照落地后再消费指令：跳转/ack 依据的是刚到的这份 state。
+        if (next.redirect !== undefined) consumeRedirect(next.redirect)
       } catch (error) {
         if (seq !== pollSeq || mutAtStart !== mutationSeq) return // 迟到失败：不打扰当前态
         // 失败保留旧 state（界面不闪空），错误可读；门控记忆不动，下次照常试。

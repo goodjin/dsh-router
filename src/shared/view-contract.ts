@@ -86,6 +86,14 @@ export interface WorkerTemplate {
   role: 'supervisor' | 'worker'
 }
 
+/** 入口去重跳转指令（v1.1 Task C4）：宿主 dedup 写、客户端消费后 ack 清除。 */
+export interface RouterRedirect {
+  /** 消费方应跳转到的会话（正主）。 */
+  sessionId: string
+  /** 被归档的重复会话（指令的 key，ack 凭它清除）。 */
+  supersededSessionId: string
+}
+
 /** GET /router/state 的完整返回。 */
 export interface RouterState {
   routerSessions: RouterSessionInfo[]
@@ -93,4 +101,10 @@ export interface RouterState {
   questions: QuestionCard[]
   tabs: WorkerTabInfo[]
   templates: WorkerTemplate[]
+  /**
+   * 入口去重跳转指令（v1.1 Task C4）：本 workspace 出现了重复的 Router 预设
+   * 会话且已归档，消费方应跳到正主并 POST /router/redirect/ack 清除。未消费
+   * 前每次 state 都带同一条（轮询幂等）；无指令时该键不出现。
+   */
+  redirect?: RouterRedirect
 }

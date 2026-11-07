@@ -10,7 +10,8 @@
  *     → ctx.provide('routerCore', …)（预设树里的工具行/上下文行经作用域链取用）
  *     → user-questions/request 瀑布全局监听（prepend：先于客户端兜底 UI 认领
  *       worker 提问，答案走 Router 界面浮窗）
- *     → 四条 HTTP exact 路由（webServer/connection 机会式注入）
+ *     → 五条 HTTP exact 路由（webServer/connection 机会式注入；state 前置
+ *       入口去重扫描，C4）
  *
  * 配置照 auto-resume 先例：Config 全部 volatile 可缺省，apply 内再做一层防御性
  * 解析（缺省补默认、负数取 0），宿主各版本 schema 默认值行为不一致时插件自己兜底。
@@ -34,6 +35,7 @@ import { Scheduler } from "./host/ledger/scheduler.js";
 import { SessionBridge } from "./host/bridge/sessions.js";
 import { AnswerRelay } from "./host/bridge/questions.js";
 import { UiStateStore } from "./host/bridge/tabs.js";
+import { RouterDedup, stateWithRedirect } from "./host/bridge/dedup.js";
 import { CompactionDriver } from "./host/context/compaction-driver.js";
 import { registerRouterRoutes } from "./host/routes.js";
 import { createRouterCore } from "./host/core.js";
@@ -160,6 +162,44 @@ export function apply(ctx, rawConfig) {
         list: () => ctx.workspaceRegistry.list(),
         get: (id) => ctx.workspaceRegistry.get(id),
     };
+    // 入口去重（v1.1 Task C4 / 规格 §4）：宿主没有创建前拦截钩子，事后收敛——
+    // /router/state 构建前扫描各 workspace，每项目最早的 dsh-router 预设会话为
+    // 正主（原生 pinSession 置顶），其余较新者归档并写 redirect 指令；客户端
+    // 消费跳转后 POST /router/redirect/ack 清除。readSession/pinSession 缺席
+    // （旧宿主）时去重整体降级为直通，不挡装载。
+    const dedup = ctx.sessionQuery.readSession !== undefined && ctx.workspaceRegistry.pinSession !== undefined
+        ? new RouterDedup({
+            workspaces: { list: () => ctx.workspaceRegistry.list() },
+            sessionQuery: {
+                readSession: async (sessionId) => {
+                    const snapshot = await ctx.sessionQuery.readSession(sessionId);
+                    if (snapshot === null || snapshot === undefined)
+                        return undefined;
+                    const events = snapshot.events ?? [];
+                    const mapped = {
+                        session: {
+                            agentPreset: typeof snapshot.session?.agentPreset === 'string' ? snapshot.session.agentPreset : undefined,
+                            createdAt: typeof snapshot.session?.createdAt === 'number' ? snapshot.session.createdAt : undefined,
+                        },
+                        events: events.map((event) => ({
+                            type: typeof event.type === 'string' ? event.type : '',
+                            data: (typeof event.data === 'object' && event.data !== null ? event.data : {}),
+                        })),
+                    };
+                    return mapped;
+                },
+            },
+            registry: {
+                pinSession: (sessionId) => ctx.workspaceRegistry.pinSession(sessionId),
+                archiveSession: (sessionId, options) => ctx.workspaceRegistry.archiveSession(sessionId, options),
+                archivedSessionIds: () => ctx.workspaceRegistry.archivedSessionIds?.() ?? [],
+            },
+            routerPreset: config.routerPreset,
+            logger: { warn: (message) => log.warn(message) },
+        })
+        : undefined;
+    if (dedup === undefined)
+        log.warn('宿主缺 sessionQuery.readSession / workspaceRegistry.pinSession，入口去重降级为直通');
     const hosts = {
         sessionController: ctx.sessionController,
         agents: ctx.agents,
@@ -367,16 +407,29 @@ export function apply(ctx, rawConfig) {
             log.info('routerCore 就绪');
         })();
     }, 'dsh-router: 启动恢复');
-    // 四条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
+    // 五条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
+    // C4：GET /router/state 前 先跑去重扫描（判定按会话缓存，稳态零读取），
+    // 返回前把该 workspace 未消费的 redirect 指令并进 state。
     ctx.inject?.(['webServer', 'connection'], (child) => {
         registerRouterRoutes(child, {
-            getState: (workspaceId) => assembled.workbench.state(workspaceId),
+            getState: async (workspaceId) => {
+                if (dedup !== undefined)
+                    await dedup.resolve();
+                const state = await assembled.workbench.state(workspaceId);
+                return dedup !== undefined
+                    ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
+                    : state;
+            },
             createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
             answerQuestion: async (questionId, answers) => {
                 await assembled.workbench.answerQuestion(questionId, answers);
                 void assembled.refreshSnapshot();
             },
             closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
+            ackRedirect: (workspaceId, supersededSessionId) => {
+                dedup?.ackRedirect(workspaceId, supersededSessionId);
+                return Promise.resolve();
+            },
         });
     });
     function workerInstructionsText() {

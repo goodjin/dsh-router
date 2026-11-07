@@ -2,10 +2,11 @@
  * HTTP 路由（计划「客户端↔宿主 API 契约」四条 exact 路由的薄壳）。
  *
  * 形状照计划逐字：
- *   GET  /router/state?workspaceId=        → RouterState
+ *   GET  /router/state?workspaceId=        → RouterState（C4 起可带 redirect 指令）
  *   POST /router/router-session            → { sessionId }
  *   POST /router/answer                    → { ok: true }（已答 409）
  *   POST /router/tabs/close                → { ok: true }
+ *   POST /router/redirect/ack              → { ok: true }（C4：消费去重指令）
  * 错误统一 { error: string } + 4xx/5xx。注册走 webServer.register({kind:'exact'})
  * + connection.admit 同一登录准入（r3 §3a，chat-power mermaid-asset 样例）；
  * 逻辑全部在注入的 deps（根服务组装的面），本文件只做 HTTP 折叠。
@@ -20,6 +21,8 @@ export const ROUTER_STATE_PATH = '/router/state'
 export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
+/** 入口去重指令的消费回执（v1.1 Task C4）。 */
+export const ROUTER_REDIRECT_ACK_PATH = '/router/redirect/ack'
 
 /** 路由需要的最小宿主面（webServer/connection 可缺席：缺席即不挂路由）。 */
 export interface RouterRoutesContext {
@@ -36,12 +39,14 @@ export interface RouterRoutesContext {
   }
 }
 
-/** 四条路由背后的逻辑面（根服务实现；测试用假件）。 */
+/** 五条路由背后的逻辑面（根服务实现；测试用假件）。 */
 export interface RouterRoutesDeps {
   getState(workspaceId?: string): Promise<RouterState>
   createRouterSession(workspaceId: string | undefined, name?: string): Promise<{ sessionId: string }>
   answerQuestion(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeTab(workspaceId: string, sessionId: string): Promise<boolean>
+  /** 消费回执：清掉该 workspace 上指向被归档会话的 redirect 指令（幂等）。 */
+  ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
 }
 
 /** 域错误码 → HTTP 状态。 */
@@ -174,6 +179,15 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
       throw new LedgerError('bad-request', 'workspaceId 与 sessionId 必填')
     }
     await deps.closeTab(body.workspaceId, body.sessionId)
+    return { status: 200, body: JSON.stringify({ ok: true }) }
+  })
+
+  handle(ROUTER_REDIRECT_ACK_PATH, 'POST', async (request) => {
+    const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; supersededSessionId?: unknown }
+    if (typeof body.workspaceId !== 'string' || typeof body.supersededSessionId !== 'string') {
+      throw new LedgerError('bad-request', 'workspaceId 与 supersededSessionId 必填')
+    }
+    await deps.ackRedirect(body.workspaceId, body.supersededSessionId)
     return { status: 200, body: JSON.stringify({ ok: true }) }
   })
 }

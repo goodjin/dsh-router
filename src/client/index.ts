@@ -109,6 +109,7 @@ export function apply(ctx?: PluginContext): void {
       api,
       prefs,
       workspacesList: safeCtx.workspaces?.list,
+      uiWorkspace,
       report: (warnMessage) => { log.warn(warnMessage) },
     })
   } catch (error) {
