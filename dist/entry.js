@@ -515,9 +515,9 @@ export function apply(ctx, rawConfig) {
             }
         },
         prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)),
-        sessionState: (sessionId) => {
+        sessionState: async (sessionId) => {
             const state = ctx.sessionController.state;
-            return state === undefined ? undefined : state(sessionId);
+            return state === undefined ? undefined : await state(sessionId);
         },
         agentsGet: (sessionId) => {
             const agent = ctx.agents.get(sessionId);

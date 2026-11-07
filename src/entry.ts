@@ -602,11 +602,11 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       }
     },
     prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)) as Promise<{ accepted: boolean }>,
-    sessionState: (sessionId) => {
+    sessionState: async (sessionId) => {
       const state = (ctx.sessionController as {
         state?: (id: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
       }).state
-      return state === undefined ? undefined : state(sessionId)
+      return state === undefined ? undefined : await state(sessionId)
     },
     agentsGet: (sessionId) => {
       const agent = ctx.agents.get(sessionId) as { status?: string } | undefined
