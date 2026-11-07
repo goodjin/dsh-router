@@ -195,8 +195,12 @@ async function coreWith(
   records: TaskRecord[] = [],
   opts: {
     memory?: RouterMemory | null
-    /** v1.1 C1：类型存储投影面（缺省 = config.templates 兜底）。 */
-    types?: { enabled(): WorkerTemplate[]; summaries(): { templateId: string; name: string; description: string; role: 'supervisor' | 'worker'; enabled: boolean; origin: 'builtin' | 'user' | 'router' }[] }
+    /** v1.1 C1：类型存储投影面（缺省 = config.templates 兜底）；C2 起 createRouterType 可选。 */
+    types?: {
+      enabled(): WorkerTemplate[]
+      summaries(): { templateId: string; name: string; description: string; role: 'supervisor' | 'worker'; enabled: boolean; origin: 'builtin' | 'user' | 'router' }[]
+      createRouterType?(input: { name: string; origin?: string }): Promise<{ record: never; presetRegistered: boolean }>
+    }
     /** v1.1 C1：Router 默认值（缺省 = 不钉默认模型）。 */
     routerDefaults?: { get(): Promise<{ routerSystemPrompt: string; routerModel: string }> }
     failSelectModel?: Error
@@ -824,6 +828,76 @@ const STORE_TYPES = {
     { templateId: 'lead', name: '主管', description: '再拆分', role: 'supervisor' as const, enabled: false, origin: 'user' as const },
   ],
 }
+
+describe('createRouterCore：v1.1 类型工具（C2）', () => {
+  /** STORE_TYPES + createRouterType 面（记录引擎同步调用）。 */
+  function creatableTypes() {
+    const created: { name: string; origin?: string }[] = []
+    let duplicateName: string | null = null
+    let syncFail = false
+    return {
+      created,
+      get duplicateName() {
+        return duplicateName
+      },
+      setDuplicate(name: string) {
+        duplicateName = name
+      },
+      setSyncFail() {
+        syncFail = true
+      },
+      face: {
+        enabled: STORE_TYPES.enabled,
+        summaries: STORE_TYPES.summaries,
+        async createRouterType(input: { name: string; origin?: string }) {
+          if (duplicateName !== null && input.name === duplicateName) {
+            throw new LedgerError('template-exists', `同名 worker 类型已存在: ${input.name}`)
+          }
+          created.push(input)
+          return {
+            record: { templateId: `id-for-${input.name}` } as never,
+            presetRegistered: !syncFail,
+          }
+        },
+      },
+    }
+  }
+
+  it('createWorkerType 经 createRouterType 创建并带回 templateId + presetRegistered（origin=router 由 face 决定）', async () => {
+    const types = creatableTypes()
+    const { core } = await coreWith([], { types: types.face })
+    const value = await core.createWorkerType('router-s-1', { name: '文档写手', systemPrompt: '写文档' })
+    expect(value).toEqual({ templateId: 'id-for-文档写手', presetRegistered: true })
+    expect(types.created[0]).toMatchObject({ name: '文档写手' })
+  })
+
+  it('重名拒绝（template-exists）原样抛出', async () => {
+    const types = creatableTypes()
+    types.setDuplicate('编码')
+    const { core } = await coreWith([], { types: types.face })
+    await expect(core.createWorkerType('router-s-1', { name: '编码', systemPrompt: 'x' })).rejects.toMatchObject({
+      code: 'template-exists',
+    })
+    expect(types.created).toHaveLength(0)
+  })
+
+  it('face 缺 createRouterType（未接线）→ types-unavailable 拒绝，不静默', async () => {
+    const { core } = await coreWith([], { types: STORE_TYPES })
+    await expect(core.createWorkerType('router-s-1', { name: 'x', systemPrompt: 'x' })).rejects.toMatchObject({
+      code: 'types-unavailable',
+    })
+  })
+
+  it('listWorkerTypes 用类型存储摘要（含禁用与来源）', async () => {
+    const { core } = await coreWith([], { types: STORE_TYPES })
+    expect(core.listWorkerTypes()).toEqual(STORE_TYPES.summaries())
+  })
+
+  it('没接类型存储时 listWorkerTypes 从 config.templates 推导（enabled=true, origin=user）', async () => {
+    const { core } = await coreWith([])
+    expect(core.listWorkerTypes()).toEqual(TEMPLATES.map((t) => ({ ...t, enabled: true, origin: 'user' })))
+  })
+})
 
 describe('createRouterCore：v1.1 类型投影', () => {
   it('enabledTemplates 来自类型存储投影（禁用类型不在清单，dispatch 校验随之收紧）', async () => {

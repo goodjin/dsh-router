@@ -18,13 +18,14 @@
  */
 
 import type { RoleKind, TaskRecord, TaskStatus } from '../../shared/types.ts'
-import type { WorkerTemplate } from '../../shared/view-contract.ts'
+import type { WorkerTemplate, WorkerTypeSummary } from '../../shared/view-contract.ts'
 import { LedgerError } from '../ledger/errors.ts'
 import type {
   CompleteTaskInput,
   DispatchTaskInput,
   QueryTasksFilter,
   RouterCore,
+  RouterTypeCreateInput,
 } from '../core-types.ts'
 
 export type { RouterCore } from '../core-types.ts'
@@ -32,6 +33,7 @@ export type {
   CompleteTaskInput,
   DispatchTaskInput,
   QueryTasksFilter,
+  RouterTypeCreateInput,
 } from '../core-types.ts'
 
 /** 本插件注册的编排工具名全集（ask_user 是宿主原生工具，不在此列）。 */
@@ -44,6 +46,8 @@ export type OrchestrationToolName =
   | 'report_progress'
   | 'complete_task'
   | 'report_blocker'
+  | 'list_worker_types'
+  | 'create_worker_type'
 
 /** 全集（注册与矩阵校验的基准顺序）。 */
 export const TOOL_NAMES: readonly OrchestrationToolName[] = [
@@ -55,11 +59,21 @@ export const TOOL_NAMES: readonly OrchestrationToolName[] = [
   'report_progress',
   'complete_task',
   'report_blocker',
+  'list_worker_types',
+  'create_worker_type',
 ]
 
-/** 角色 → 工具白名单（计划 Task B2/B3 清单；router 无 complete，worker 无派发）。 */
+/** 角色 → 工具白名单（v1.1 C2 起 router 增类型两件；router 无 complete，worker 无派发）。 */
 const ROLE_TOOLS: Record<RoleKind, readonly OrchestrationToolName[]> = {
-  router: ['dispatch_task', 'supplement_task', 'query_tasks', 'control_task', 'search_history'],
+  router: [
+    'dispatch_task',
+    'supplement_task',
+    'query_tasks',
+    'control_task',
+    'search_history',
+    'list_worker_types',
+    'create_worker_type',
+  ],
   supervisor: [
     'dispatch_task',
     'supplement_task',
@@ -472,6 +486,68 @@ const TOOL_SPECS: Record<
       return `任务已标记为${STATUS_LABEL.blocked}（${(value as { status: string }).status}）；Router 会把阻塞转告用户。`
     },
   },
+  list_worker_types: {
+    description:
+      '列出当前全部 worker 类型（含停用与来源）：dispatch_task 的 templateId 必须取自这里的启用类型，不要凭记忆或猜测。',
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    outputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { types: { type: 'array', items: { type: 'object' } } },
+      required: ['types'],
+    },
+    async run(core, _sid, _args) {
+      return { types: core.listWorkerTypes() }
+    },
+    render(_args, value) {
+      const types = (value as { types: WorkerTypeSummary[] }).types
+      if (types.length === 0) return '当前没有任何 worker 类型，先告知调用方配置类型，不要派发。'
+      return types
+        .map((t) => `${t.templateId}=${t.name}（${t.role === 'supervisor' ? '主管' : 'worker'}，${t.enabled ? '启用' : '停用'}，来源 ${t.origin}）`)
+        .join('\n')
+    },
+  },
+  create_worker_type: {
+    description:
+      '现场创建 worker 类型并立即注册其动态预设：创建成功即可按返回的 templateId 用 dispatch_task 派发。同名类型会被拒绝；presetRegistered=false 表示预设注册失败，此时派发该类型会被拒，须如实告知调用方。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        name: { type: 'string', minLength: 1, description: '类型名（如 文档写手；同名已存在会被拒）' },
+        description: { type: 'string', description: '一句话说明这个类型做什么' },
+        role: { type: 'string', enum: ['worker', 'supervisor'], description: '角色（缺省 worker）' },
+        systemPrompt: { type: 'string', minLength: 1, description: '该类型的系统提示词（persona 整段替换）' },
+        models: stringArray('允许模型列表（provider/model，有序；首个为该类型会话默认模型）'),
+        skills: stringArray('初始技能名清单'),
+      },
+      required: ['name', 'systemPrompt'],
+    },
+    outputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { templateId: { type: 'string' }, presetRegistered: { type: 'boolean' } },
+      required: ['templateId', 'presetRegistered'],
+    },
+    async run(core, sid, args) {
+      const input: RouterTypeCreateInput = {
+        name: String(args.name),
+        description: typeof args.description === 'string' ? args.description : undefined,
+        role: args.role as RouterTypeCreateInput['role'],
+        systemPrompt: String(args.systemPrompt),
+        models: args.models as string[] | undefined,
+        skills: args.skills as string[] | undefined,
+      }
+      return core.createWorkerType(sid, input)
+    },
+    render(args, value) {
+      const v = value as { templateId: string; presetRegistered: boolean }
+      const base = `worker 类型「${String(args.name)}」已创建（templateId=${v.templateId}）`
+      return v.presetRegistered
+        ? `${base}，动态预设已注册：可立即用 dispatch_task 按该 templateId 派发。`
+        : `${base}，但动态预设注册失败：当前按该 templateId 派发会被拒（template-unavailable），请如实告知调用方排查该类型的提示词/技能/模型配置。`
+    },
+  },
 }
 
 /** 启用类型清单 → dispatch_task 描述里的清单段（v1.1 Task A4）。 */
@@ -499,11 +575,17 @@ export function buildToolDefinitions(
   }
   return toolsForRole(role).map((name) => {
     const spec = TOOL_SPECS[name]
-    const description =
-      name === 'dispatch_task' ? `${spec.description} ${dispatchTemplateSection(liveTemplates())}` : spec.description
     return {
       name,
-      description,
+      // dispatch_task 的启用类型清单段是「活的」（v1.1 C2 类型变更刷新的最小
+      // 实现）：宿主 dsh-tools 按引用保存注册定义、每次组装模型请求时经
+      // schemaOf 投影现读 description，因此 getter 每轮都拿到最新清单——类型
+      // 创建/禁用后无需重注册工具行。
+      get description(): string {
+        return name === 'dispatch_task'
+          ? `${spec.description} ${dispatchTemplateSection(liveTemplates())}`
+          : spec.description
+      },
       parameters: spec.parameters,
       output: {
         schema: spec.outputSchema,

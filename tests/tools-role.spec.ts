@@ -108,6 +108,16 @@ function coreOf(calls: string[] = []): RouterCore {
       calls.push(`blocker:${caller}:${taskId}`)
       return { status: 'blocked' }
     },
+    listWorkerTypes() {
+      return [
+        { templateId: 'general', name: '通用 worker', description: '内置', role: 'worker' as const, enabled: true, origin: 'builtin' as const },
+        { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' as const, enabled: false, origin: 'user' as const },
+      ]
+    },
+    async createWorkerType(caller, input) {
+      calls.push(`createType:${caller}:${input.name}:${input.role ?? 'worker'}`)
+      return { templateId: 'docs-writer', presetRegistered: true }
+    },
     getTask: (id: string) => (id === 'T-001' ? task({ id: 'T-001', sessionId: 'worker-s-1' }) : undefined),
   }
 }
@@ -122,13 +132,15 @@ const execOf = (sessionId: string) => ({ agent: { id: sessionId } })
 /* ────────────────────────── 角色矩阵 ────────────────────────── */
 
 describe('toolsForRole：三份白名单', () => {
-  it('router 只拿编排五件：无 report_progress/complete_task/report_blocker', () => {
+  it('router = 编排五件 + 类型两件（v1.1 C2：list/create_worker_types router 专属）', () => {
     expect(toolsForRole('router')).toEqual([
       'dispatch_task',
       'supplement_task',
       'query_tasks',
       'control_task',
       'search_history',
+      'list_worker_types',
+      'create_worker_type',
     ])
   })
   it('supervisor = router 集 + report_progress + complete_task（无 report_blocker）', () => {
@@ -157,6 +169,14 @@ describe('assertCallerRole：角色×工具矩阵', () => {
       expect.unreachable()
     } catch (error) {
       expect((error as LedgerError).code).toBe('role-forbidden')
+    }
+  })
+
+  it('类型工具 router 专属（v1.1 C2）：supervisor/worker 调用抛 role-forbidden，router 放行', () => {
+    for (const toolName of ['list_worker_types', 'create_worker_type'] as const) {
+      expect(() => assertCallerRole('supervisor', toolName, 's-1', empty), `supervisor×${toolName}`).toThrowError(LedgerError)
+      expect(() => assertCallerRole('worker', toolName, 'w-1', empty), `worker×${toolName}`).toThrowError(LedgerError)
+      expect(() => assertCallerRole('router', toolName, 'r-1', empty), `router×${toolName}`).not.toThrow()
     }
   })
 
@@ -286,6 +306,54 @@ describe('buildToolDefinitions：薄壳行为', () => {
     const def = buildToolDefinitions(bare, 'router').find((d) => d.name === 'dispatch_task')!
     expect(def.description).not.toContain('coder=编码')
     expect(def.description.length).toBeGreaterThan(0)
+  })
+
+  it('dispatch_task 描述是活的（v1.1 C2 类型变更刷新）：enabledTemplates 变化后重读即新清单', () => {
+    let templates: { templateId: string; name: string; description: string; role: 'supervisor' | 'worker' }[] = [
+      { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' },
+    ]
+    const core = { ...coreOf(), enabledTemplates: () => templates } as unknown as RouterCore
+    const def = buildToolDefinitions(core, 'router').find((d) => d.name === 'dispatch_task')!
+    expect(def.description).toContain('coder=编码')
+    expect(def.description).not.toContain('reviewer')
+    templates = [...templates, { templateId: 'reviewer', name: '审查', description: '审交付', role: 'worker' }]
+    expect(def.description).toContain('coder=编码')
+    expect(def.description).toContain('reviewer=审查')
+  })
+
+  it('list_worker_types：转交 core.listWorkerTypes，render 标注启用态与来源（v1.1 C2）', async () => {
+    const def = buildToolDefinitions(coreOf(), 'router').find((d) => d.name === 'list_worker_types')!
+    const value = (await run(def, {}, execOf('router-s-1'))) as { types: unknown[] }
+    expect(value.types).toHaveLength(2)
+    const rendered = def.output.render({}, value) as { type: string; text: string }[]
+    expect(rendered[0]!.text).toContain('general=通用 worker')
+    expect(rendered[0]!.text).toContain('启用')
+    expect(rendered[0]!.text).toContain('builtin')
+    expect(rendered[0]!.text).toContain('停用')
+  })
+
+  it('create_worker_type：入参映射转交 core.createWorkerType，render 给出可派发结论（v1.1 C2）', async () => {
+    const calls: string[] = []
+    const def = buildToolDefinitions(coreOf(calls), 'router').find((d) => d.name === 'create_worker_type')!
+    const value = (await run(def, {
+      name: '文档写手',
+      description: '写说明文档',
+      role: 'worker',
+      systemPrompt: '你是文档写手',
+      skills: ['writing'],
+    }, execOf('router-s-1'))) as { templateId: string; presetRegistered: boolean }
+    expect(value).toEqual({ templateId: 'docs-writer', presetRegistered: true })
+    expect(calls[0]).toBe('createType:router-s-1:文档写手:worker')
+    const blocks = def.output.render({ name: '文档写手' }, value) as { type: string; text: string }[]
+    expect(blocks[0]!.text).toContain('docs-writer')
+    expect(blocks[0]!.text).toContain('可立即')
+  })
+
+  it('create_worker_type 预设注册失败时 render 明示派发会被拒（自报状态，不静默）', () => {
+    const def = buildToolDefinitions(coreOf(), 'router').find((d) => d.name === 'create_worker_type')!
+    const blocks = def.output.render({ name: '坏类型' }, { templateId: 'bad', presetRegistered: false }) as { text: string }[]
+    expect(blocks[0]!.text).toContain('注册失败')
+    expect(blocks[0]!.text).toContain('template-unavailable')
   })
 
   it('dispatch_task：参数转交 core.dispatchTask，返回 taskId/docPath/sessionId，render 中文', async () => {

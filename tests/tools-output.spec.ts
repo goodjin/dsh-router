@@ -20,6 +20,8 @@ import { AnswerRelay } from '../src/host/bridge/questions.ts'
 import { CompactionDriver, type CompactionDeps } from '../src/host/context/compaction-driver.ts'
 import { createRouterCore, type RouterCoreAssemblyDeps, type RouterCoreHosts } from '../src/host/core.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from '../src/host/bridge/tabs.ts'
+import { WorkerTypeStore } from '../src/host/templates.ts'
+import { makeMemFs } from './helpers/mem-fs.ts'
 import { buildToolDefinitions } from '../src/host/tools/index.ts'
 import type { FsAdapter } from '../src/shared/fs-adapter.ts'
 import type { TaskRecord } from '../src/shared/types.ts'
@@ -132,7 +134,7 @@ const TEMPLATES: WorkerTemplate[] = [
 
 let questionSeq = 0
 
-async function coreWith(records: TaskRecord[]) {
+async function coreWith(records: TaskRecord[], opts: { withTypeStore?: boolean } = {}) {
   const persistence = new MemoryPersistence()
   persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
   const ledger = new TaskLedger(persistence, () => 1000)
@@ -156,6 +158,16 @@ async function coreWith(records: TaskRecord[]) {
   })
   const relay = new AnswerRelay({ ledger, newId: () => `q-${++questionSeq}`, now: () => 1 })
   const scheduler = new Scheduler(ledger, { maxDepth: 2, concurrency: { default: 3 } })
+  // C2：真 WorkerTypeStore（内存 fs）+ 引擎同步假面（记录 ensureRegistered 调用），
+  // 让 create_worker_type 的输出形状来自真实存储而非手写假值。
+  let typeStore: WorkerTypeStore | undefined
+  let engineSyncs: string[] = []
+  if (opts.withTypeStore === true) {
+    const { fs } = makeMemFs()
+    typeStore = new WorkerTypeStore(fs, '/data/worker-types.json')
+    await typeStore.load()
+    engineSyncs = []
+  }
   const deps: RouterCoreAssemblyDeps = {
     ledger,
     docsFor: () => docs,
@@ -171,6 +183,18 @@ async function coreWith(records: TaskRecord[]) {
       workerPreset: 'dsh-router-worker',
       templates: TEMPLATES,
     },
+    types:
+      typeStore !== undefined
+        ? {
+            enabled: () => typeStore!.enabledTemplates(),
+            summaries: () => typeStore!.summaries(),
+            createRouterType: async (input) => {
+              const record = await typeStore!.create({ ...input, origin: 'router', enabled: true })
+              engineSyncs.push(record.templateId) // 动态引擎增量同步的假面
+              return { record, presetRegistered: true }
+            },
+          }
+        : undefined,
     newId: () => `q-${++questionSeq}`,
     signal: new AbortController().signal,
     isRunning: () => false,
@@ -184,7 +208,7 @@ async function coreWith(records: TaskRecord[]) {
   }
   const assembled = createRouterCore(deps)
   await assembled.refreshSnapshot()
-  return { ...assembled, ledger, docs }
+  return { ...assembled, ledger, docs, typeStore, engineSyncs }
 }
 
 const execOf = (sessionId: string) => ({ agent: { id: sessionId } })
@@ -261,6 +285,31 @@ describe('tools-output：八件套工具输出过 lossless-JSON 门禁', () => {
     const { core } = await coreWith(records)
     const value = await runTool(core, 'worker', 'report_blocker', { taskId: 'T-001', reason: '缺凭据' })
     assertLosslessJson(value, 'report_blocker output')
+  })
+
+  it('list_worker_types（v1.1 C2 新工具：类型摘要含 enabled/origin）', async () => {
+    const { core } = await coreWith([])
+    const value = await runTool(core, 'router', 'list_worker_types', {})
+    assertLosslessJson(value, 'list_worker_types output')
+  })
+
+  it('create_worker_type（v1.1 C2 新工具：真实类型存储 + 动态引擎假面）', async () => {
+    const { core, typeStore, engineSyncs } = await coreWith([], { withTypeStore: true })
+    const value = (await runTool(core, 'router', 'create_worker_type', {
+      name: 'docs-writer',
+      description: '写说明文档',
+      role: 'worker',
+      systemPrompt: '你是文档写手。',
+      skills: ['writing'],
+    })) as { templateId: string; presetRegistered: boolean }
+    assertLosslessJson(value, 'create_worker_type output')
+    expect(value).toEqual({ templateId: 'docs-writer', presetRegistered: true })
+    // 经真实存储落盘：新类型 origin=router、启用，启用清单与引擎同步都即刻生效
+    const record = await typeStore!.get('docs-writer')
+    expect(record).toMatchObject({ name: 'docs-writer', origin: 'router', enabled: true })
+    expect(core.listWorkerTypes().some((t) => t.templateId === 'docs-writer' && t.origin === 'router')).toBe(true)
+    expect(core.enabledTemplates().map((t) => t.templateId)).toContain('docs-writer')
+    expect(engineSyncs).toEqual(['docs-writer'])
   })
 
   it('query_tasks 修复后语义不变：draft 卡不带会话/进度键，但字段值保持可读', async () => {

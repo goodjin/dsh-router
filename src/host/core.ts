@@ -24,6 +24,7 @@ import type {
   DispatchTaskInput,
   QueryTasksFilter,
   RouterCore,
+  RouterTypeCreateInput,
 } from './core-types.ts'
 import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
 import type {
@@ -33,6 +34,7 @@ import type {
   RouterState,
   TaskCard,
   WorkerTemplate,
+  WorkerTypeRecord,
   WorkerTypeSummary,
 } from '../shared/view-contract.ts'
 import { parseModelRef } from './model-ref.ts'
@@ -71,6 +73,11 @@ export interface WorkerTypesFace {
   enabled(): WorkerTemplate[]
   /** 全类型摘要（RouterState.types；含 enabled/origin）。 */
   summaries(): WorkerTypeSummary[]
+  /**
+   * C2 类型工具的创建通道：建 router 来源类型（重名拒绝）并做引擎增量同步
+   * （注册新预设）。缺席 = 存储未接线，createWorkerType 拒绝创建。
+   */
+  createRouterType?(input: RouterTypeCreateInput): Promise<{ record: WorkerTypeRecord; presetRegistered: boolean }>
 }
 
 /** Router 默认值面（规格 §6；缺省 = 不钉默认模型、提示词走静态兜底）。 */
@@ -303,6 +310,24 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
 
   const core: RouterCore = {
     enabledTemplates,
+
+    listWorkerTypes() {
+      // 与 workbench.state 的 types 投影同源：存储在册用摘要，缺席从 config 推导。
+      return deps.types !== undefined
+        ? deps.types.summaries()
+        : config.templates.map((template) => ({ ...template, enabled: true, origin: 'user' as const }))
+    },
+
+    async createWorkerType(callerSessionId, input) {
+      void callerSessionId // 创建不依赖调用方任务归属；角色由工具白名单保证（router 专属）
+      const face = deps.types
+      if (face?.createRouterType === undefined) {
+        throw new LedgerError('types-unavailable', '类型存储未接线（WorkerTypesFace.createRouterType 缺席），无法现场创建 worker 类型')
+      }
+      const { record, presetRegistered } = await face.createRouterType(input)
+      // 输出全量键（v1.1 A3 lossless 门禁）：presetRegistered 恒在，注册失败不静默。
+      return { templateId: record.templateId, presetRegistered }
+    },
 
     async dispatchTask(callerSessionId, input) {
       assertTemplateUsable(input.templateId, enabledTemplates())

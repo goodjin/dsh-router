@@ -46,6 +46,8 @@ export type LedgerErrorCode =
   | 'builtin-protected'
   /** worker 类型存储：输入不合法（空名字等）。 */
   | 'invalid-input'
+  /** C2 类型工具：类型存储未接线（WorkerTypesFace.createRouterType 缺席）。 */
+  | 'types-unavailable'
 
 /** 账本域统一错误。 */
 export class LedgerError extends Error {

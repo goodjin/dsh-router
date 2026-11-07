@@ -473,7 +473,18 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     ui,
     hosts,
     config,
-    types: { enabled: () => typeStore.enabledTemplates(), summaries: () => typeStore.summaries() },
+    types: {
+      enabled: () => typeStore.enabledTemplates(),
+      summaries: () => typeStore.summaries(),
+      // C2 类型工具的创建通道：建 router 来源类型后立刻经 C1 引擎增量同步
+      // （注册动态预设）；校验/注册失败返回 false，由 create_worker_type 输出
+      // 如实带出（不静默）。
+      createRouterType: async (input) => {
+        const record = await typeStore.create({ ...input, origin: 'router', enabled: true })
+        const presetRegistered = await engine.ensureRegistered(record)
+        return { record, presetRegistered }
+      },
+    },
     routerDefaults: { get: () => defaultsStore.get() },
     newId: () => randomUUID(),
     isRunning: (sessionId) => bridge.isRunning(sessionId),

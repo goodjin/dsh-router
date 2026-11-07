@@ -8,7 +8,7 @@
  */
 
 import type { TaskRecord, TaskStatus } from '../shared/types.ts'
-import type { TaskCard, WorkerTemplate } from '../shared/view-contract.ts'
+import type { TaskCard, WorkerTemplate, WorkerTypeSummary } from '../shared/view-contract.ts'
 
 /** dispatch_task 的入参（依赖条目允许带版本；版本当前仅供审计，调度按任务 ID）。 */
 export interface DispatchTaskInput {
@@ -38,6 +38,16 @@ export interface CompleteTaskInput {
   leftovers?: string[]
 }
 
+/** worker 类型创建入参（v1.1 C2；systemPrompt 缺省时由存储按角色补默认提示词）。 */
+export interface RouterTypeCreateInput {
+  name: string
+  description?: string
+  role?: 'supervisor' | 'worker'
+  systemPrompt?: string
+  models?: string[]
+  skills?: string[]
+}
+
 /** 任务编排核心的调用面（工具薄壳只认这个接口，不认识实现）。 */
 export interface RouterCore {
   /** 创建任务书并派发到独立会话；返回任务 ID、任务书路径与会话 ID。 */
@@ -63,4 +73,12 @@ export interface RouterCore {
    * templateId；类型变更后经工具重注册刷新描述——v1.1 Task A4）。
    */
   enabledTemplates(): WorkerTemplate[]
+  /** 全类型摘要（含禁用与来源；v1.1 C2 list_worker_types 的数据面）。 */
+  listWorkerTypes(): WorkerTypeSummary[]
+  /**
+   * 现场创建 router 来源的 worker 类型（重名拒绝）并触发动态预设增量同步；
+   * presetRegistered=false 表示注册失败（派发会被 template-unavailable 拒），
+   * 调用方必须如实转告（v1.1 C2 create_worker_type）。
+   */
+  createWorkerType(callerSessionId: string, input: RouterTypeCreateInput): Promise<{ templateId: string; presetRegistered: boolean }>
 }
