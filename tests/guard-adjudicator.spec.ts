@@ -35,7 +35,8 @@ import { makeMemFs, type MemFs } from './helpers/mem-fs.ts'
 import { guardCoreWith } from './helpers/guard-core.ts'
 import { task } from './helpers/task-builder.ts'
 import type { TaskRecord } from '../src/shared/types.ts'
-import type { NotificationCard, NotificationSink } from '../src/shared/view-contract.ts'
+import type { NotificationCard } from '../src/shared/view-contract.ts'
+import type { NotificationSink } from '../src/host/guard/notifications.ts'
 import { SessionBridge, type SessionBridgeHost } from '../src/host/bridge/sessions.ts'
 import { registerRouterRoutes, type RouterRoutesContext, type RouterRoutesDeps } from '../src/host/routes.ts'
 
@@ -138,13 +139,14 @@ interface HarnessOptions {
   /** prompt 逐次失败（返回 undefined = 成功）。 */
   failPrompt?: (attempt: number) => Error | undefined
   llm?: (attempt: number) => Promise<string>
-  sessionState?: (sessionId: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined> | undefined
+  sessionState?: (sessionId: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
   agentStatus?: string
   firstResponseTimeoutMs?: number
   adjudicationWallClockMs?: number
 }
 
 async function adjudicatorWith(opts: HarnessOptions = {}) {
+  let cardSeq = 0
   const memfs: MemFs = makeMemFs()
   await memfs.fs.mkdirp('/guard')
   const clock = tickingClock()
@@ -157,7 +159,7 @@ async function adjudicatorWith(opts: HarnessOptions = {}) {
   const notifications = new NotificationStore({
     fs: memfs.fs,
     path: '/guard/notifications.json',
-    newId: () => `card-${notifications.seq + 1}`,
+    newId: () => `card-${++cardSeq}`,
     now: clock.now,
   })
 
