@@ -592,6 +592,9 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     tabs: [],
     templates: [],
   }
+  const noTypeOps = (): never => {
+    throw new Error('本用例不触达类型管理路由')
+  }
   return {
     calls,
     async getState(workspaceId) {
@@ -612,12 +615,28 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async ackRedirect(workspaceId, supersededSessionId) {
       calls.push(`ack:${workspaceId}:${supersededSessionId}`)
     },
+    // C3 类型/默认值路由的桩：本文件用例只打工作台五条，桩只为满足 deps 形状。
+    async listWorkerTypes() {
+      return { types: [] }
+    },
+    createWorkerType: noTypeOps,
+    updateWorkerType: noTypeOps,
+    setWorkerTypeEnabled: noTypeOps,
+    async removeWorkerType() {
+      noTypeOps()
+    },
+    async getDefaults() {
+      return { routerSystemPrompt: '', routerModel: '' }
+    },
+    async saveDefaults(value) {
+      return value
+    },
     ...state,
   }
 }
 
 describe('HTTP 路由（exact + admit）', () => {
-  it('五条 exact 路由全部挂上（C4 起 + redirect/ack）', () => {
+  it('九条 exact 路由全部挂上（C4 redirect/ack + C3 worker 类型/默认值）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -626,6 +645,10 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/answer',
       '/router/tabs/close',
       '/router/redirect/ack',
+      '/router/worker-types',
+      '/router/worker-types/update',
+      '/router/worker-types/enabled',
+      '/router/defaults',
     ])
   })
 

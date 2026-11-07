@@ -159,7 +159,7 @@ export function apply(ctx?: PluginContext): void {
     log.warn(`create entry failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
-    registerSettingsSection(slotsHost, { prefs })
+    registerSettingsSection(slotsHost, { prefs, api })
   } catch (error) {
     log.warn(`settings section failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

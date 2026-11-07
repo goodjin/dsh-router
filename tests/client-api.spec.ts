@@ -164,6 +164,107 @@ describe('POST /router/redirect/ack（C4）', () => {
   })
 })
 
+describe('C3 worker 类型 / Router 默认值（api 只增函数）', () => {
+  const createdType = {
+    templateId: 't-1', name: '文档写手', description: '写文档', role: 'worker' as const,
+    models: ['p/m1'], systemPrompt: '提示词', skills: ['doc'], enabled: true,
+    origin: 'user' as const, createdAt: 1, updatedAt: 1,
+  }
+
+  it('listWorkerTypes：GET /router/worker-types → WorkerTypeRecord[]', async () => {
+    const seen: string[] = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input) => {
+        seen.push(input)
+        return jsonResponse(200, { types: [createdType] })
+      }),
+    })
+    const result = await api.listWorkerTypes()
+    expect(seen[0]).toBe('/router/worker-types')
+    expect(result).toEqual([createdType])
+  })
+
+  it('createWorkerType：POST body 即 TypesCreateRequest，回 {type}', async () => {
+    let body = ''
+    const api = createRouterApi({
+      fetch: jsonFetch((_input, init) => {
+        body = String(init?.body)
+        return jsonResponse(200, { type: createdType })
+      }),
+    })
+    const input = { name: '文档写手', description: '写文档', role: 'worker' as const, models: ['p/m1'], systemPrompt: '提示词', skills: ['doc'], enabled: true }
+    const result = await api.createWorkerType(input)
+    expect(JSON.parse(body)).toEqual(input)
+    expect(result).toEqual(createdType)
+  })
+
+  it('updateWorkerType：POST /router/worker-types/update {templateId, patch}', async () => {
+    let path = ''
+    let body = ''
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        path = input
+        body = String(init?.body)
+        return jsonResponse(200, { type: { ...createdType, name: '新名' } })
+      }),
+    })
+    const result = await api.updateWorkerType({ templateId: 't-1', patch: { name: '新名', models: ['x/y'] } })
+    expect(path).toBe('/router/worker-types/update')
+    expect(JSON.parse(body)).toEqual({ templateId: 't-1', patch: { name: '新名', models: ['x/y'] } })
+    expect(result.name).toBe('新名')
+  })
+
+  it('setWorkerTypeEnabled：POST /router/worker-types/enabled {templateId, enabled}', async () => {
+    let path = ''
+    let body = ''
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        path = input
+        body = String(init?.body)
+        return jsonResponse(200, { type: { ...createdType, enabled: false } })
+      }),
+    })
+    const result = await api.setWorkerTypeEnabled({ templateId: 't-1', enabled: false })
+    expect(path).toBe('/router/worker-types/enabled')
+    expect(JSON.parse(body)).toEqual({ templateId: 't-1', enabled: false })
+    expect(result.enabled).toBe(false)
+  })
+
+  it('removeWorkerType：DELETE /router/worker-types?templateId= → {ok:true}；409 带错误透出', async () => {
+    const calls: Array<{ input: string; method?: string }> = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        calls.push({ input, method: init?.method })
+        return jsonResponse(200, { ok: true })
+      }),
+    })
+    await expect(api.removeWorkerType('t-1')).resolves.toBeUndefined()
+    expect(calls[0]).toEqual({ input: '/router/worker-types?templateId=t-1', method: 'DELETE' })
+
+    const refused = createRouterApi({ fetch: jsonFetch(() => jsonResponse(409, { error: '内置类型不可删除' })) })
+    const error = await refused.removeWorkerType('general').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(RouterApiError)
+    expect((error as RouterApiError).status).toBe(409)
+    expect((error as RouterApiError).message).toContain('内置类型不可删除')
+  })
+
+  it('getDefaults / saveDefaults：GET 读、POST 写回 RouterDefaults', async () => {
+    const calls: Array<{ input: string; method?: string; body?: string }> = []
+    const defaultsValue = { routerSystemPrompt: '默认提示词', routerModel: 'p/m' }
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        calls.push({ input, method: init?.method, body: init?.body === undefined ? undefined : String(init?.body) })
+        return jsonResponse(200, defaultsValue)
+      }),
+    })
+    await expect(api.getDefaults()).resolves.toEqual(defaultsValue)
+    await expect(api.saveDefaults(defaultsValue)).resolves.toEqual(defaultsValue)
+    expect(calls[0]).toEqual({ input: '/router/defaults', method: undefined })
+    expect(calls[1]?.method).toBe('POST')
+    expect(JSON.parse(calls[1]?.body ?? '{}')).toEqual(defaultsValue)
+  })
+})
+
 describe('错误与超时', () => {
   it('5xx + {error} 透出为 RouterApiError（message 含 error 字段）', async () => {
     const api = createRouterApi({ fetch: jsonFetch(() => jsonResponse(503, { error: 'core service down' })) })

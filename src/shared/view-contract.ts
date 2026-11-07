@@ -120,6 +120,60 @@ export interface RouterDefaults {
   routerModel: string
 }
 
+/* ── Worker 类型管理路由的请求/响应类型（v1.1 Task C3；命名与路由对齐） ── */
+
+/** 类型可编辑字段的补丁（POST /router/worker-types/update 的 patch；只含可改字段）。 */
+export interface TypesPatch {
+  name?: string
+  description?: string
+  models?: string[]
+  systemPrompt?: string
+  skills?: string[]
+}
+
+/** POST /router/worker-types 请求体（templateId/origin/时间戳由宿主生成，不采纳同名字段）。 */
+export interface TypesCreateRequest {
+  name: string
+  description?: string
+  role?: 'supervisor' | 'worker'
+  models?: string[]
+  systemPrompt?: string
+  skills?: string[]
+  enabled?: boolean
+}
+
+/** POST /router/worker-types/update 请求体。 */
+export interface TypesUpdateRequest {
+  templateId: string
+  patch: TypesPatch
+}
+
+/** POST /router/worker-types/enabled 请求体。 */
+export interface TypesEnabledRequest {
+  templateId: string
+  enabled: boolean
+}
+
+/** DELETE /router/worker-types 的查询参数形状（templateId 走 query）。 */
+export interface TypesDeleteRequest {
+  templateId: string
+}
+
+/** GET /router/worker-types 响应（全量记录，管理界面直接消费）。 */
+export interface TypesListResponse {
+  types: WorkerTypeRecord[]
+}
+
+/** 类型写路径的单类型响应。 */
+export interface TypesItemResponse {
+  type: WorkerTypeRecord
+}
+
+/** DELETE /router/worker-types 响应。 */
+export interface TypesDeleteResponse {
+  ok: true
+}
+
 /** 入口去重跳转指令（v1.1 Task C4）：宿主 dedup 写、客户端消费后 ack 清除。 */
 export interface RouterRedirect {
   /** 消费方应跳转到的会话（正主）。 */

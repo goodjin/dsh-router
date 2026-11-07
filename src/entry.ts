@@ -50,7 +50,7 @@ import {
   type SessionObservationLike,
 } from './host/memory/adapter.ts'
 import type { FsAdapter } from './shared/fs-adapter.ts'
-import type { WorkerTemplate } from './shared/view-contract.ts'
+import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
 
 export { Config } from './host/root-config.ts'
 
@@ -330,6 +330,17 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     logger: { info: (message: string) => log.info(message), warn: (message: string) => log.warn(message) },
   })
 
+  // 类型写路径后的引擎增量同步（C3 路由 deps 用）：只同步「启用」类型
+  //（syncTypes 的调用方约定是喂启用清单；禁用 = 保留注册只拒派发，r4 §4）。
+  // builtin 不经引擎（映射静态预设，ensureRegistered 对它恒 false）。
+  const syncTypePresets = async (record: WorkerTypeRecord): Promise<void> => {
+    if (!record.enabled || record.origin === 'builtin') return
+    const outcome = await engine.syncTypes([record])
+    for (const failed of outcome.failed) {
+      log.warn(`类型 ${failed} 的动态预设注册失败（派发会被拒；保存的类型数据不受影响）`)
+    }
+  }
+
   const relay = new AnswerRelay({
     ledger,
     newId: () => randomUUID(),
@@ -554,9 +565,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     })()
   }, 'dsh-router: 启动恢复与动态预设同步')
 
-  // 五条 HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
+  // HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
   // C4：GET /router/state 前 先跑去重扫描（判定按会话缓存，稳态零读取），
   // 返回前把该 workspace 未消费的 redirect 指令并进 state。
+  // C3：worker 类型 / Router 默认值七条路由——写操作走 WorkerTypeStore /
+  // RouterDefaultsStore，成功后触发动态预设引擎增量同步（重注册即重载工具行，
+  // 该类型的 dispatch 描述随之刷新；Router 预设的描述刷新钩子归 C2，见任务报告）。
   ctx.inject?.(['webServer', 'connection'], (child) => {
     registerRouterRoutes(child as RouterRoutesContext, {
       getState: async (workspaceId) => {
@@ -575,6 +589,33 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       ackRedirect: (workspaceId, supersededSessionId) => {
         dedup?.ackRedirect(workspaceId, supersededSessionId)
         return Promise.resolve()
+      },
+      listWorkerTypes: async () => ({ types: await typeStore.list() }),
+      createWorkerType: async (input) => {
+        const type = await typeStore.create(input)
+        await syncTypePresets(type)
+        return { type }
+      },
+      updateWorkerType: async ({ templateId, patch }) => {
+        const type = await typeStore.update(templateId, patch)
+        await syncTypePresets(type)
+        return { type }
+      },
+      setWorkerTypeEnabled: async ({ templateId, enabled }) => {
+        const type = await typeStore.setEnabled(templateId, enabled)
+        // 禁用不注销（保留注册只拒派发，r4 §4）；重新启用时重注册（定义可能在禁用期被改过）。
+        await syncTypePresets(type)
+        return { type }
+      },
+      removeWorkerType: async (templateId) => {
+        await typeStore.remove(templateId)
+        await engine.removeType(templateId) // 删除 = 注销动态预设（已关闭会话需重建同名类型才可重开）
+      },
+      getDefaults: () => defaultsStore.get(),
+      saveDefaults: async (value) => {
+        const saved = await defaultsStore.set(value)
+        await engine.syncRouter(saved) // 默认提示词变了 → Router 预设重注册（失败回退静态定义）
+        return saved
       },
     })
   })
