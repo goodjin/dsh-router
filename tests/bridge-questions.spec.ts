@@ -408,7 +408,7 @@ describe('SessionBridge：派发', () => {
     const result = await bridge.dispatchTask('T-001')
     expect(result.sessionId).toBe('session-1')
     expect(events.created).toEqual([{ opts: { workspaceId: 'ws-1', agentPreset: presets.worker } }])
-    expect(events.renames).toEqual([{ sessionId: 'session-1', title: 'T-001 示例任务' }])
+    expect(events.renames).toEqual([{ sessionId: 'session-1', title: 'coder · T-001 示例任务' }])
     expect(events.prompts).toHaveLength(1)
     expect(events.prompts[0]!.sessionId).toBe('session-1')
     expect(events.prompts[0]!.mode).toBe('queue')

@@ -37,6 +37,46 @@ export interface SessionBridgeHost {
    * 建会话后即设该类型 models[0]。缺席或失败都不挡派发。
    */
   selectModel?(request: { sessionId: string; provider: string; model: string }, signal?: AbortSignal): Promise<unknown>
+  /**
+   * v1.3 A3（cache 模式）：宿主分叉面 = wire `session/fork`（r10 §1：
+   * SessionCommandController.fork，参数 {sessionId 必填, atSeq?, allowMigration?}，
+   * 返回 {sessionId}；atSeq 缺省 = 最近完成轮前缀）。缺席 = cache 模式创建段
+   * infra 分类进熔断（Review Focus 4），不硬撞创建路径。
+   */
+  fork?(request: { sessionId: string; atSeq?: number; allowMigration?: boolean }, signal?: AbortSignal): Promise<{ sessionId: string }>
+  /** 分叉源事件观察（r10 §1 第 2 步同款；minimal 五步第①步）。 */
+  observeSession?(sessionId: string): Promise<{
+    events: readonly { seq: number; type: string; time?: number; data?: unknown }[]
+    dispose?: () => void
+  }>
+  /**
+   * buildForkSeed（`@deepseek-ai/dsh-session/fork`，r10 §2；minimal 第②步）。
+   * 返回 undefined = 种子面不可用（创建降级为普通 create，如实告警）。
+   */
+  buildForkSeed?(
+    events: readonly { seq: number; type: string; time?: number; data?: unknown }[],
+    boundary: number,
+  ): unknown[] | Promise<unknown[] | undefined>
+  /** 分叉子会话 ID（宿主同款形状 `session-<uuid>`）。 */
+  newSessionId?(): string
+  /**
+   * 底层创建原语（r10 §2：ctx.agents.create，seed+自选 preset 组合唯一同框可行
+   * 的层；minimal 第④步）。setup 在 agent 工厂里被调用（agentCtx 注入）。
+   */
+  agentsCreate?(options: {
+    sessionId: string
+    seed: unknown[]
+    inheritedEventCount: number
+    meta?: Record<string, unknown>
+    agentOptions?: { provider: string; model: string }
+    setup?: (agentCtx: unknown) => Promise<unknown>
+  }): Promise<unknown>
+  /** agentPresets.resolve（r10 §3：先解析（未注册抛 agent-preset/not-found）再挂载）。 */
+  resolvePreset?(presetId: string): Promise<{ id: string }>
+  /** agentPresets.mount（minimal 第③步的 setup 体：把 worker 预设挂进 agent 作用域）。 */
+  mountPreset?(agentCtx: unknown, presetId: string): Promise<unknown>
+  /** workspace.attachSession（minimal 第⑤步；cwd 与 workspace.path 不等时宿主拒绝，桥降级不炸）。 */
+  attachWorkspace?(workspaceId: string, sessionId: string): Promise<void>
 }
 
 /** workspaceRegistry 的最小面（r2 §5）。 */
@@ -234,6 +274,120 @@ export class SessionBridge {
     return { name: templateId === '' ? '执行者' : templateId, systemPrompt: '' }
   }
 
+  /** 会话标题（v1.3 规格 §3.1：`类型名 · T-xxx 任务名`）。 */
+  private async sessionTitle(record: TaskRecord): Promise<string> {
+    const identity = await this.typeIdentity(record.templateId ?? '')
+    return `${identity.name} · ${record.id} ${record.title}`
+  }
+
+  /** 分叉来源：显式 forkFrom（派发者会话）优先，其次父任务的执行会话。 */
+  private resolveForkSource(record: TaskRecord, forkFrom: string | undefined): string | undefined {
+    if (forkFrom !== undefined && forkFrom !== '') return forkFrom
+    if (record.parentId !== undefined) {
+      const parent = this.ledger.get(record.parentId)
+      if (parent?.sessionId !== undefined) return parent.sessionId
+    }
+    return undefined
+  }
+
+  /**
+   * cache-priority 创建段（规格 §3.1）：宿主 `session/fork`（继承来源历史/组合/
+   * 模型，forkWorkspace 自动归组）→ 登记账本 → 改名；**不 selectModel**。
+   * 宿主缺 fork face → infra 分类进熔断（Review Focus 4：不硬撞创建路径，
+   * 正路是切 minimal-face 模式）。无分叉源 → undefined（回退创建路径）。
+   */
+  private async createByFork(record: TaskRecord, title: string, source: string | undefined): Promise<string | undefined> {
+    if (source === undefined) return undefined
+    if (this.host.fork === undefined) {
+      throw tagInfraFailure(
+        new Error('宿主缺 session/fork 面（sessionController.fork 缺席），cache-priority 模式无法分叉创建；请在设置切到 minimal-face 模式或升级宿主'),
+        '分叉创建失败',
+      )
+    }
+    const forked = await this.tagged('分叉创建失败', () => this.host.fork!({ sessionId: source }, this.hostSignal()))
+    const childId = forked.sessionId
+    await this.tagged('会话登记失败', () => this.ledger.attachSession(record.id, childId))
+    await this.tagged('会话改名失败', async () => {
+      await this.host.rename?.(childId, title)
+    })
+    return childId
+  }
+
+  /**
+   * minimal-face 创建段（规格 §3.2，r10 §7 五步复刻）：observeSession →
+   * boundary（最后 turn/end）→ buildForkSeed → resolvePreset+mount 组 setup →
+   * agents.create → attachWorkspace → 登记 → 改名（selectModel 由 dispatchTask
+   * 的回退外分支统一处理）。面不全 / 无分叉源 / 种子面不可用 → undefined（回退
+   * 既有创建路径）；来源缺位、预设未注册、create 失败 → infra 分类（Review
+   * Focus 4）。
+   */
+  private async createBySeed(
+    record: TaskRecord,
+    title: string,
+    source: string | undefined,
+    workspace: WorkspaceInfo | undefined,
+  ): Promise<string | undefined> {
+    const host = this.host
+    if (
+      source === undefined
+      || host.observeSession === undefined
+      || host.newSessionId === undefined
+      || host.agentsCreate === undefined
+    ) {
+      return undefined
+    }
+    const observation = await this.tagged('分叉源读取失败', () => host.observeSession!(source))
+    try {
+      const events = observation?.events ?? []
+      let boundary: number | undefined
+      for (const event of events) {
+        if (event.type === 'turn/end' && typeof event.seq === 'number') boundary = event.seq
+      }
+      if (boundary === undefined) {
+        throw tagInfraFailure(new Error(`分叉源会话 ${source} 没有已完成轮次（无 turn/end），无法构造分叉种子`), '分叉创建失败')
+      }
+      const seed = host.buildForkSeed === undefined ? undefined : await host.buildForkSeed(events, boundary)
+      if (!Array.isArray(seed)) {
+        this.logger?.warn('buildForkSeed 面不可用（@deepseek-ai/dsh-session/fork 缺席？），本次分叉降级为普通创建')
+        return undefined
+      }
+      const presetId = await this.presetFor(record)
+      const resolved = await this.tagged('预设解析失败', async () =>
+        host.resolvePreset === undefined ? { id: presetId } : host.resolvePreset(presetId),
+      )
+      const childId = host.newSessionId()
+      await this.tagged('分叉创建失败', async () => {
+        await host.agentsCreate!({
+          sessionId: childId,
+          seed,
+          inheritedEventCount: boundary + 1,
+          meta: { cwd: record.cwd, isSeeded: true, agentPreset: resolved.id },
+          setup: host.mountPreset === undefined
+            ? undefined
+            : async (agentCtx: unknown) => {
+                await host.mountPreset!(agentCtx, resolved.id)
+              },
+        })
+      })
+      if (workspace !== undefined && host.attachWorkspace !== undefined) {
+        try {
+          await host.attachWorkspace(workspace.id, childId)
+        } catch (error) {
+          // attach 失败（cwd 与 workspace.path 不等被宿主拒绝等）不炸派发：
+          // 会话已建成，重启后宿主按 cwd 自动归组（r2 §1.2）。
+          this.logger?.warn(`分叉子会话 ${childId} 挂 workspace ${workspace.id} 失败（不影响派发）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      await this.tagged('会话登记失败', () => this.ledger.attachSession(record.id, childId))
+      await this.tagged('会话改名失败', async () => {
+        await this.host.rename?.(childId, title)
+      })
+      return childId
+    } finally {
+      observation?.dispose?.()
+    }
+  }
+
   /**
    * 首发投递正文（v1.3 规格 §2.3/§2.4）：cache-priority = 切换卡（①类型系统
    * 提示词 ②角色工具清单 ③禁用提醒）+ 任务书全文；minimal-face = 简化身份头 +
@@ -268,35 +422,57 @@ export class SessionBridge {
   }
 
   /**
-   * 派发任务：无会话则建（解析 workspace / 预设、改名），投任务书全文 + 执行指引
-   * （requestId 幂等），成功后走状态机到 dispatched。draft 任务经 draft→queued→
-   * dispatched 两步走表边（表里没有 draft→dispatched 直达边）。
+   * 派发任务：无会话则建——cache-priority 优先宿主分叉（来源=派发者/父任务会话，
+   * r10 §1 fork face；缺面=infra，无源=回退创建），minimal-face 五步复刻
+   * （agents.create + buildForkSeed + worker 预设组合，r10 §2/§7；面不全或无源
+   * 回退既有创建路径）；随后投任务书（requestId 幂等，cache 用 switch- 前缀），
+   * 成功后走状态机到 dispatched。
    */
-  async dispatchTask(taskId: string): Promise<{ sessionId: string | undefined }> {
+  async dispatchTask(taskId: string, opts?: { forkFrom?: string }): Promise<{ sessionId: string | undefined }> {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     let sessionId = record.sessionId
     if (sessionId === undefined) {
       const workspace = this.resolveWorkspace(record)
-      const agentPreset = await this.presetFor(record)
-      const createOpts = workspace !== undefined
-        ? { workspaceId: workspace.id, agentPreset }
-        : { cwd: record.cwd, agentPreset }
-      const fresh = await this.tagged('会话创建失败', () => this.host.create(createOpts, this.hostSignal()))
-      sessionId = fresh
-      await this.tagged('会话登记失败', () => this.ledger.attachSession(taskId, fresh))
-      await this.tagged('会话改名失败', async () => {
-        await this.host.rename?.(fresh, `${record.id} ${record.title}`)
-      })
-      await this.pinDefaultModel(fresh, record.templateId ?? '')
+      const title = await this.sessionTitle(record)
+      const forkSource = this.resolveForkSource(record, opts?.forkFrom)
+      if (this.mode === 'cache-priority') {
+        // cache 模式：宿主分叉（继承来源历史/组合/模型）；无源回退创建（不钉模型）。
+        sessionId = await this.createByFork(record, title, forkSource)
+      } else {
+        // minimal 模式：五步复刻（带历史 + worker 预设组合 + 钉模型）；面不全或
+        // 无源回退既有创建路径。
+        sessionId = await this.createBySeed(record, title, forkSource, workspace)
+      }
+      if (sessionId === undefined) {
+        const agentPreset = await this.presetFor(record)
+        const createOpts = workspace !== undefined
+          ? { workspaceId: workspace.id, agentPreset }
+          : { cwd: record.cwd, agentPreset }
+        const fresh = await this.tagged('会话创建失败', () => this.host.create(createOpts, this.hostSignal()))
+        sessionId = fresh
+        await this.tagged('会话登记失败', () => this.ledger.attachSession(taskId, fresh))
+        await this.tagged('会话改名失败', async () => {
+          await this.host.rename?.(fresh, title)
+        })
+      }
+      // 模型钉定（v1.1 §5 / Review Focus 3）：minimal（含回退创建与五步）钉类型
+      // models[0]；cache 模式绝不调 selectModel——分叉继承来源模型（调用即缓存断裂），
+      // 类型 models 仅作展示。
+      if (this.mode !== 'cache-priority') {
+        await this.pinDefaultModel(sessionId, record.templateId ?? '')
+      }
     }
     const deliverySessionId: string = sessionId
     const firstText = await this.firstDeliveryText(record, book)
+    const requestId = this.mode === 'cache-priority'
+      ? `switch-${taskId}-v${record.docVersion}`
+      : `dispatch-${taskId}-v${record.docVersion}`
     await this.tagged('任务书投递失败', () =>
       this.host.prompt(
         {
-          requestId: `dispatch-${taskId}-v${record.docVersion}`,
+          requestId,
           sessionId: deliverySessionId,
           mode: 'queue',
           content: [{ type: 'text', text: firstText }],

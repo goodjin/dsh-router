@@ -284,24 +284,28 @@ export function apply(ctx, rawConfig) {
     };
     // v1.2 B3：onDelivered 晚绑判定器（桥先于判定器建成）
     const adjudicatorRef = {};
+    // v1.3 A3：minimal 五步的 buildForkSeed 面（@deepseek-ai/dsh-session/fork 懒加载；
+    // 缺席时桥降级为普通创建并告警——r10 §2：双版本逐字节一致，正常宿主都有）。
+    let forkSeedFn;
+    const loadForkSeed = async () => {
+        if (forkSeedFn !== undefined)
+            return forkSeedFn;
+        try {
+            const specifier = '@deepseek-ai/dsh-session/fork';
+            const mod = (await import(__rewriteRelativeImportExtension(specifier)));
+            forkSeedFn = mod.buildForkSeed;
+        }
+        catch (error) {
+            log.warn(`@deepseek-ai/dsh-session/fork 不可用，minimal-face 分叉降级为普通创建: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        return forkSeedFn;
+    };
+    void loadForkSeed();
     const bridge = new SessionBridge({
         ledger,
         docsFor,
         workspaces: workspaceRegistry,
         onDelivered: (taskId) => { void adjudicatorRef.current?.onDispatched(taskId); },
-        host: {
-            create: async (opts, signal) => (await ctx.sessionController.create(opts, signal)).sessionId,
-            prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
-            onStatus: (callback) => hosts.onSessionStatus(callback),
-            rename: async (sessionId, title) => {
-                await ctx.sessionController.rename({ sessionId, title });
-            },
-            // 规格 §5 默认模型钉法（r4 修正）：宿主 selectModel（UI ModelSelect 同通路）；
-            // 宿主缺席时桥降级为不钉（类型清单仍如实记录）。
-            selectModel: typeof ctx.sessionController.selectModel === 'function'
-                ? (request, signal) => ctx.sessionController.selectModel(request, signal)
-                : undefined,
-        },
         presets: { supervisor: config.supervisorPreset, worker: config.workerPreset },
         forTemplate: resolvePresetForTemplate,
         types: { get: (templateId) => typeStore.get(templateId) },
@@ -316,6 +320,53 @@ export function apply(ctx, rawConfig) {
         identityCards: {
             has: (sessionId) => ui.hasIdentityCard(sessionId),
             mark: (sessionId) => ui.markIdentityCardSent(sessionId),
+        },
+        // v1.3 A3：分叉创建面（cache=宿主 fork；minimal=五步复刻的宿主砖块，全可缺席）。
+        host: {
+            create: async (opts, signal) => (await ctx.sessionController.create(opts, signal)).sessionId,
+            prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
+            onStatus: (callback) => hosts.onSessionStatus(callback),
+            rename: async (sessionId, title) => {
+                await ctx.sessionController.rename({ sessionId, title });
+            },
+            // 规格 §5 默认模型钉法（r4 修正）：宿主 selectModel（UI ModelSelect 同通路）；
+            // 宿主缺席时桥降级为不钉（类型清单仍如实记录）。
+            selectModel: typeof ctx.sessionController.selectModel === 'function'
+                ? (request, signal) => ctx.sessionController.selectModel(request, signal)
+                : undefined,
+            // wire session/fork（r10 §1：SessionCommandController.fork({sessionId,...})）。
+            fork: typeof ctx.sessionController.fork === 'function'
+                ? (request, signal) => ctx.sessionController.fork(request, signal)
+                : undefined,
+            observeSession: async (sessionId) => {
+                const observation = await ctx.sessionQuery.observeSession(sessionId);
+                const events = (observation.events ?? []);
+                return { events, dispose: observation.dispose };
+            },
+            buildForkSeed: async (events, boundary) => {
+                const fn = await loadForkSeed();
+                if (fn === undefined)
+                    return undefined;
+                return fn(events, boundary);
+            },
+            newSessionId: () => `session-${randomUUID()}`,
+            agentsCreate: typeof ctx.agents.create === 'function'
+                ? (options) => ctx.agents.create(options)
+                : undefined,
+            resolvePreset: typeof ctx.agentPresets.resolve === 'function'
+                ? (presetId) => ctx.agentPresets.resolve(presetId)
+                : undefined,
+            mountPreset: typeof ctx.agentPresets.mount === 'function'
+                ? (agentCtx, presetId) => ctx.agentPresets.mount(agentCtx, presetId)
+                : undefined,
+            attachWorkspace: async (workspaceId, sessionId) => {
+                const registry = ctx.workspaceRegistry;
+                const workspace = registry.get?.(workspaceId);
+                const attach = workspace?.attachSession;
+                if (typeof attach !== 'function')
+                    throw new Error('workspace 缺 attachSession 面');
+                await attach.call(workspace, sessionId);
+            },
         },
     });
     /**

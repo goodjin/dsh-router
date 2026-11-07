@@ -65,9 +65,10 @@ interface HostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined) } = {}) {
+function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined); fork?: (request: { sessionId: string }) => Promise<{ sessionId: string }> } = {}) {
   const events: HostEvents = { created: [], prompts: [], renames: [] }
   const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
+  const forkCalls: { sessionId: string }[] = []
   let count = 0
   let createAttempts = 0
   let promptAttempts = 0
@@ -116,8 +117,14 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
     rename: async (sessionId, title) => {
       await hosts.sessionController.rename({ sessionId, title })
     },
+    // v1.3 A3（cache 模式）：默认宿主 fork face（返回 forked-<n>；记进 created 流水
+    // 之外单独记 forkCalls，opts.fork 可覆盖）。
+    fork: opts.fork ?? (async (request) => {
+      forkCalls.push(request)
+      return { sessionId: `forked-${forkCalls.length}` }
+    }),
   }
-  return { hosts, bridgeHost, events, statusCbs }
+  return { hosts, bridgeHost, events, statusCbs, forkCalls }
 }
 
 function fakeDriver(): CompactionDriver {
@@ -175,6 +182,8 @@ export interface GuardCoreOptions {
   now?: () => number
   /** worker 生成模式（v1.3 A2/A3；缺省 minimal-face，直通桥的 mode）。 */
   mode?: 'cache-priority' | 'minimal-face'
+  /** 覆盖默认 fork face（缺省返回 forked-<n>）。 */
+  fork?: (request: { sessionId: string }) => Promise<{ sessionId: string }>
 }
 
 export async function guardCoreWith(opts: GuardCoreOptions = {}) {

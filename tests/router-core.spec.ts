@@ -282,7 +282,8 @@ describe('createRouterCore：dispatchTask', () => {
     expect(result.docPath).toBe('/proj/.router/tasks/T-001/task.v1.md')
     expect(result.sessionId).toBe('session-1')
     expect(events.created[0]!.opts).toEqual({ workspaceId: 'ws-1', agentPreset: 'dsh-router-worker' })
-    expect(events.renames[0]!.title).toBe('T-001 修登录')
+    // v1.3 规格 §3.1：标题 = `类型名 · T-xxx 任务名`（类型面缺席时退 templateId）。
+    expect(events.renames[0]!.title).toBe('coder · T-001 修登录')
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')
     expect(events.prompts[0]!.text).toContain('docs/auth.md')
     // 调用者会话（Router）与执行会话都要打 pendingCompaction 标记：Router 自身

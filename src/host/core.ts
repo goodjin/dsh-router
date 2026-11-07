@@ -437,7 +437,9 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       // v1.2 规格 §2 条件 b：创建进熔断计数（任务 ID 集合对窗口；完成清基准）。
       await deps.breaker?.recordCreation(record.id, now())
       try {
-        const { sessionId } = await bridge.dispatchTask(record.id)
+        // v1.3 A3：分叉来源 = 派发者会话（Router 或主管；fork 继承其历史/组合/模型）。
+        // 子任务解锁/重派路径不传显式来源，由桥按父任务会话回溯。
+        const { sessionId } = await bridge.dispatchTask(record.id, { forkFrom: callerSessionId })
         // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
         // dispatch_task 成功后给 Router（或主管）会话打 pendingCompaction，其自身
         // 的派发讨论段在 idle 后被压缩（裁定 5 顺延项的补齐）。
