@@ -17,7 +17,7 @@
  */
 
 import type { TaskStatus } from '../../shared/types.ts'
-import type { GuardNotification } from '../../shared/view-contract.ts'
+import type { NotificationCard } from '../../shared/view-contract.ts'
 import type { InterruptOutcome } from '../bridge/sessions.ts'
 
 /** 紧急暂停的冻结原因（留痕 guard-state；用户解除后不再复现）。 */
@@ -34,7 +34,7 @@ export interface EmergencyPauseReport {
   /** interrupted 中 outcome='failed' 的数量（响应消费方的一眼判据）。 */
   failedCount: number
   /** 写入的异常通知卡（通知面缺席/失败时缺席，其余失败在 interrupted 里如实带出）。 */
-  notification?: GuardNotification
+  notification?: NotificationCard
 }
 
 export interface EmergencyPauseDeps {
@@ -76,7 +76,7 @@ export async function runEmergencyPause(deps: EmergencyPauseDeps): Promise<Emerg
   const interrupted = sessionIds.length > 0 ? await deps.interrupt(sessionIds) : []
   const failed = interrupted.filter((entry) => entry.outcome === 'failed')
   // 3. 异常通知：摘要如实带失败明细（Review Focus 5：汇总卡不静默）。
-  let notification: GuardNotification | undefined
+  let notification: NotificationCard | undefined
   if (deps.notify !== undefined) {
     const failedText = failed
       .map((entry) => `${entry.sessionId}（${entry.detail ?? '原因未记录'}）`)

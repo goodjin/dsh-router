@@ -22,13 +22,13 @@ import {
 } from '../src/host/routes.ts'
 import { guardCoreWith, type GuardCoreOptions } from './helpers/guard-core.ts'
 import type { AgentInterruptFace, InterruptOutcome, SessionBridge } from '../src/host/bridge/sessions.ts'
-import { GuardNotificationsStore, withGuardNotifications } from '../src/host/guard/notifications.ts'
+import { NotificationStore, anomalyActions } from '../src/host/guard/notifications.ts'
 import {
   emergencyPauseTargets,
   runEmergencyPause,
   type EmergencyPauseReport,
 } from '../src/host/guard/emergency.ts'
-import type { GuardNotification, RouterState } from '../src/shared/view-contract.ts'
+import type { RouterState } from '../src/shared/view-contract.ts'
 
 /* ────────────────────────── 假 HTTP 上下文（照 routes-worker-types 同款） ────────────────────────── */
 
@@ -119,8 +119,11 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
   // 同会话连派多个任务构造 running/dispatched 并存的目标清单。
   const h = await guardCoreWith({ ...opts, budgets: null, interruptFace: opts.interrupt?.face })
   const breaker = h.breaker!
-  const notifications = new GuardNotificationsStore({ fs: h.memfs.fs, path: '/guard/guard-notifications.json', now: () => 5000 })
+  let cardSeq = 0
+  const notifications = new NotificationStore({ fs: h.memfs.fs, path: '/guard/notifications.json', newId: () => `card-${++cardSeq}`, now: () => 5000 })
   const deps: RouterRoutesDeps = {
+    // v1.2 B3 通知确认：经统一 NotificationStore。
+    ackNotification: (cardId: string) => notifications.ack(cardId),
     async getState() {
       return { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }
     },
@@ -192,7 +195,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
             : { frozen: state.frozen }
         },
         interrupt: (ids) => h.bridge.interruptTaskSessions(ids),
-        notify: async (input) => notifications.append(input),
+        notify: async (input) => notifications.push({ kind: 'anomaly', title: input.title, summary: input.summary, actions: anomalyActions() }),
       }),
   }
   return { ...h, deps, notifications, breaker, interrupt: opts.interrupt }
@@ -220,6 +223,10 @@ describe('POST /router/tasks/control（B4）', () => {
     void controlHarness // 装配面被下方用例消费；此用例只看挂载
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, {
+      // v1.2 B3 通知确认桩：本用例只看挂载。
+      async ackNotification() {
+        return false
+      },
       async getState() {
         return { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }
       },
@@ -675,28 +682,16 @@ describe('SessionBridge.interruptTaskSessions（B4 中断面，r8 形态）', ()
   })
 })
 
-describe('guard 通知段（B4 最小投影，与 B3 合并时对齐）', () => {
-  it('append/list 往返 + 落盘恢复：新 store 同路径读到同一卡，cardId 单调', async () => {
+describe('guard 通知段（B4→B3 合并后：紧急暂停落统一 NotificationStore）', () => {
+  it('紧急暂停通知卡入统一存储：push/pending/ack 与 B3 面一致', async () => {
     const h = await guardCoreWith({})
-    const first = new GuardNotificationsStore({ fs: h.memfs.fs, path: '/guard/guard-notifications.json', now: () => 5000 })
-    const card1 = await first.append({ title: '紧急暂停已执行', summary: '第一条' })
-    const card2 = await first.append({ title: '紧急暂停已执行', summary: '第二条' })
-    expect(card1.kind).toBe('anomaly')
-    expect(card1.at).toBe(5000)
-    expect(card2.cardId).not.toBe(card1.cardId)
-    expect(await first.list()).toEqual([card1, card2])
-
-    const second = new GuardNotificationsStore({ fs: h.memfs.fs, path: '/guard/guard-notifications.json', now: () => 6000 })
-    expect(await second.list()).toEqual([card1, card2])
-  })
-
-  it('withGuardNotifications：空清单不带键（lossless），非空带 notifications', () => {
-    const base: RouterState = { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }
-    expect(withGuardNotifications(base, [])).toEqual(base)
-    expect(withGuardNotifications(base, [])).not.toHaveProperty('notifications')
-    const card: GuardNotification = { cardId: 'gn-1', kind: 'anomaly', title: 't', summary: 's', at: 1 }
-    const projected = withGuardNotifications(base, [card])
-    expect(projected.notifications).toEqual([card])
+    let seq = 0
+    const store = new NotificationStore({ fs: h.memfs.fs, path: '/guard/notifications.json', newId: () => `c-${++seq}`, now: () => 5000 })
+    const card = await store.push({ kind: 'anomaly', title: '紧急暂停已执行', summary: '中断 1 个会话', actions: anomalyActions() })
+    expect(card.kind).toBe('anomaly')
+    expect((await store.pending())).toHaveLength(1)
+    expect(await store.ack(card.cardId)).toBe(true)
+    expect((await store.pending())).toHaveLength(0)
   })
 
   it('emergencyPauseTargets：只取 running/dispatched 且已绑会话的任务', () => {

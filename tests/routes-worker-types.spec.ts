@@ -217,7 +217,7 @@ function fakeDeps(factories?: {
     },
     async emergencyPause() {
       calls.push('emergency-pause')
-      return { frozen: true, interrupted: [] as { sessionId: string; accepted: boolean }[], failedCount: 0 }
+      return { frozen: true, interrupted: [], failedCount: 0 }
     },
     async getState() {
       return {

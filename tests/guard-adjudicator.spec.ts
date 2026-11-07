@@ -943,6 +943,15 @@ describe('POST /router/notifications/ack（C1 只消费）', () => {
       getSessionPrompt: async () => ({ prompt: '', isDefault: true }),
       saveSessionPrompt: async () => {},
       ackNotification: async (cardId: string) => store.ack(cardId),
+      async controlTask() {
+        return { status: 'paused' as const }
+      },
+      async unfreezeBreaker() {
+        return { before: { frozen: false }, after: { frozen: false } }
+      },
+      async emergencyPause() {
+        return { frozen: true, interrupted: [], failedCount: 0 }
+      },
     }
     registerRouterRoutes(ctx, deps)
     const route = routes.find((entry) => entry.path === '/router/notifications/ack')
