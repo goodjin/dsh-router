@@ -81,8 +81,10 @@ export interface TaskRecord {
   /** 关联 worker 会话 ID（默认一个任务一个会话）。 */
   sessionId?: string
   status: TaskStatus
-  /** 一句话进度（执行者更新；报告阻塞/驳回时也落这里）。 */
+  /** 一句话进度（执行者更新；报告阻塞/驳回/派发失败时也落这里）。 */
   progress?: string
+  /** 连续派发失败次数（成功派发不重置——它只在失败路径累加；达上限自动 blocked）。 */
+  retryCount?: number
   /** 任务书版本，从 1 起，supplement 递增。 */
   docVersion: number
   /** 完成记录（首次完成的快照，幂等去重返回它）。 */

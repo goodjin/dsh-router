@@ -31,8 +31,9 @@ const TERMINAL: string[] = ['completed', 'cancelled', 'failed']
 
 /** 合法迁移表（照计划 Task 1 的闭包集合，from → 允许的 to 集合）。 */
 const LEGAL: Record<string, string[]> = {
-  draft: ['queued', 'cancelled'],
-  queued: ['dispatched', 'cancelled'],
+  // draft/queued → blocked：派发失败达上限的自动封顶（v1.1 规格 §2-4）。
+  draft: ['queued', 'blocked', 'cancelled'],
+  queued: ['dispatched', 'blocked', 'cancelled'],
   dispatched: ['running', 'blocked', 'failed', 'cancelled'],
   running: ['waiting-user', 'blocked', 'paused', 'review-pending', 'completed', 'failed', 'cancelled'],
   'waiting-user': ['running', 'blocked', 'failed', 'cancelled'],
@@ -55,9 +56,9 @@ describe('迁移表：合法对', () => {
     }
   })
 
-  it('合法对总数符合计划表（2+2+4+7+4+3+2+2 = 26 条）', () => {
+  it('合法对总数符合计划表（3+3+4+7+4+3+2+2 = 28 条；v1.1 A4 增 draft/queued→blocked）', () => {
     const total = Object.values(LEGAL).reduce((sum, tos) => sum + tos.length, 0)
-    expect(total).toBe(26)
+    expect(total).toBe(28)
   })
 })
 

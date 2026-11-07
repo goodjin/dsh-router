@@ -32,6 +32,10 @@ export type LedgerErrorCode =
   | 'depth-exceeded'
   /** 调度派发被拒：依赖命中祖先链（环风险）。 */
   | 'cycle-risk'
+  /** 派发执行失败（会话创建/投递异常）：任务已回 draft/queued 并记账。 */
+  | 'dispatch-failed'
+  /** dispatch 的 templateId 不在当前启用类型清单（错误带 available 清单）。 */
+  | 'template-unavailable'
   /** HTTP 请求体不合法（路由参数校验）。 */
   | 'bad-request'
 

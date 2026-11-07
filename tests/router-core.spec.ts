@@ -58,18 +58,23 @@ interface HostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHosts() {
+function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error } = {}) {
   const events: HostEvents = { created: [], prompts: [], renames: [] }
   const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
   let count = 0
+  let createAttempts = 0
   const hosts: RouterCoreHosts = {
     sessionController: {
-      async create(opts) {
+      async create(createOpts) {
+        createAttempts += 1
+        const failure = opts.failCreate?.(createAttempts)
+        if (failure !== undefined) throw failure
         count += 1
-        events.created.push({ opts: opts as Record<string, unknown> })
+        events.created.push({ opts: createOpts as Record<string, unknown> })
         return { sessionId: `session-${count}` }
       },
       async prompt(request) {
+        if (opts.failPrompt !== undefined) throw opts.failPrompt
         events.prompts.push({
           requestId: request.requestId,
           sessionId: request.sessionId,
@@ -179,14 +184,14 @@ function fakeMemory() {
 
 async function coreWith(
   records: TaskRecord[] = [],
-  opts: { memory?: RouterMemory | null } = {},
+  opts: { memory?: RouterMemory | null; failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error } = {},
 ) {
   const persistence = new MemoryPersistence()
   persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
   const ledger = new TaskLedger(persistence, () => 1000)
   await ledger.listAll()
   const docs = memoryDocs()
-  const { hosts, events } = fakeHosts()
+  const { hosts, events } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt })
   const ui = fakeUi()
   await ui.load()
   const bridge = new SessionBridge({
@@ -340,6 +345,102 @@ describe('createRouterCore：dispatchTask', () => {
     expect(record?.cwd).toBe(process.cwd())
     expect(record?.projectId).toContain('cwd:')
     expect(ledger.get(result.taskId)?.status).toBe('dispatched')
+  })
+})
+
+/* ────────────────────────── 派发失败语义（v1.1 Task A4） ────────────────────────── */
+
+describe('createRouterCore：派发失败语义（v1.1 A4）', () => {
+  const INPUT = {
+    title: '修登录',
+    goal: '登录不再 500',
+    acceptance: ['回归通过'],
+    role: 'worker' as const,
+    templateId: 'coder',
+  }
+
+  it('建会话失败：任务回 draft、错误落 progress、retryCount+1，不留 cancelled 空壳', async () => {
+    const { core, ledger, ui } = await coreWith([], { failCreate: () => new Error('preset row never started') })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    const record = ledger.get('T-001')
+    expect(record?.status).toBe('draft')
+    expect(record?.retryCount).toBe(1)
+    expect(record?.progress).toContain('preset row never started')
+    expect(record?.sessionId).toBeUndefined()
+    expect(ui.tabs('ws-1')).toEqual([])
+  })
+
+  it('投递失败（会话已建）：session 保留供重试、状态仍 draft、retryCount+1', async () => {
+    const { core, ledger } = await coreWith([], { failPrompt: new Error('prompt rejected by host') })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    const record = ledger.get('T-001')
+    expect(record?.status).toBe('draft')
+    expect(record?.sessionId).toBe('session-1')
+    expect(record?.retryCount).toBe(1)
+    expect(record?.progress).toContain('prompt rejected by host')
+  })
+
+  it('同一任务重试累计：dispatch 失败后经 supplement 重派，3 次失败自动 blocked 并通知', async () => {
+    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
+    // 第 1 次：dispatch_task 失败 → draft、rc=1
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.status).toBe('draft')
+    expect(ledger.get('T-001')?.retryCount).toBe(1)
+    // 第 2 次：supplement_task 重派（任务无会话）→ 仍失败、rc=2、不通知
+    await expect(core.supplementTask('router-s-1', 'T-001', ['改用稳态模板'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.status).toBe('draft')
+    expect(ledger.get('T-001')?.retryCount).toBe(2)
+    expect(events.prompts.some((p) => p.requestId.startsWith('dispatch-blocked'))).toBe(false)
+    // 第 3 次：达上限 → blocked + 通知调用方
+    await expect(core.supplementTask('router-s-1', 'T-001', ['再试一次'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.status).toBe('blocked')
+    expect(ledger.get('T-001')?.retryCount).toBe(3)
+    const notice = events.prompts.find((p) => p.requestId === 'dispatch-blocked-T-001')
+    expect(notice).toBeDefined()
+    expect(notice!.sessionId).toBe('router-s-1')
+    expect(notice!.text).toContain('3')
+  })
+
+  it('封顶后不再重试：blocked 任务的 supplement 只升版不派发，retryCount 停在 3', async () => {
+    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
+    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    await expect(core.supplementTask('router-s-1', 'T-001', ['第一次重试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    await expect(core.supplementTask('router-s-1', 'T-001', ['第二次重试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(ledger.get('T-001')?.status).toBe('blocked')
+    expect(ledger.get('T-001')?.retryCount).toBe(3)
+    expect(events.prompts.filter((p) => p.requestId === 'dispatch-blocked-T-001')).toHaveLength(1)
+    // 封顶后的 supplement：只升版（前两次补充已到 v3，这次到 v4），不再派发
+    const result = await core.supplementTask('router-s-1', 'T-001', ['后续补充'])
+    expect(result.docVersion).toBe(4)
+    expect(ledger.get('T-001')?.retryCount).toBe(3)
+    expect(events.prompts.filter((p) => p.requestId === 'dispatch-blocked-T-001')).toHaveLength(1)
+  })
+
+  it('解锁派发失败：queued 任务记账（rc=1、progress 落错）保持 queued 不留空壳', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' }),
+      task({ id: 'T-010', role: 'worker', status: 'queued', dependsOn: ['T-001'], projectId: 'ws-1', cwd: '/proj', title: '解锁后失败' }),
+    ]
+    const { core, ledger, docs } = await coreWith(records, { failCreate: () => new Error('boom') })
+    await docs.initTask(ledger.get('T-010')!, '# 任务书 T-010')
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '依赖完' })
+    expect(ledger.get('T-010')?.status).toBe('queued')
+    expect(ledger.get('T-010')?.retryCount).toBe(1)
+    expect(ledger.get('T-010')?.progress).toContain('boom')
+    expect(ledger.get('T-001')?.status).toBe('completed')
+  })
+
+  it('未知或已禁用模板抛 template-unavailable，错误带 available 清单', async () => {
+    const { core } = await coreWith()
+    try {
+      await core.dispatchTask('router-s-1', { ...INPUT, templateId: 'nope' })
+      expect.unreachable()
+    } catch (error) {
+      expect((error as LedgerError).code).toBe('template-unavailable')
+      expect((error as { available?: string[] }).available).toEqual(['coder', 'lead'])
+      expect((error as Error).message).toContain('nope')
+      expect((error as Error).message).toContain('coder')
+    }
   })
 })
 

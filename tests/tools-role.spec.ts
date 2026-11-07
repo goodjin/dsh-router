@@ -57,6 +57,11 @@ function ledgerOf(records: TaskRecord[]): CallerLedger {
 
 function coreOf(calls: string[] = []): RouterCore {
   return {
+    /** dispatch_task 描述内嵌的启用类型清单（v1.1 A4；测试断言它出现在描述里）。 */
+    enabledTemplates: () => [
+      { templateId: 'coder', name: '编码', description: '写代码', role: 'worker' as const },
+      { templateId: 'lead', name: '主管', description: '再拆分', role: 'supervisor' as const },
+    ],
     async dispatchTask(caller, input) {
       calls.push(`dispatch:${caller}:${input.title}:${input.role}`)
       return { taskId: 'T-001', docPath: '/tasks/T-001/task.v1.md', sessionId: 'worker-s-1' }
@@ -264,6 +269,23 @@ describe('buildToolDefinitions：薄壳行为', () => {
       expect(def.output.render).toBeTypeOf('function')
       expect(def.execute).toBeTypeOf('function')
     }
+  })
+
+  it('dispatch_task 描述内嵌当前启用类型清单（v1.1 A4：杜绝 general 式幻觉）', () => {
+    const def = buildToolDefinitions(coreOf(), 'router').find((d) => d.name === 'dispatch_task')!
+    expect(def.description).toContain('coder=编码')
+    expect(def.description).toContain('lead=主管')
+    expect(def.description).toContain('不要虚构')
+    // 其他工具的描述不夹带清单
+    const query = buildToolDefinitions(coreOf(), 'router').find((d) => d.name === 'query_tasks')!
+    expect(query.description).not.toContain('coder=编码')
+  })
+
+  it('core 没提供 enabledTemplates 时描述退化为不带清单（不抛）', () => {
+    const bare = { ...coreOf(), enabledTemplates: undefined } as unknown as RouterCore
+    const def = buildToolDefinitions(bare, 'router').find((d) => d.name === 'dispatch_task')!
+    expect(def.description).not.toContain('coder=编码')
+    expect(def.description.length).toBeGreaterThan(0)
   })
 
   it('dispatch_task：参数转交 core.dispatchTask，返回 taskId/docPath/sessionId，render 中文', async () => {

@@ -8,7 +8,7 @@
  */
 
 import type { TaskRecord, TaskStatus } from '../shared/types.ts'
-import type { TaskCard } from '../shared/view-contract.ts'
+import type { TaskCard, WorkerTemplate } from '../shared/view-contract.ts'
 
 /** dispatch_task 的入参（依赖条目允许带版本；版本当前仅供审计，调度按任务 ID）。 */
 export interface DispatchTaskInput {
@@ -58,4 +58,9 @@ export interface RouterCore {
   reportBlocker(callerSessionId: string, taskId: string, reason: string): Promise<{ status: 'blocked' }>
   /** 同步读一个任务（角色校验用；需在核心装载后调用）。 */
   getTask(taskId: string): TaskRecord | undefined
+  /**
+   * 当前启用类型的实时清单（dispatch_task 描述内嵌它、执行时用它校验
+   * templateId；类型变更后经工具重注册刷新描述——v1.1 Task A4）。
+   */
+  enabledTemplates(): WorkerTemplate[]
 }

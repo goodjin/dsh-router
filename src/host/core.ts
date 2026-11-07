@@ -150,6 +150,48 @@ export interface RouterCoreAssembly {
   recoverOrphans(): Promise<string[]>
 }
 
+/**
+ * 派发重试上限（v1.1 规格 §2-4）：同一任务连续派发失败达上限自动 blocked，
+ * 禁止无限重试换模板碰运气。
+ */
+export const DISPATCH_RETRY_CAP = 3
+
+/**
+ * templateId 收紧（v1.1 Task A4）：未知或已禁用的模板直接拒，错误带当前可用
+ * 清单（杜绝 general 式幻觉）。enabledTypes 由调用方传入当前启用子集。
+ */
+export function assertTemplateUsable(templateId: string, enabledTypes: readonly WorkerTemplate[]): void {
+  const known = enabledTypes.find((entry) => entry.templateId === templateId)
+  if (known !== undefined) return
+  const error = new LedgerError(
+    'template-unavailable',
+    `未知或已禁用的 worker 模板: ${templateId}（可用：${enabledTypes.map((entry) => entry.templateId).join('、')}）`,
+  )
+  Object.assign(error, { available: enabledTypes.map((entry) => entry.templateId) })
+  throw error
+}
+
+/** 派发失败的统一处理：记账（progress + retryCount，达上限自动 blocked）并通知 Router。 */
+async function recordDispatchFailure(
+  deps: RouterCoreAssemblyDeps,
+  ledger: TaskLedger,
+  taskId: string,
+  title: string,
+  error: unknown,
+  notifyRouterSession: string | undefined,
+): Promise<TaskRecord> {
+  const message = error instanceof Error ? error.message : String(error)
+  const failed = await ledger.recordDispatchFailure(taskId, `派发失败: ${message}`, { blockAt: DISPATCH_RETRY_CAP })
+  if (failed.status === 'blocked' && notifyRouterSession !== undefined) {
+    await deps.bridge.notify(
+      notifyRouterSession,
+      `dispatch-blocked-${taskId}`,
+      `任务 ${taskId}「${title}」连续 ${failed.retryCount} 次派发失败，已自动受阻（blocked）。请检查模板/环境问题后人工介入；不要继续重试同一模板。最近错误：${message}`,
+    )
+  }
+  return failed
+}
+
 export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssembly {
   const { ledger, bridge, relay, driver, scheduler, ui, hosts, config } = deps
 
@@ -207,11 +249,12 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
   }
 
   const core: RouterCore = {
+    enabledTemplates() {
+      return [...config.templates]
+    },
+
     async dispatchTask(callerSessionId, input) {
-      const template = config.templates.find((entry) => entry.templateId === input.templateId)
-      if (template === undefined) {
-        throw new Error(`未知的 worker 模板: ${input.templateId}（可用：${config.templates.map((t) => t.templateId).join('、')}）`)
-      }
+      assertTemplateUsable(input.templateId, config.templates)
       const callerTask = await taskBySession(callerSessionId)
       const callerRole: RoleKind = callerTask?.role ?? 'router'
       const parentTaskId = input.parentTaskId
@@ -241,13 +284,24 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const docs = deps.docsFor(record.cwd)
       const book = renderTaskBook(record, { materials: input.materials, sourceRef: `router 会话 ${callerSessionId}` })
       const docPath = await docs.initTask(record, book)
-      const { sessionId } = await bridge.dispatchTask(record.id)
-      // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
-      // dispatch_task 成功后给 Router（或主管）会话打 pendingCompaction，其自身
-      // 的派发讨论段在 idle 后被压缩（裁定 5 顺延项的补齐）。
-      driver.onDispatched(callerSessionId)
-      await afterDispatch(record, sessionId, workspace?.id)
-      return { taskId: record.id, docPath, sessionId }
+      try {
+        const { sessionId } = await bridge.dispatchTask(record.id)
+        // 规格 §4「每次成功转交后执行一次上下文整理」对调用者会话同样成立：
+        // dispatch_task 成功后给 Router（或主管）会话打 pendingCompaction，其自身
+        // 的派发讨论段在 idle 后被压缩（裁定 5 顺延项的补齐）。
+        driver.onDispatched(callerSessionId)
+        await afterDispatch(record, sessionId, workspace?.id)
+        return { taskId: record.id, docPath, sessionId }
+      } catch (error) {
+        // 派发失败不留空壳（v1.1 规格 §2-4）：任务回 draft/queued、错误文本写
+        // progress、retryCount+1；达上限自动 blocked 并通知 Router。
+        const failed = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId)
+        await refreshSnapshot()
+        throw new LedgerError(
+          'dispatch-failed',
+          `任务 ${record.id} 派发失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : record.status}）: ${error instanceof Error ? error.message : String(error)}`,
+        )
+      }
     },
 
     async supplementTask(callerSessionId, taskId, additions) {
@@ -263,6 +317,29 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       if (delivered.sessionId !== undefined) {
         driver.onDispatched(delivered.sessionId)
         driver.onDispatched(callerSessionId)
+      } else if (record.sessionId === undefined && (record.status === 'draft' || record.status === 'queued')) {
+        // 任务还没有执行会话（典型：首发派发失败回 draft）——补充即重派同一任务：
+        // retryCount 朝上限累计，达 3 自动 blocked（v1.1 规格 §2-4 的记账口径）。
+        try {
+          const { sessionId } = await bridge.dispatchTask(taskId)
+          if (sessionId !== undefined) {
+            driver.onDispatched(sessionId)
+          }
+          driver.onDispatched(callerSessionId)
+          const refreshed = ledger.get(taskId)!
+          await afterDispatch(
+            refreshed,
+            sessionId,
+            refreshed.projectId.startsWith('cwd:') ? undefined : refreshed.projectId,
+          )
+        } catch (error) {
+          const failed = await recordDispatchFailure(deps, ledger, taskId, record.title, error, callerSessionId)
+          await refreshSnapshot()
+          throw new LedgerError(
+            'dispatch-failed',
+            `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : record.status}）: ${error instanceof Error ? error.message : String(error)}`,
+          )
+        }
       }
       await refreshSnapshot()
       return { docVersion: newVersion }
@@ -361,8 +438,11 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
             const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
             await afterDispatch(nextTask, delivered.sessionId, workspace)
           } catch (error) {
-            // 单个解锁任务的派发失败不拖垮完成本身：任务保持 queued，留待下次派发
-            deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败，保持排队: ${error instanceof Error ? error.message : String(error)}`)
+            // 单个解锁任务的派发失败不拖垮完成本身：失败记账（retryCount 累计、
+            // 达上限自动 blocked 并通知 Router），任务保持 queued 等下次解锁重试。
+            await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId)
+            await refreshSnapshot()
+            deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（retryCount=${ledger.get(nextTask.id)?.retryCount}）: ${error instanceof Error ? error.message : String(error)}`)
           }
         }
       }

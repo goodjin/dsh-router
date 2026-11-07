@@ -197,6 +197,7 @@ export class TaskLedger {
       dependsOn,
       status: depsSatisfied ? 'draft' : 'queued',
       docVersion: 1,
+      retryCount: 0,
       acceptancePolicy: input.acceptancePolicy ?? 'auto',
       createdAt: now,
       updatedAt: now,
@@ -356,6 +357,25 @@ export class TaskLedger {
       task.status = 'blocked'
       task.progress = reason
       task.updatedAt = this.clock()
+      return task
+    })
+  }
+
+  /**
+   * 派发失败记账（v1.1 规格 §2-4）：retryCount+1、错误文本落 progress，任务保持
+   * 原状态（draft/queued —— 不产生 cancelled + 无会话残留）；累计达 blockAt
+   * （默认 3）自动 → blocked 并返回封顶后的记录，由调用方通知 Router。
+   */
+  async recordDispatchFailure(id: string, reason: string, opts?: { blockAt?: number }): Promise<TaskRecord> {
+    return this.commit(() => {
+      const task = this.mustGet(id)
+      task.retryCount = (task.retryCount ?? 0) + 1
+      task.progress = reason
+      task.updatedAt = this.clock()
+      if (task.retryCount >= (opts?.blockAt ?? 3)) {
+        assertTransition(task.status, 'blocked')
+        task.status = 'blocked'
+      }
       return task
     })
   }

@@ -12,8 +12,9 @@ export { LedgerError } from './errors.ts'
 
 /** 合法迁移表：from → 允许的 to 闭包集合（照计划逐条列出）。 */
 const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
-  draft: ['queued', 'cancelled'],
-  queued: ['dispatched', 'cancelled'],
+  // draft/queued → blocked：派发失败达上限的自动封顶（v1.1 规格 §2-4）。
+  draft: ['queued', 'blocked', 'cancelled'],
+  queued: ['dispatched', 'blocked', 'cancelled'],
   dispatched: ['running', 'blocked', 'failed', 'cancelled'],
   running: ['waiting-user', 'blocked', 'paused', 'review-pending', 'completed', 'failed', 'cancelled'],
   'waiting-user': ['running', 'blocked', 'failed', 'cancelled'],

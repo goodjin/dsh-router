@@ -24,6 +24,7 @@ export function task(patch: Partial<TaskRecord> = {}): TaskRecord {
     sessionId: patch.sessionId,
     status: patch.status ?? 'queued',
     progress: patch.progress,
+    retryCount: patch.retryCount,
     docVersion: patch.docVersion ?? 1,
     acceptancePolicy: patch.acceptancePolicy ?? 'auto',
     createdAt: patch.createdAt ?? now,

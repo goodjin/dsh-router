@@ -18,6 +18,7 @@
  */
 
 import type { RoleKind, TaskRecord, TaskStatus } from '../../shared/types.ts'
+import type { WorkerTemplate } from '../../shared/view-contract.ts'
 import { LedgerError } from '../ledger/errors.ts'
 import type {
   CompleteTaskInput,
@@ -473,16 +474,36 @@ const TOOL_SPECS: Record<
   },
 }
 
+/** 启用类型清单 → dispatch_task 描述里的清单段（v1.1 Task A4）。 */
+export function dispatchTemplateSection(templates: readonly WorkerTemplate[]): string {
+  if (templates.length === 0) return '当前没有已启用的专业类型，不要派发，先告知调用方配置类型。'
+  const list = templates.map((entry) => `${entry.templateId}=${entry.name}（${entry.description}）`).join('、')
+  return `当前可用的专业类型（templateId）只有这些，必须从清单里选，不要虚构（如 general）: ${list}。`
+}
+
 /**
  * 按角色产出工具定义子集（只含该角色白名单内的工具；每个 execute 先跑
  * assertCallerRole 再转交核心——白名单在注册层已裁剪，这里是纵深防御）。
+ * opts.templates 缺省时读 core.enabledTemplates()（实时清单；类型变更后由
+ * 调用方重建工具定义刷新描述——重注册机制在 Part C 接线）。
  */
-export function buildToolDefinitions(core: RouterCore, role: RoleKind): ToolDefinition[] {
+export function buildToolDefinitions(
+  core: RouterCore,
+  role: RoleKind,
+  opts?: { templates?: readonly WorkerTemplate[] },
+): ToolDefinition[] {
+  const liveTemplates = (): readonly WorkerTemplate[] => {
+    if (opts?.templates !== undefined) return opts.templates
+    const face = core as { enabledTemplates?: () => readonly WorkerTemplate[] }
+    return typeof face.enabledTemplates === 'function' ? face.enabledTemplates() : []
+  }
   return toolsForRole(role).map((name) => {
     const spec = TOOL_SPECS[name]
+    const description =
+      name === 'dispatch_task' ? `${spec.description} ${dispatchTemplateSection(liveTemplates())}` : spec.description
     return {
       name,
-      description: spec.description,
+      description,
       parameters: spec.parameters,
       output: {
         schema: spec.outputSchema,
