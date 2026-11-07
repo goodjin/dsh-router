@@ -15,6 +15,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 
 import { LedgerError, type LedgerErrorCode } from './ledger/errors.ts'
+import type { TaskStatus } from '../shared/types.ts'
+import type { BreakerVisibility } from './guard/breaker.ts'
+import type { EmergencyPauseReport } from './guard/emergency.ts'
 import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
@@ -42,6 +45,21 @@ export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
 /** 会话级 Router 系统提示词（v1.1 C5，规格 §7）：GET 读 / PUT 写（空串=清除回落默认）。 */
 export const ROUTER_PROMPT_PATH = '/router/prompt'
+/** 用户发起的任务控制（v1.2 Task B4）：镜像 control_task + 用户专属 redispatch。 */
+export const ROUTER_TASKS_CONTROL_PATH = '/router/tasks/control'
+/** 用户解除派发冻结（v1.2 Task B4；冻结的解除通道）。 */
+export const ROUTER_BREAKER_UNFREEZE_PATH = '/router/breaker/unfreeze'
+/** 紧急暂停（v1.2 Task B4）：冻结 + 逐会话中断 + 异常通知。 */
+export const ROUTER_EMERGENCY_PAUSE_PATH = '/router/emergency-pause'
+
+/** 用户侧任务控制动作（前三个镜像 control_task 工具；redispatch 仅用户通道）。 */
+export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'redispatch'
+
+/** 解除冻结的报告：冻结前/后的可见投影（lossless，reason/frozenAt 只在冻结时出现）。 */
+export interface BreakerUnfreezeReport {
+  before: BreakerVisibility
+  after: BreakerVisibility
+}
 
 /** 路由需要的最小宿主面（webServer/connection 可缺席：缺席即不挂路由）。 */
 export interface RouterRoutesContext {
@@ -78,6 +96,16 @@ export interface RouterRoutesDeps {
   getSessionPrompt(sessionId: string): Promise<SessionPromptResponse>
   /** 写会话覆盖（prompt 空串 = 清除回落默认）；写后下一轮 system prompt 组装即生效。 */
   saveSessionPrompt(sessionId: string, prompt: string): Promise<void>
+  /**
+   * 用户发起的任务控制（v1.2 B4）：pause/resume/cancel 镜像 control_task 工具
+   * 语义（尊重既有状态机），redispatch = 补充「用户重派」+ 重派（受熔断约束，
+   * 冻结时以 dispatch-frozen 拒绝并提示先解除）。用户动作绕过模型侧预算。
+   */
+  controlTask(taskId: string, action: TaskControlAction): Promise<{ status: TaskStatus }>
+  /** 用户解除派发冻结（v1.2 B4）：返回冻结前/后的可见投影。 */
+  unfreezeBreaker(): Promise<BreakerUnfreezeReport>
+  /** 紧急暂停（v1.2 B4）：冻结 + 逐会话中断 + 异常通知；逐项结果失败项如实列出。 */
+  emergencyPause(): Promise<EmergencyPauseReport>
 }
 
 /** 域错误码 → HTTP 状态。 */
@@ -102,6 +130,11 @@ function errorStatus(error: unknown): number {
     case 'not-task-owner':
     case 'caller-unresolved':
       return 403
+    /** 派发冻结/预算类拒绝都是「状态冲突，先解除再操作」→ 409。 */
+    case 'dispatch-frozen':
+    case 'supervisor-failure-budget':
+    case 'per-turn-task-budget':
+      return 409
     case 'unknown-tool':
     case 'bad-request':
     case 'invalid-input':
@@ -299,6 +332,31 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     }
     await deps.saveSessionPrompt(body['sessionId'], body['prompt'])
     return { status: 200, body: JSON.stringify({ ok: true }) }
+  })
+
+  /* ── 用户控制与紧急暂停（v1.2 Task B4）：逻辑在 deps（根服务组装），此处只折叠 HTTP ── */
+
+  handle(ROUTER_TASKS_CONTROL_PATH, ['POST'], async (request) => {
+    const body = JSON.parse(await readBody(request)) as { taskId?: unknown; action?: unknown }
+    if (typeof body.taskId !== 'string' || body.taskId === '') {
+      throw new LedgerError('bad-request', 'taskId 必填')
+    }
+    const action = body.action
+    if (action !== 'pause' && action !== 'resume' && action !== 'cancel' && action !== 'redispatch') {
+      throw new LedgerError('bad-request', "action 必须是 'pause' | 'resume' | 'cancel' | 'redispatch' 之一")
+    }
+    const result = await deps.controlTask(body.taskId, action)
+    return { status: 200, body: JSON.stringify(result) }
+  })
+
+  handle(ROUTER_BREAKER_UNFREEZE_PATH, ['POST'], async () => {
+    const report = await deps.unfreezeBreaker()
+    return { status: 200, body: JSON.stringify(report) }
+  })
+
+  handle(ROUTER_EMERGENCY_PAUSE_PATH, ['POST'], async () => {
+    const report = await deps.emergencyPause()
+    return { status: 200, body: JSON.stringify(report) }
   })
 }
 

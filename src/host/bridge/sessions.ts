@@ -65,12 +65,44 @@ export interface SessionBridgeDeps {
   forTemplate?(templateId: string, role: 'supervisor' | 'worker'): Promise<string | undefined>
   /** worker 类型存储的最小面（默认模型钉定用；缺席 = 不钉）。 */
   types?: { get(templateId: string): Promise<WorkerTypeRecord | undefined> }
+  /**
+   * agents 服务的最小中断面（v1.2 B4 紧急暂停，r8 §5 推荐形态：
+   * agents.get(id)?.cancel({kind:'hook',reason},{keepInbox:true})）。缺席 =
+   * 会话中断如实报 failed（不冒充受理），冻结照常生效。
+   */
+  interruptFace?: AgentInterruptFace
   /** 钉定失败等非致命问题的日志口（缺席静默）。 */
   logger?: { warn(message: string): void }
   /** 执行指引文本（prompts/worker-instructions 的产物）。 */
   workerInstructions(): string
   /** 投递用的中止信号（缺席时每次调用自造 2 分钟超时）。 */
   signal?: AbortSignal
+}
+
+/**
+ * agents 服务的最小中断面（r8 §2/§5）：get 返回 live agent（冷会话 undefined，
+ * 天然 no-op）；cancel 幂等不抛错、原因留痕 turn/end、keepInbox 保住排队消息。
+ * 注意边界（r8 §3）：只停本会话活动轮次，不停它派生的 jobs/子代理会话。
+ */
+export interface AgentInterruptFace {
+  get(sessionId: string):
+    | {
+        cancel?(
+          cause: { kind: 'hook'; reason: string },
+          options?: { keepInbox?: boolean },
+        ): unknown
+      }
+    | undefined
+}
+
+/** 紧急暂停的取消原因（留痕 turn/end；auto-resume 对 hook cause 永不自动续跑）。 */
+export const EMERGENCY_STOP_REASON = 'emergency-stop'
+
+/** 单会话中断结果（逐项如实：accepted 或 failed 带 detail）。 */
+export interface InterruptOutcome {
+  sessionId: string
+  outcome: 'accepted' | 'failed'
+  detail?: string
 }
 
 /** 宿主 prompt 的 Remote 包装第一行就 throwIfAborted（r2 §2.1），必须有信号。 */
@@ -84,6 +116,7 @@ export class SessionBridge {
   private presets: SessionBridgeDeps['presets']
   private forTemplate: SessionBridgeDeps['forTemplate']
   private types: SessionBridgeDeps['types']
+  private interruptFace: SessionBridgeDeps['interruptFace']
   private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
   private signal: AbortSignal | undefined
@@ -98,6 +131,7 @@ export class SessionBridge {
     this.presets = deps.presets
     this.forTemplate = deps.forTemplate
     this.types = deps.types
+    this.interruptFace = deps.interruptFace
     this.logger = deps.logger
     this.workerInstructions = deps.workerInstructions
     this.signal = deps.signal
@@ -257,6 +291,43 @@ export class SessionBridge {
     mode: 'queue' | 'steer' = 'steer',
   ): Promise<void> {
     await this.host.prompt({ requestId, sessionId, mode, content: [{ type: 'text', text }] }, this.hostSignal())
+  }
+
+  /**
+   * 紧急暂停的逐会话中断（v1.2 B4，r8 §5 推荐形态）：agents.get(id)?.cancel(
+   * {kind:'hook',reason:'emergency-stop'},{keepInbox:true})——幂等、原因留痕
+   * turn/end、排队消息保留（keepInbox）；空闲会话静默接受，冷会话天然 no-op。
+   * 每会话二值结果聚合：单个失败不拖垮批量、如实上报 detail（Review Focus 5）；
+   * 中断面未接线时全部如实 failed，不冒充受理。
+   */
+  async interruptTaskSessions(sessionIds: readonly string[]): Promise<InterruptOutcome[]> {
+    const outcomes: InterruptOutcome[] = []
+    for (const sessionId of sessionIds) {
+      if (this.interruptFace === undefined) {
+        outcomes.push({ sessionId, outcome: 'failed', detail: 'agents 中断面未接线（interruptFace 缺席），无法中断' })
+        continue
+      }
+      try {
+        const agent = this.interruptFace.get(sessionId)
+        if (agent === undefined) {
+          outcomes.push({ sessionId, outcome: 'accepted', detail: '冷会话（无 live agent）：中断为 no-op' })
+          continue
+        }
+        if (typeof agent.cancel !== 'function') {
+          outcomes.push({ sessionId, outcome: 'failed', detail: 'agents 中断面缺 cancel 方法（宿主版本不支持）' })
+          continue
+        }
+        await agent.cancel({ kind: 'hook', reason: EMERGENCY_STOP_REASON }, { keepInbox: true })
+        outcomes.push({ sessionId, outcome: 'accepted' })
+      } catch (error) {
+        outcomes.push({
+          sessionId,
+          outcome: 'failed',
+          detail: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    return outcomes
   }
 
   /** 订阅 api-session/status：记录运行标志（标签条 running 字段）并转发监听者。 */
