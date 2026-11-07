@@ -36,7 +36,7 @@ export interface SessionObservation {
 /** 写前意图账的落盘形状（r9 §5.2：先落账再投递，重试沿用同 requestId）。 */
 interface ClosureIntentFile {
   schemaVersion: 1
-  intents: { taskId: string; seq: number; text: string; deliveredAt?: number }[]
+  intents: { taskId: string; seq: number; requestId: string; text: string; deliveredAt?: number }[]
 }
 
 export interface ClosureIntentStoreDeps {
@@ -98,10 +98,11 @@ export class ClosureIntentStore {
   async prepare(taskId: string, text: string, now: number): Promise<ClosureIntent> {
     const file = await this.ensureLoaded()
     const pending = file.intents.find((intent) => intent.taskId === taskId && intent.text === text && intent.deliveredAt === undefined)
-    if (pending !== undefined) return { seq: pending.seq, requestId: `closure-${taskId}-${pending.seq}` }
+    if (pending !== undefined) return { seq: pending.seq, requestId: pending.requestId }
     const maxSeq = file.intents.reduce((acc, intent) => (intent.taskId === taskId && intent.seq > acc ? intent.seq : acc), 0)
     const seq = maxSeq + 1
-    file.intents.push({ taskId, seq, text })
+    const requestId = `closure-${taskId}-${seq}`
+    file.intents.push({ taskId, seq, requestId, text })
     await this.save()
     return { seq, requestId: `closure-${taskId}-${seq}` }
   }
@@ -396,6 +397,9 @@ export class OutcomeAdjudicator {
   private async judge(record: TaskRecord, events: readonly unknown[]): Promise<void> {
     const taskId = record.id
     const sessionId = record.sessionId as string
+    // 入口同步置 judged：并发触发（去抖与墙钟同至）在异步工作开始前就被挡下
+    if (this.cycles.get(taskId)?.phase === 'judged') return
+    this.cycles.set(taskId, { phase: 'judged' })
     try {
       const { judgeOutcome } = await import('../memory/adapter.ts')
       const judgement = await judgeOutcome(sessionId, events, this.deps.llm)

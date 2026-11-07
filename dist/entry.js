@@ -46,6 +46,8 @@ import { BUILTIN_GENERAL_ID, BUILTIN_TEMPLATES, RouterDefaultsStore, WorkerTypeS
 import { dynamicPresetId } from "./host/presets/dynamic.js";
 import { DynamicPresetEngine } from "./host/presets/lifecycle.js";
 import { MemoryDocStore } from "./host/memory/store.js";
+import { ClosureIntentStore, OutcomeAdjudicator } from "./host/guard/adjudicator.js";
+import { NotificationStore } from "./host/guard/notifications.js";
 import { search as searchMemory } from "./host/memory/retrieval.js";
 import { BackgroundSummarizer, createCompletedTaskRecorder, createSummaryLlm, maxSurfaceSeq, summarizeSessionViaQuery, } from "./host/memory/adapter.js";
 import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from "./host/guard/breaker.js";
@@ -102,6 +104,8 @@ function resolveRootConfig(raw) {
         summarizationProvider: stringOr(source.summarizationProvider, ''),
         summarizationModel: stringOr(source.summarizationModel, ''),
         questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
+        firstResponseTimeoutMs: nonNegative(source.firstResponseTimeoutMs, 600_000),
+        adjudicationWallClockMs: nonNegative(source.adjudicationWallClockMs, 1_800_000),
         breakerWindowMs: nonNegative(source.breakerWindowMs, DEFAULT_BREAKER_WINDOW_MS),
         breakerInfraThreshold: nonNegative(source.breakerInfraThreshold, DEFAULT_INFRA_THRESHOLD),
         breakerCreationThreshold: nonNegative(source.breakerCreationThreshold, DEFAULT_CREATION_THRESHOLD),
@@ -269,10 +273,13 @@ export function apply(ctx, rawConfig) {
             ctx.on('api-session/status', (sessionId, running) => callback(String(sessionId), Boolean(running)));
         },
     };
+    // v1.2 B3：onDelivered 晚绑判定器（桥先于判定器建成）
+    const adjudicatorRef = {};
     const bridge = new SessionBridge({
         ledger,
         docsFor,
         workspaces: workspaceRegistry,
+        onDelivered: (taskId) => { void adjudicatorRef.current?.onDispatched(taskId); },
         host: {
             create: async (opts, signal) => (await ctx.sessionController.create(opts, signal)).sessionId,
             prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
@@ -335,6 +342,8 @@ export function apply(ctx, rawConfig) {
     // ctx.llm.stream（purpose:'compaction'）。路由对解析链：配置对 → 活任务
     // 会话最近一次路由头（compaction-basic routedTarget 同款）→ 缺失（触发方 warn）。
     const memoryStore = new MemoryDocStore(join(config.dataDir, 'memory'), fs);
+    const closureIntents = new ClosureIntentStore({ fs, path: join(config.dataDir, 'closure-intents.json'), logger: { warn: (m) => log.warn(m) } });
+    const notifications = new NotificationStore({ fs, path: join(config.dataDir, 'notifications.json'), newId: () => randomUUID(), logger: { warn: (m) => log.warn(m) } });
     const memoryQuery = {
         observeSession: (sessionId) => ctx.sessionQuery.observeSession(sessionId),
     };
@@ -450,6 +459,7 @@ export function apply(ctx, rawConfig) {
         now: () => Date.now(),
     });
     const assembled = createRouterCore({
+        notifications,
         ledger,
         docsFor,
         bridge,
@@ -491,6 +501,47 @@ export function apply(ctx, rawConfig) {
     });
     // 会话空闲：压缩驱动（pending 只由我方投递打标；idle 且无排队消息才动作）
     // + 记忆增量摘要（worker/主管会话后台跑，同会话同增量位只跑一次）。
+    // v1.2 B3：结果判定器（事件驱动两级 + 兜底定时器；规格 §4）
+    const adjudicator = new OutcomeAdjudicator({
+        ledger,
+        observeSession: async (sessionId, options) => {
+            void options;
+            const observation = await ctx.sessionQuery.observeSession(sessionId);
+            try {
+                return { events: observation.events ?? [] };
+            }
+            finally {
+                observation.dispose?.();
+            }
+        },
+        prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)),
+        sessionState: (sessionId) => ctx.sessionController.state?.(sessionId),
+        agentsGet: (sessionId) => ctx.agents.get(sessionId),
+        llm: summaryLlm,
+        core: {
+            completeTask: (caller, taskId, input) => assembled.core.completeTask(caller, taskId, input),
+            reportBlocker: (caller, taskId, reason) => assembled.core.reportBlocker(caller, taskId, reason),
+        },
+        intents: closureIntents,
+        recordIncident: (entry) => {
+            void memoryStore.appendSummary('project', `任务 ${entry.taskId}`, {
+                sourceRefs: [`task:${entry.taskId}`],
+                kind: 'verified-fact',
+                text: entry.text,
+            }).catch((error) => {
+                log.warn(`事故记忆写入失败（${entry.taskId}）: ${error instanceof Error ? error.message : String(error)}`);
+            });
+        },
+        now: () => Date.now(),
+        schedule: (delayMs, fn) => {
+            const timer = setTimeout(() => { void fn(); }, delayMs);
+            return () => clearTimeout(timer);
+        },
+        ...(config.firstResponseTimeoutMs !== undefined ? { firstResponseTimeoutMs: config.firstResponseTimeoutMs } : {}),
+        ...(config.adjudicationWallClockMs !== undefined ? { adjudicationWallClockMs: config.adjudicationWallClockMs } : {}),
+        logger: { warn: (m) => log.warn(m) },
+    });
+    adjudicatorRef.current = adjudicator;
     bridge.watchStatus();
     // 轮次边界（v1.2 规格 §3）：running→true 即新轮——预算清零重计（ask_user 的
     // 回答开启新轮，自然重计）。
@@ -511,6 +562,14 @@ export function apply(ctx, rawConfig) {
             summarizer.onIdle(sessionId);
         })();
     });
+    // v1.2 B3：轮沿喂判定器（去抖在判定器内）
+    bridge.onStatusChange((sessionId, running) => {
+        if (running)
+            adjudicator.onTurnStart(sessionId);
+        else
+            adjudicator.onTurnEnd(sessionId);
+    });
+    void adjudicator.syncWatched();
     // 问答瀑布：全局监听收所有会话；prepend 抢在客户端兜底 UI 之前认领 worker 提问
     //（答案走 Router 界面浮窗，见规格 §3.3）。
     ctx.on('user-questions/request', (async (request, next) => {
@@ -620,6 +679,7 @@ export function apply(ctx, rawConfig) {
                 else
                     await sessionPrompts.set(sessionId, prompt);
             },
+            ackNotification: (cardId) => notifications.ack(cardId),
         });
     });
     function workerInstructionsText() {

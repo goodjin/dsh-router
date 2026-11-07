@@ -69,6 +69,8 @@ export interface SessionBridgeDeps {
   logger?: { warn(message: string): void }
   /** 执行指引文本（prompts/worker-instructions 的产物）。 */
   workerInstructions(): string
+  /** v1.2 B3：投递成功即回调（判定器武装定时器/重置周期）。 */
+  onDelivered?(taskId: string, sessionId: string): void
   /** 投递用的中止信号（缺席时每次调用自造 2 分钟超时）。 */
   signal?: AbortSignal
 }
@@ -86,6 +88,7 @@ export class SessionBridge {
   private types: SessionBridgeDeps['types']
   private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
+  private onDelivered: SessionBridgeDeps['onDelivered']
   private signal: AbortSignal | undefined
   private running = new Map<string, boolean>()
   private statusListeners: ((sessionId: string, running: boolean) => void)[] = []
@@ -100,6 +103,7 @@ export class SessionBridge {
     this.types = deps.types
     this.logger = deps.logger
     this.workerInstructions = deps.workerInstructions
+    this.onDelivered = deps.onDelivered
     this.signal = deps.signal
   }
 
@@ -210,6 +214,7 @@ export class SessionBridge {
     if (record.status === 'draft' || record.status === 'queued') {
       await this.ledger.transition(taskId, 'dispatched')
     }
+    this.onDelivered?.(taskId, sessionId)
     return { sessionId }
   }
 
@@ -234,6 +239,7 @@ export class SessionBridge {
         this.hostSignal(),
       ),
     )
+    this.onDelivered?.(taskId, existingSessionId)
     return { sessionId: existingSessionId }
   }
 

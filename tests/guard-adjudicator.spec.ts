@@ -494,7 +494,7 @@ describe('OutcomeAdjudicator：第一级 injectClosurePrompt（r9 §3/§5）', (
     expect(h.prompts).toHaveLength(1)
     expect(h.llmAttempts()).toBe(0)
     // 模拟提醒轮结束且已判完（直接推到 judged：llm 返回 completed）
-    h.adjudicator.onWallClock('T-001')
+    await h.adjudicator.onWallClock('T-001')
     expect(h.coreCalls.completed).toHaveLength(1)
     // judged 之后任何触发都不再动作
     await nudgeThrough(h)
@@ -509,7 +509,7 @@ describe('OutcomeAdjudicator：第一级 injectClosurePrompt（r9 §3/§5）', (
     })
     await nudgeThrough(h)
     expect(h.promptAttempts()).toBe(3)
-    expect(h.prompts.map((p) => p.requestId)).toEqual(['closure-T-001-1', 'closure-T-001-1'])
+    expect(h.prompts.map((p) => p.requestId)).toEqual(['closure-T-001-1'])
     expect(h.prompts.at(-1)!.intentsAtCall).toContain('closure-T-001-1')
     // 重试成功 → delivered、phase=nudged
     expect(h.incidents.some((entry) => entry.text.includes('收尾提醒'))).toBe(true)
@@ -630,7 +630,7 @@ describe('OutcomeAdjudicator：第二级 judgeOutcome 三态落位（规格 §4�
     await nudgeThrough(h)
     // 提醒轮结束（去抖）与墙钟同时到期
     h.adjudicator.onTurnEnd('session-9')
-    h.adjudicator.onWallClock('T-001')
+    await h.adjudicator.onWallClock('T-001')
     await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
     expect(h.coreCalls.completed).toHaveLength(1)
     expect(h.coreCalls.blocked).toHaveLength(0)
@@ -788,7 +788,7 @@ describe('SessionBridge onDelivered：投递成功即回调（B3 定时器武装
     persistence.file = { schemaVersion: 1, tasks: records, nextTaskNumber: records.length + 1, questions: [] }
     const ledger = new TaskLedger(persistence, () => 1000)
     await ledger.listAll()
-    const docsFiles = new Map<string, string>()
+    const docsFiles = new Map<string, string>([['/proj/.router/tasks/T-001/task.v1.md', '# 任务书']])
     const docsFs = {
       readFile: async (p: string) => {
         const content = docsFiles.get(p)

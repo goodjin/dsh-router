@@ -28,6 +28,8 @@ export type LedgerErrorCode =
   | 'already-answered'
   /** 问答桥：等待中的问题被中止信号取消。 */
   | 'question-cancelled'
+  /** 通知卡：卡 ID 不存在（HTTP 404，v1.2 B3）。 */
+  | 'card-not-found'
   /** 调度派发被拒：递归深度超限。 */
   | 'depth-exceeded'
   /** 调度派发被拒：依赖命中祖先链（环风险）。 */

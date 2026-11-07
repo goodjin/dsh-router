@@ -38,6 +38,8 @@ export interface CompleteTaskInput {
   deliverables?: string[]
   acceptanceEvidence?: string
   leftovers?: string[]
+  /** v1.2 B3：system-judged = 判定器代交付。 */
+  deliveryOrigin?: 'worker' | 'system-judged'
 }
 
 /** worker 类型创建入参（v1.1 C2；systemPrompt 缺省时由存储按角色补默认提示词）。 */

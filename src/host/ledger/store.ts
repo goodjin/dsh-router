@@ -55,6 +55,7 @@ export interface TaskResultInput {
   deliverables?: string[]
   acceptanceEvidence?: string
   openIssues?: string[]
+  deliveryOrigin?: 'worker' | 'system-judged'
 }
 
 /** ID 格式：T-%03d，项目内单调。 */
@@ -286,6 +287,7 @@ export class TaskLedger {
         deliverables: input.deliverables,
         acceptanceEvidence: input.acceptanceEvidence,
         openIssues: input.openIssues,
+        ...(input.deliveryOrigin !== undefined ? { deliveryOrigin: input.deliveryOrigin } : {}),
         completedAt: this.clock(),
       }
       task.result = result

@@ -14,6 +14,7 @@ import { CompactionDriver, type CompactionDeps } from '../../src/host/context/co
 import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../../src/host/bridge/tabs.ts'
 import { CircuitBreaker } from '../../src/host/guard/breaker.ts'
 import { DispatchBudgets } from '../../src/host/guard/budgets.ts'
+import type { NotificationSink } from '../../src/host/guard/notifications.ts'
 import { createRouterCore, type RouterCoreAssemblyDeps, type RouterCoreHosts } from '../../src/host/core.ts'
 import { makeMemFs, type MemFs } from './mem-fs.ts'
 import type { FsAdapter } from '../../src/shared/fs-adapter.ts'
@@ -159,6 +160,8 @@ function fakeUi(): UiStateStore {
 }
 
 export interface GuardCoreOptions {
+  /** 注入通知 sink（v1.2 B3；缺省 = 无通知）。 */
+  notifications?: NotificationSink
   records?: TaskRecord[]
   failCreate?: (attempt: number) => Error | undefined
   failPrompt?: Error | ((attempt: number) => Error | undefined)
@@ -214,6 +217,7 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
     },
     breaker,
     budgets,
+    notifications: opts.notifications,
     newId: () => `q-${Math.random()}`,
     signal: new AbortController().signal,
     isRunning: () => false,

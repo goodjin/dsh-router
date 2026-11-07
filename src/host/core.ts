@@ -30,6 +30,7 @@ import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../
 import type { CircuitBreaker, BreakerVisibility } from './guard/breaker.ts'
 import type { DispatchBudgets, BudgetSnapshot } from './guard/budgets.ts'
 import { classifyDispatchFailure } from './guard/classify.ts'
+import { anomalyActions, completionActions, type NotificationSink } from './guard/notifications.ts'
 import type {
   AskUserQuestionAnswerItem,
   QuestionCard,
@@ -136,6 +137,8 @@ export interface RouterCoreAssemblyDeps {
   breaker?: CircuitBreaker
   /** 派发预算（v1.2 Task B2；缺席 = 不限每轮任务/提问、无主管失败预算）。 */
   budgets?: DispatchBudgets
+  /** v1.2 B3：统一通知卡（完成/异常）；缺省不发电（测试与降级形态）。 */
+  notifications?: NotificationSink
   /** 熔断事件记账时钟（缺省 Date.now）。 */
   now?: () => number
 }
@@ -227,6 +230,15 @@ async function recordDispatchFailure(
   await deps.breaker?.recordFailure({ taskId, at: (deps.now ?? (() => Date.now()))(), class: verdict.class })
   const message = error instanceof Error ? error.message : String(error)
   const failed = await ledger.recordDispatchFailure(taskId, `派发失败: ${message}`, { blockAt: DISPATCH_RETRY_CAP })
+  if (failed.status === 'blocked') {
+    await deps.notifications?.push({
+      kind: 'anomaly',
+      taskId,
+      title,
+      summary: `连续 ${failed.retryCount} 次派发失败，任务已自动阻塞：${message}`,
+      actions: anomalyActions(),
+    })
+  }
   if (failed.status === 'blocked' && notifyRouterSession !== undefined) {
     await deps.bridge.notify(
       notifyRouterSession,
@@ -598,6 +610,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         deliverables: input.deliverables,
         acceptanceEvidence: input.acceptanceEvidence,
         openIssues: input.leftovers,
+        ...(input.deliveryOrigin !== undefined ? { deliveryOrigin: input.deliveryOrigin } : {}),
       })
       if (completed.result !== undefined) {
         await deps.docsFor(record.cwd).writeResult(taskId, completed.result)
@@ -610,6 +623,14 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         // 首次完成（幂等重提不重复广播）：熔断创建基准清除（v1.2 B1）+ 记忆触发
         // + 通知上级 + 解锁依赖自动派发
         await deps.breaker?.recordCompletion(taskId, now())
+        await deps.notifications?.push({
+          kind: 'completion',
+          taskId,
+          title: record.title,
+          summary: input.summary,
+          actions: completionActions(),
+          deliveryOrigin: input.deliveryOrigin ?? 'worker',
+        })
         deps.memory?.onTaskCompleted({
           taskId,
           title: record.title,
@@ -649,7 +670,15 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
 
     async reportBlocker(callerSessionId, taskId, reason) {
       mustOwn(callerSessionId, taskId)
+      const blocked = ledger.get(taskId)
       await ledger.reportBlocker(taskId, reason)
+      await deps.notifications?.push({
+        kind: 'anomaly',
+        taskId,
+        title: blocked?.title ?? taskId,
+        summary: reason,
+        actions: anomalyActions(),
+      })
       await refreshSnapshot()
       return { status: 'blocked' as const }
     },
@@ -666,6 +695,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const bySession = new Map(records.filter((r) => r.sessionId !== undefined).map((r) => [r.sessionId as string, r]))
       const byId = new Map(records.map((record) => [record.id, record]))
       const tabRows = workspaceId !== undefined ? ui.tabs(workspaceId) : ui.allTabs()
+      const notificationCards = await deps.notifications?.pending() ?? []
       return {
         routerSessions: ui.routerSessions(),
         tasks: records.map((record) => toCard(record, counts[record.id] ?? 0)),
@@ -688,6 +718,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         types: deps.types !== undefined
           ? deps.types.summaries()
           : config.templates.map((template) => ({ ...template, enabled: true, origin: 'user' as const })),
+        ...(notificationCards.length > 0 ? { notifications: notificationCards } : {}),
       }
     },
 

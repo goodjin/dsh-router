@@ -271,6 +271,7 @@ describe('worker 类型路由（C3）', () => {
       '/router/worker-types',
       '/router/worker-types/update',
       '/router/worker-types/enabled',
+      '/router/notifications/ack',
       '/router/defaults',
       '/router/prompt',
     ])

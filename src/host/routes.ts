@@ -39,6 +39,7 @@ export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
 export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 /** Router 默认值（规格 §6）：GET 读 / POST 写。 */
+export const ROUTER_NOTIFICATIONS_ACK_PATH = '/router/notifications/ack'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
 /** 会话级 Router 系统提示词（v1.1 C5，规格 §7）：GET 读 / PUT 写（空串=清除回落默认）。 */
 export const ROUTER_PROMPT_PATH = '/router/prompt'
@@ -74,6 +75,8 @@ export interface RouterRoutesDeps {
   removeWorkerType(templateId: string): Promise<void>
   getDefaults(): Promise<RouterDefaults>
   saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
+  /** 通知卡确认（v1.2 B3/C1）：消费后清除展示。 */
+  ackNotification(cardId: string): Promise<boolean>
   /** 会话级系统提示词（v1.1 C5）：读当前生效文本 + 是否默认标记。 */
   getSessionPrompt(sessionId: string): Promise<SessionPromptResponse>
   /** 写会话覆盖（prompt 空串 = 清除回落默认）；写后下一轮 system prompt 组装即生效。 */
@@ -93,6 +96,7 @@ function errorStatus(error: unknown): number {
     case 'template-exists':
     case 'builtin-protected':
       return 409
+    case 'card-not-found':
     case 'task-not-found':
     case 'question-not-found':
     case 'doc-not-found':
@@ -266,6 +270,16 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     const request_: TypesEnabledRequest = { templateId: body.templateId, enabled: body.enabled }
     const updated = await deps.setWorkerTypeEnabled(request_)
     return { status: 200, body: JSON.stringify(updated) }
+  })
+
+  handle(ROUTER_NOTIFICATIONS_ACK_PATH, ['POST'], async (request) => {
+    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    if (body === null || typeof body !== 'object' || typeof body['cardId'] !== 'string' || body['cardId'] === '') {
+      throw new LedgerError('bad-request', 'cardId(字符串) 必填')
+    }
+    const acked = await deps.ackNotification(body['cardId'])
+    if (!acked) throw new LedgerError('card-not-found', `通知卡不存在或已确认: ${body['cardId']}`)
+    return { status: 200, body: JSON.stringify({ ok: true }) }
   })
 
   handle(ROUTER_DEFAULTS_PATH, ['GET', 'POST'], async (request) => {
