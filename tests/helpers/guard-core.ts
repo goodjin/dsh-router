@@ -8,7 +8,7 @@ import { LedgerError } from '../../src/host/ledger/errors.ts'
 import { TaskLedger, type LedgerPersistence, type LedgerFile } from '../../src/host/ledger/store.ts'
 import { Scheduler } from '../../src/host/ledger/scheduler.ts'
 import { TaskDocStore } from '../../src/host/docs/task-docs.ts'
-import { SessionBridge, type SessionBridgeHost, type WorkspaceInfo } from '../../src/host/bridge/sessions.ts'
+import { SessionBridge, type SessionBridgeHost, type WorkspaceInfo, type AgentInterruptFace } from '../../src/host/bridge/sessions.ts'
 import { AnswerRelay } from '../../src/host/bridge/questions.ts'
 import { CompactionDriver, type CompactionDeps } from '../../src/host/context/compaction-driver.ts'
 import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../../src/host/bridge/tabs.ts'
@@ -169,6 +169,8 @@ export interface GuardCoreOptions {
   breaker?: CircuitBreaker | null
   /** 注入预制预算（缺省 = 新建默认预算 1/1/3；显式 null = 不接预算层）。 */
   budgets?: DispatchBudgets | null
+  /** agents 中断面（v1.2 B4 紧急暂停；缺席 = 中断面未接线，逐项如实 failed）。 */
+  interruptFace?: AgentInterruptFace
   /** 全局时钟（breaker 默认件与核心记账共用；缺省恒 1000）。 */
   now?: () => number
 }
@@ -191,6 +193,7 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
     host: bridgeHost,
     presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
     workerInstructions: () => '【执行指引】',
+    interruptFace: opts.interruptFace,
     signal: new AbortController().signal,
   })
   const relay = new AnswerRelay({ ledger, newId: () => `q-${Math.random()}`, now })

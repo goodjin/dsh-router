@@ -25,9 +25,10 @@ import { join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 
 import { TaskLedger, type LedgerFile, type LedgerPersistence } from './host/ledger/store.ts'
+import { LedgerError } from './host/ledger/errors.ts'
 import { TaskDocStore } from './host/docs/task-docs.ts'
 import { Scheduler } from './host/ledger/scheduler.ts'
-import { SessionBridge, type WorkspaceInfo } from './host/bridge/sessions.ts'
+import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace } from './host/bridge/sessions.ts'
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
 import { RouterDedup, stateWithRedirect, type SessionSnapshotLike } from './host/bridge/dedup.ts'
@@ -42,7 +43,7 @@ import { dynamicPresetId } from './host/presets/dynamic.ts'
 import { DynamicPresetEngine, type AgentPresetsFace } from './host/presets/lifecycle.ts'
 import { MemoryDocStore } from './host/memory/store.ts'
 import { ClosureIntentStore, OutcomeAdjudicator } from './host/guard/adjudicator.ts'
-import { NotificationStore } from './host/guard/notifications.ts'
+import { NotificationStore, anomalyActions } from './host/guard/notifications.ts'
 import { search as searchMemory } from './host/memory/retrieval.ts'
 import {
   BackgroundSummarizer,
@@ -55,8 +56,10 @@ import {
 } from './host/memory/adapter.ts'
 import type { FsAdapter } from './shared/fs-adapter.ts'
 import type { WorkerTemplate, WorkerTypeRecord } from './shared/view-contract.ts'
-import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD } from './host/guard/breaker.ts'
+import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, DEFAULT_INFRA_THRESHOLD, type BreakerVisibility } from './host/guard/breaker.ts'
 import { DispatchBudgets } from './host/guard/budgets.ts'
+
+import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from './host/guard/emergency.ts'
 
 export { Config } from './host/root-config.ts'
 
@@ -70,7 +73,13 @@ export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sess
 /** 宿主上下文的最小面（窄接口；webServer/connection 走机会式注入）。 */
 interface RootContext {
   sessionController: RouterCoreHosts['sessionController']
-  agents: RouterCoreHosts['agents']
+  /**
+   * agents 服务（宿主 Cordis 键 'agents'）。核心逻辑只用 get 取 live agent
+   * （模型路由解析/压缩驱动）；紧急暂停（v1.2 B4）另经同一 get 面取
+   * cancel——AgentInterruptFace 的形状（r8 §5：
+   * agents.get(id)?.cancel({kind:'hook',reason},{keepInbox:true})）。
+   */
+  agents: AgentInterruptFace
   /** agentPresets 注册表（r4 §1：register 返回注销器，重复 id 当场抛）。 */
   agentPresets: AgentPresetsFace
   workspaceRegistry: {
@@ -254,6 +263,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   //（下方 onStatusChange 接线；ask_user 的回答开启新轮，预算自然重计）。
   const budgets = new DispatchBudgets()
 
+  // guard 通知段（v1.2 B4 最小投影）：B3 的统一通知面未合并前，紧急暂停的异常
+  // 通知先落 <dataDir>/guard-notifications.json（guard-state.json 由熔断器独占，
+
   // worker 类型存储 + Router 默认值（v1.1 规格 §5/§6；首启种子化导入 v1 Config
   // 模板后 legacyImported 落盘，v1 templates 配置通道退役）。
   const typeStore = new WorkerTypeStore(fs, join(config.dataDir, 'worker-types.json'), {
@@ -369,6 +381,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     presets: { supervisor: config.supervisorPreset, worker: config.workerPreset },
     forTemplate: resolvePresetForTemplate,
     types: { get: (templateId) => typeStore.get(templateId) },
+    // 紧急暂停的中断面（v1.2 B4，r8 §5）：agents.get(id)?.cancel —— 幂等、
+    // 原因留痕 turn/end、keepInbox 保住排队消息；冷会话天然 no-op。
+    interruptFace: ctx.agents,
     workerInstructions: () => workerInstructionsText(),
     logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
@@ -712,9 +727,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       getState: async (workspaceId) => {
         if (dedup !== undefined) await dedup.resolve()
         const state = await assembled.workbench.state(workspaceId)
-        return dedup !== undefined
+        const withRedirect = dedup !== undefined
           ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
           : state
+        // v1.2 B4 最小通知投影：guard 通知段非空才带键（lossless；C1 统一通知卡
+        // 合并后由此键承载全部卡）。
+        return withRedirect
       },
       createRouterSession: (workspaceId, name) => assembled.workbench.createRouterSession(workspaceId, name),
       answerQuestion: async (questionId, answers) => {
@@ -770,6 +788,55 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         else await sessionPrompts.set(sessionId, prompt)
       },
       ackNotification: (cardId: string) => notifications.ack(cardId),
+
+      /* ── 用户控制与紧急暂停（v1.2 B4）：用户发起，绕过模型侧预算；caller 记 'user' ── */
+      controlTask: async (taskId, action) => {
+        if (action === 'redispatch') {
+          // redispatch 是再派发：受熔断约束（冻结时明确提示先解除；其余闸门
+          // ——状态机/依赖/深度——由 supplementTask 的既有路径把守）。
+          const breakerState = await breaker.state()
+          if (breakerState.frozen) {
+            throw new LedgerError(
+              'dispatch-frozen',
+              `派发已冻结（${breakerState.reason ?? '原因未记录'}）：重派被拒——请先解除冻结（POST /router/breaker/unfreeze 或工作台「解除冻结」），再重派任务 ${taskId}`,
+            )
+          }
+          await assembled.core.supplementTask('user', taskId, ['用户重派：请按任务书当前版本推进（用户经控制路由发起）'])
+          const record = assembled.core.getTask(taskId)
+          return { status: record?.status ?? 'failed' }
+        }
+        return assembled.core.controlTask('user', taskId, action)
+      },
+      unfreezeBreaker: async () => {
+        const beforeState = await breaker.state()
+        const before: BreakerVisibility = { frozen: beforeState.frozen }
+        if (beforeState.frozen) {
+          if (beforeState.reason !== undefined) before.reason = beforeState.reason
+          if (beforeState.frozenAt !== undefined) before.frozenAt = beforeState.frozenAt
+        }
+        await breaker.unfreeze()
+        const afterState = await breaker.state()
+        return { before, after: { frozen: afterState.frozen } }
+      },
+      emergencyPause: async () =>
+        runEmergencyPause({
+          targetSessionIds: async () => emergencyPauseTargets(await ledger.listAll()),
+          freeze: async (reason: string) => {
+            await breaker.freeze(reason)
+            const state = await breaker.state()
+            return state.frozen && state.reason !== undefined
+              ? { frozen: state.frozen, reason: state.reason }
+              : { frozen: state.frozen }
+          },
+          interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
+          notify: async (input) => notifications.push({
+            kind: 'anomaly',
+            title: input.title,
+            summary: input.summary,
+            actions: anomalyActions(),
+          }),
+          logger: { warn: (message: string) => log.warn(message) },
+        }),
     })
   })
 

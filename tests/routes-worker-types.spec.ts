@@ -206,6 +206,19 @@ function fakeDeps(factories?: {
     async ackNotification() {
       return false
     },
+    // B4 控制路由桩：本文件用例只打类型/默认值/提示词路由，桩只为满足 deps 形状。
+    async controlTask(taskId: string, action: string) {
+      calls.push(`control:${taskId}:${action}`)
+      return { status: 'paused' as const }
+    },
+    async unfreezeBreaker() {
+      calls.push('unfreeze')
+      return { before: { frozen: true }, after: { frozen: false } }
+    },
+    async emergencyPause() {
+      calls.push('emergency-pause')
+      return { frozen: true, interrupted: [] as { sessionId: string; accepted: boolean }[], failedCount: 0 }
+    },
     async getState() {
       return {
         routerSessions: [], tasks: [], questions: [], tabs: [],
@@ -263,7 +276,7 @@ function handlerOf(routes: Array<{ path: string; handler: unknown }>, path: stri
 /* ────────────────────────── 断言 ────────────────────────── */
 
 describe('worker 类型路由（C3）', () => {
-  it('新 exact 路由全部挂上（C3 七条 + C5 会话提示词一条）', () => {
+  it('新 exact 路由全部挂上（C3 七条 + C5 会话提示词一条 + B4 控制三条）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -278,6 +291,9 @@ describe('worker 类型路由（C3）', () => {
       '/router/notifications/ack',
       '/router/defaults',
       '/router/prompt',
+      '/router/tasks/control',
+      '/router/breaker/unfreeze',
+      '/router/emergency-pause',
     ])
   })
 

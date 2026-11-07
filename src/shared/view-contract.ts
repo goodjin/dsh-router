@@ -230,6 +230,13 @@ export interface SessionPromptPutRequest {
   prompt: string
 }
 
+/**
+ * guard 异常通知卡（v1.2 Task B4 的最小投影）。B3（结果判定）的通知面尚未合并
+ * 到本分支，紧急暂停的异常通知先落 guard 通知段（宿主侧 guard/notifications.ts）
+ * 并经 RouterState.notifications 投出；B3 合并时把两处统一成 NotificationCard
+ * （C1 形状：actions/deliveryOrigin 等），本类型届时对齐收编。
+ */
+
 /** GET /router/state 的完整返回。 */
 export interface RouterState {
   routerSessions: RouterSessionInfo[]
