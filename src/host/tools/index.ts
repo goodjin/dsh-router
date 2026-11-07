@@ -601,6 +601,11 @@ export function buildToolDefinitions(
           { get: (taskId: string) => core.getTask(taskId) },
           typeof record.taskId === 'string' ? record.taskId : undefined,
         )
+        // 执行层纵深防御（v1.1 C6 规格 §3.4）：主管之下禁再派主管——工具薄壳
+        // 先拦一道（核心的 scheduler.dispatchGuard 会再拦一道）。
+        if (name === 'dispatch_task' && role === 'supervisor' && record.role === 'supervisor') {
+          throw new LedgerError('role-forbidden', '主管之下不能再派主管：简单子任务用子代理，需要多轮交互或持久产品派 worker')
+        }
         return spec.run(core, sid, record)
       },
     }

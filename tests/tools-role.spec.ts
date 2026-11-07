@@ -180,6 +180,32 @@ describe('assertCallerRole：角色×工具矩阵', () => {
     }
   })
 
+  it('执行层纵深防御（v1.1 C6）：主管会话再派 supervisor 角色被薄壳拒绝（不等核心闸门）', async () => {
+    const def = buildToolDefinitions(coreOf(), 'supervisor').find((d) => d.name === 'dispatch_task')!
+    try {
+      await run(def, {
+        title: '再套一层',
+        goal: '主管之下派主管',
+        acceptance: ['不该发生'],
+        role: 'supervisor',
+        templateId: 'lead',
+      }, execOf('sup-s-1'))
+      expect.unreachable()
+    } catch (error) {
+      expect((error as LedgerError).code).toBe('role-forbidden')
+      expect((error as LedgerError).message).toContain('主管')
+    }
+    // 同一工具、worker 目标照常通过薄壳（转交核心）
+    const value = (await run(def, {
+      title: '正常子任务',
+      goal: '派 worker',
+      acceptance: ['可以'],
+      role: 'worker',
+      templateId: 'coder',
+    }, execOf('sup-s-1'))) as { taskId: string }
+    expect(value.taskId).toBe('T-001')
+  })
+
   it('router/supervisor 都能派发', () => {
     expect(() => assertCallerRole('router', 'dispatch_task', 'r-1', empty)).not.toThrow()
     expect(() => assertCallerRole('supervisor', 'dispatch_task', 's-1', empty)).not.toThrow()

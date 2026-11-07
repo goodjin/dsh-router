@@ -112,6 +112,17 @@ describe('dispatchGuard：角色 / 深度 / 环', () => {
     })
   })
 
+  it('主管之下禁再派主管（v1.1 C6 规格 §3.4）：supervisor→supervisor 拒绝 role-forbidden', () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock())
+    const sched = scheduler(ledger)
+    expect(
+      sched.dispatchGuard({ sessionIdRole: 'supervisor', depth: 1 }, { role: 'supervisor' }),
+    ).toEqual({ ok: false, code: 'role-forbidden' })
+    // Router 直派主管仍然放行（层级自决）；主管派 worker 也放行
+    expect(sched.dispatchGuard({ sessionIdRole: 'router', depth: 0 }, { role: 'supervisor' })).toEqual({ ok: true })
+    expect(sched.dispatchGuard({ sessionIdRole: 'supervisor', depth: 1 }, { role: 'worker' })).toEqual({ ok: true })
+  })
+
   it('深度=2 时第三层被拒：depth 1 放行、depth 2 拒绝（depth-exceeded）', async () => {
     const ledger = new TaskLedger(new MemoryPersistence(), stepClock())
     const sched = scheduler(ledger)

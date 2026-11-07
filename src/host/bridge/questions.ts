@@ -30,11 +30,21 @@ export interface SessionTaskIndex {
   get(taskId: string): TaskRecord | undefined
 }
 
+/** 每任务提问预算的缺省上限（v1.1 规格 §3.6；Config questionBudget 可调）。 */
+export const DEFAULT_QUESTION_BUDGET = 2
+
+/** 超预算时的自动回答案（逐题同文；指明出路：任务书假设 + report_blocker）。 */
+export const QUESTION_BUDGET_EXHAUSTED_ANSWER = '提问预算已用尽：请基于任务书做合理假设继续执行，或调用 report_blocker 报告阻塞'
+
 export interface AnswerRelayDeps {
-  ledger: SessionTaskIndex & Pick<TaskLedger, 'addQuestion' | 'settleQuestion' | 'openQuestions' | 'findQuestion' | 'reportBlocker'>
+  ledger: SessionTaskIndex & Pick<TaskLedger, 'addQuestion' | 'settleQuestion' | 'openQuestions' | 'findQuestion' | 'reportBlocker' | 'countTaskQuestions'>
   /** 问题 ID 生成器（宿主装配用 uuid；测试注入计数器）。 */
   newId(): string
   now(): number
+  /** 每任务提问批次数上限（缺省 DEFAULT_QUESTION_BUDGET）。 */
+  questionBudget?: number
+  /** 预算拒绝等非致命事件的日志口（缺席静默）。 */
+  logger?: { warn(message: string): void }
 }
 
 interface ParkedQuestion {
@@ -47,17 +57,23 @@ interface ParkedQuestion {
   reject(reason: unknown): void
 }
 
-/** 问答桥：认领、park、应答、孤儿恢复。 */
+/** 问答桥：认领、park、应答、孤儿恢复、提问预算强制。 */
 export class AnswerRelay {
   private parked = new Map<string, ParkedQuestion>()
   private ledger: AnswerRelayDeps['ledger']
   private newId: () => string
   private now: () => number
+  private questionBudget: number
+  private logger: AnswerRelayDeps['logger']
 
   constructor(deps: AnswerRelayDeps) {
     this.ledger = deps.ledger
     this.newId = deps.newId
     this.now = deps.now
+    this.questionBudget = typeof deps.questionBudget === 'number' && deps.questionBudget >= 0
+      ? deps.questionBudget
+      : DEFAULT_QUESTION_BUDGET
+    this.logger = deps.logger
   }
 
   /** 按会话 ID 找在册任务（worker/主管会话才有任务绑定）。 */
@@ -69,6 +85,8 @@ export class AnswerRelay {
   /**
    * user-questions/request 瀑布监听器：认领返回答案即否决链上其余人，
    * 放行调 next()。仅认领在册 worker/主管会话的问题；Router 会话一律放行。
+   * 提问预算（v1.1 规格 §3.6）在认领层强制：该任务已认领批次达到上限时不再
+   * park、不弹卡，逐题自动回「预算已用尽」的答案并 warn。
    */
   async claimQuestion(request: ClaimRequest, next: () => Promise<unknown>): Promise<unknown> {
     let sessionId: string
@@ -79,6 +97,19 @@ export class AnswerRelay {
     }
     const taskRecord = await this.taskBySession(sessionId)
     if (taskRecord === undefined || taskRecord.role === 'router') return next()
+    const claimed = await this.ledger.countTaskQuestions(taskRecord.id)
+    if (claimed >= this.questionBudget) {
+      this.logger?.warn(
+        `任务 ${taskRecord.id} 的提问预算已用尽（已认领 ${claimed}/${this.questionBudget} 批），本次提问被拒并自动回答`,
+      )
+      return {
+        answers: request.questions.map((question) => ({
+          id: question.id,
+          selected: [],
+          custom: QUESTION_BUDGET_EXHAUSTED_ANSWER,
+        })),
+      }
+    }
     return this.park(taskRecord, sessionId, request)
   }
 

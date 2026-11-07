@@ -61,13 +61,16 @@ export class Scheduler {
   }
 
   /**
-   * 派发把关，判定顺序：权限（worker 禁止派发）→ 结构（依赖命中祖先链即环风险）
-   * → 容量（新任务深度 parent.depth+1 超 maxDepth）。环先于深度：结构性错误
-   * 与深度无关，无论哪层都不该派。祖先链走账本的同步 get，需在账本已装载
-   * （先 await 过任一账本方法）后调用。
+   * 派发把关，判定顺序：权限（worker 禁止派发；主管之下禁再派主管——v1.1 规格
+   * §3.4）→ 结构（依赖命中祖先链即环风险）→ 容量（新任务深度 parent.depth+1 超
+   * maxDepth）。环先于深度：结构性错误与深度无关，无论哪层都不该派。祖先链走
+   * 账本的同步 get，需在账本已装载（先 await 过任一账本方法）后调用。
    */
   dispatchGuard(parent: DispatchParent, target: DispatchTarget): DispatchVerdict {
     if (parent.sessionIdRole === 'worker') {
+      return { ok: false, code: 'role-forbidden' }
+    }
+    if (parent.sessionIdRole === 'supervisor' && target.role === 'supervisor') {
       return { ok: false, code: 'role-forbidden' }
     }
     if (target.dependsOn !== undefined && target.dependsOn.length > 0 && parent.parentTaskId !== undefined) {

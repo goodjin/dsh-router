@@ -45,11 +45,11 @@ describe('renderLedgerSnapshot', () => {
     expect(text).toContain('用 PostgreSQL') // 最新补充约束
   })
 
-  it('completed / cancelled 剔除；failed（失败待处理）保留', () => {
+  it('completed / cancelled 剔除；failed 有会话的保留（失败待处理）', () => {
     const tasks = [
       task({ id: 'T-001', status: 'completed', title: '已完' }),
       task({ id: 'T-002', status: 'cancelled', title: '已取消' }),
-      task({ id: 'T-003', status: 'failed', title: '失败待处理' }),
+      task({ id: 'T-003', status: 'failed', title: '失败待处理', sessionId: 'session-3' }),
       task({ id: 'T-004', status: 'review-pending', title: '待验收' }),
     ]
     const text = renderLedgerSnapshot(tasks, { maxCards: 8 })
@@ -58,6 +58,16 @@ describe('renderLedgerSnapshot', () => {
     expect(text).not.toContain('已取消')
     expect(text).toContain('失败待处理')
     expect(text).toContain('待验收')
+  })
+
+  it('空壳清理（v1.1 C6 规格 §3.7）：failed 且无会话的任务不进活动快照（cancelled 本就不进）', () => {
+    const tasks = [
+      task({ id: 'T-001', status: 'failed', title: '无会话失败残留' }),
+      task({ id: 'T-002', status: 'failed', title: '有会话失败', sessionId: 'session-2' }),
+    ]
+    const text = renderLedgerSnapshot(tasks, { maxCards: 8 })
+    expect(text).not.toContain('无会话失败残留')
+    expect(text).toContain('有会话失败')
   })
 
   it('待答问题数渲染进卡片', () => {

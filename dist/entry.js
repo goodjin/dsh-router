@@ -52,6 +52,8 @@ export const name = '@goodjin2/dsh-router';
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
  *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets'];
+/** 提问预算的缺省上限（v1.1 规格 §3.6；root-config 的 questionBudget 可调）。 */
+const DEFAULT_QUESTION_BUDGET = 2;
 /** 数值钳位：非数值回默认，负数取 0。 */
 function nonNegative(value, fallback) {
     if (typeof value !== 'number' || !Number.isFinite(value))
@@ -97,6 +99,7 @@ function resolveRootConfig(raw) {
         workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
         summarizationProvider: stringOr(source.summarizationProvider, ''),
         summarizationModel: stringOr(source.summarizationModel, ''),
+        questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
         templates: templatesOr(source.templates),
     };
 }
@@ -260,7 +263,14 @@ export function apply(ctx, rawConfig) {
         skillDirs: () => undefined, // 初始技能目录解析（C3 设置页接入已装技能包时落地）
         logger: { info: (message) => log.info(message), warn: (message) => log.warn(message) },
     });
-    const relay = new AnswerRelay({ ledger, newId: () => randomUUID(), now: () => Date.now() });
+    const relay = new AnswerRelay({
+        ledger,
+        newId: () => randomUUID(),
+        now: () => Date.now(),
+        // 提问预算（v1.1 规格 §3.6）：每任务澄清提问批次数上限，超限自动回答案。
+        questionBudget: config.questionBudget,
+        logger: { warn: (message) => log.warn(message) },
+    });
     const scheduler = new Scheduler(ledger, {
         maxDepth: config.maxDepth,
         concurrency: { default: config.perTypeConcurrency },

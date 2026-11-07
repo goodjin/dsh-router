@@ -719,6 +719,30 @@ describe('createRouterCore：workbench', () => {
     await relay.answerQuestion(cards[0]!.questionId, [{ id: 'a1', selected: [] }])
     await claim
   })
+
+  it('空壳清理（v1.1 C6）：标签条过滤「cancelled/failed 且无会话」的任务，账本记录保留不删档', async () => {
+    const records = [
+      // 空壳：cancelled 且无会话 → 标签条不显示（账本记录仍在）
+      task({ id: 'T-001', role: 'worker', status: 'cancelled', title: '空壳取消' }),
+      // 空壳：failed 且无会话 → 同上
+      task({ id: 'T-002', role: 'worker', status: 'failed', title: '空壳失败' }),
+      // cancelled 但有会话 → 保留标签（用户可能要看会话）
+      task({ id: 'T-003', role: 'worker', sessionId: 'session-3', status: 'cancelled', title: '正常取消' }),
+    ]
+    const { workbench, ui, ledger, snapshotText, refreshSnapshot } = await coreWith(records)
+    await ui.addTab('ws-1', 'stale-1', 'T-001')
+    await ui.addTab('ws-1', 'stale-2', 'T-002')
+    await ui.addTab('ws-1', 'session-3', 'T-003')
+    const state = await workbench.state('ws-1')
+    expect(state.tabs.map((t) => t.sessionId)).toEqual(['session-3'])
+    // 清理只影响投影：账本文件记录保留（归档可查）
+    expect(ledger.get('T-001')?.status).toBe('cancelled')
+    expect(ledger.get('T-002')?.status).toBe('failed')
+    // 活动快照同步隐藏空壳（cancelled 本就不进快照，completed/终态规则不变）
+    await refreshSnapshot()
+    expect(snapshotText()).not.toContain('空壳取消')
+    expect(snapshotText()).not.toContain('空壳失败')
+  })
 })
 
 /* ────────────────────────── 快照 ────────────────────────── */

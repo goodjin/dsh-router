@@ -422,4 +422,13 @@ export class TaskLedger {
     await this.ensureLoaded()
     return this.questions.find((q) => q.id === id)
   }
+
+  /**
+   * 某任务已认领的提问批次数（v1.1 C6 提问预算的计数面）：认领即落一条记录，
+   * 已答/失效都占预算——预算按「批次」计，不看批次的最终去向。
+   */
+  async countTaskQuestions(taskId: string): Promise<number> {
+    await this.ensureLoaded()
+    return this.questions.filter((q) => q.taskId === taskId).length
+  }
 }

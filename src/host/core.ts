@@ -15,7 +15,7 @@ import { renderTaskBook } from './docs/render.ts'
 import type { Scheduler } from './ledger/scheduler.ts'
 import type { SessionBridge, WorkspaceInfo } from './bridge/sessions.ts'
 import type { AnswerRelay } from './bridge/questions.ts'
-import type { UiStateStore } from './bridge/tabs.ts'
+import { isHuskTask, type UiStateStore } from './bridge/tabs.ts'
 import type { CompactionDriver } from './context/compaction-driver.ts'
 import { renderLedgerSnapshot } from './context/snapshot.ts'
 import { assertCallerRole } from './tools/index.ts'
@@ -587,21 +587,26 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const records = await ledger.listAll()
       const counts = await waitingCounts()
       const bySession = new Map(records.filter((r) => r.sessionId !== undefined).map((r) => [r.sessionId as string, r]))
+      const byId = new Map(records.map((record) => [record.id, record]))
       const tabRows = workspaceId !== undefined ? ui.tabs(workspaceId) : ui.allTabs()
       return {
         routerSessions: ui.routerSessions(),
         tasks: records.map((record) => toCard(record, counts[record.id] ?? 0)),
         questions: relay.pendingCards(),
-        tabs: tabRows.map((row) => {
-          const taskRecord = bySession.get(row.sessionId)
-          return {
-            sessionId: row.sessionId,
-            title: taskRecord !== undefined ? `${taskRecord.id} ${taskRecord.title}` : row.sessionId,
-            taskId: taskRecord?.id ?? row.taskId,
-            taskStatus: taskRecord?.status,
-            running: deps.isRunning(row.sessionId),
-          }
-        }),
+        // 空壳清理（v1.1 规格 §3.7）：指向「cancelled/failed 且无会话」任务的
+        // 标签行移出投影；store 里的落盘行与账本记录都不动（Review Focus 5）。
+        tabs: tabRows
+          .filter((row) => !isHuskTask(row.taskId !== undefined ? byId.get(row.taskId) : undefined))
+          .map((row) => {
+            const taskRecord = bySession.get(row.sessionId)
+            return {
+              sessionId: row.sessionId,
+              title: taskRecord !== undefined ? `${taskRecord.id} ${taskRecord.title}` : row.sessionId,
+              taskId: taskRecord?.id ?? row.taskId,
+              taskStatus: taskRecord?.status,
+              running: deps.isRunning(row.sessionId),
+            }
+          }),
         templates: enabledTemplates(),
         types: deps.types !== undefined
           ? deps.types.summaries()
@@ -660,6 +665,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
 /** 派发拒绝的补充说明（给模型看得懂的下一步）。 */
 function dispatchRejectionText(code: 'depth-exceeded' | 'role-forbidden' | 'cycle-risk', callerRole: RoleKind): string {
   if (code === 'role-forbidden' && callerRole === 'worker') return '工作型角色无权派发任务'
+  if (code === 'role-forbidden') return '主管之下只能派 worker 或子代理，不能再派主管（v1.1 规格 §3.4 禁主管链）'
   if (code === 'depth-exceeded') return '超过最大递归深度，请把工作合并进当前任务或改派 supervisor'
   return '依赖命中了自身的祖先任务（环），请换依赖对象'
 }

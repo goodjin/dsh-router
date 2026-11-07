@@ -23,6 +23,8 @@ export interface RouterRootConfig {
   /** 记忆摘要的模型路由对（都非空才生效；缺省用活任务会话的最近路由）。 */
   summarizationProvider?: string
   summarizationModel?: string
+  /** 每任务澄清提问批次数上限（v1.1 规格 §3.6；缺省 2）。 */
+  questionBudget?: number
 }
 
 import type { WorkerTemplate } from '../shared/view-contract.ts'
@@ -39,6 +41,7 @@ export const Config = Schema.object({
   workerPreset: Schema.string().default('dsh-router-worker').volatile(),
   summarizationProvider: Schema.string().default('').volatile(),
   summarizationModel: Schema.string().default('').volatile(),
+  questionBudget: Schema.number().default(2).volatile(),
   templates: Schema.array(
     Schema.object({
       templateId: Schema.string().required(),

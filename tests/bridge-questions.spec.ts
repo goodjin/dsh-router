@@ -48,15 +48,22 @@ async function ledgerWith(records: TaskRecord[] = []): Promise<{ ledger: TaskLed
 }
 
 /** 问答桥 + 一个在册 worker 会话（worker-s-1 ↔ T-001）与一个主管会话。 */
-async function relayWithTasks() {
+async function relayWithTasks(opts: { questionBudget?: number } = {}) {
   const records = [
     task({ id: 'T-001', role: 'worker', sessionId: 'worker-s-1', status: 'running' }),
     task({ id: 'T-002', role: 'supervisor', sessionId: 'sup-s-1', status: 'running' }),
     task({ id: 'T-003', role: 'router', sessionId: 'router-s-1', status: 'running' }),
   ]
   const { ledger, persistence } = await ledgerWithTasks(records)
-  const relay = new AnswerRelay({ ledger, newId, now: () => 42 })
-  return { ledger, persistence, relay }
+  const warns: string[] = []
+  const relay = new AnswerRelay({
+    ledger,
+    newId,
+    now: () => 42,
+    questionBudget: opts.questionBudget,
+    logger: { warn: (message: string) => warns.push(message) },
+  })
+  return { ledger, persistence, relay, warns }
 }
 
 /** 等认领落稳（parked 进列表、账本记录落库）——不数微任务，轮询到确定态。 */
@@ -150,6 +157,100 @@ describe('AnswerRelay：瀑布认领', () => {
     controller.abort()
     await expect(claim).rejects.toThrowError(LedgerError)
     expect(relay.pendingCards()).toHaveLength(0)
+  })
+})
+
+describe('AnswerRelay：自定义文本端到端送达（v1.1 C6 规格 §3.6）', () => {
+  it('用户经 answer 提交含 custom 文本的答案 → resolve 的 custom 字段逐字保留（含中文与换行）', async () => {
+    const { relay } = await relayWithTasks()
+    const claim = relay.claimQuestion(askRequest('worker-s-1', [{ id: 'a1', question: '怎么处理？' }]), async () => 'no')
+    await awaitParked(relay, 1)
+    const custom = '自拟方案：\n第一步先用现有脚本迁移，不要另起炉灶。\n预算另议——【注意】不要动 prod 环境。'
+    await relay.answerQuestion(relay.pendingCards()[0]!.questionId, [{ id: 'a1', selected: [], custom }])
+    await expect(claim).resolves.toEqual({ answers: [{ id: 'a1', selected: [], custom }] })
+  })
+
+  it('多题混合（选项 + 自定义文本）也逐题原样回传', async () => {
+    const { relay } = await relayWithTasks()
+    const claim = relay.claimQuestion(
+      askRequest('worker-s-1', [
+        { id: 'q1', question: '用哪个方案？' },
+        { id: 'q2', question: '还有什么补充？' },
+      ]),
+      async () => 'no',
+    )
+    await awaitParked(relay, 1)
+    const answers = [
+      { id: 'q1', selected: ['方案A'] },
+      { id: 'q2', selected: [], custom: '补充：\n先做只读迁移演练。' },
+    ]
+    await relay.answerQuestion(relay.pendingCards()[0]!.questionId, answers)
+    await expect(claim).resolves.toEqual({ answers })
+  })
+})
+
+describe('AnswerRelay：提问预算（v1.1 C6 规格 §3.6）', () => {
+  const EXHAUSTED = '提问预算已用尽：请基于任务书做合理假设继续执行，或调用 report_blocker 报告阻塞'
+
+  it('默认预算 2：前两批正常认领，第三批自动回答案并 warn，不 park、不弹卡', async () => {
+    const { ledger, relay, warns } = await relayWithTasks()
+    const next = async () => {
+      throw new Error('超预算不应放行')
+    }
+    for (let batch = 1; batch <= 2; batch += 1) {
+      const claim = relay.claimQuestion(askRequest('worker-s-1', [{ id: `b${batch}`, question: `第 ${batch} 批` }]), next)
+      await awaitParked(relay, 1)
+      await relay.answerQuestion(relay.pendingCards()[0]!.questionId, [{ id: `b${batch}`, selected: [] }])
+      await claim
+    }
+    // 第三批：超预算 → 每题自动回答案，resolve 而不 park
+    const third = await relay.claimQuestion(askRequest('worker-s-1', [
+      { id: 'c1', question: '第三批问题一' },
+      { id: 'c2', question: '第三批问题二' },
+    ]), next)
+    expect(third).toEqual({ answers: [
+      { id: 'c1', selected: [], custom: EXHAUSTED },
+      { id: 'c2', selected: [], custom: EXHAUSTED },
+    ] })
+    expect(relay.pendingCards()).toHaveLength(0)
+    const open = await ledger.openQuestions()
+    expect(open).toHaveLength(0) // 不落新的 open 记录
+    expect(warns.some((m) => m.includes('T-001') && m.includes('预算'))).toBe(true)
+  })
+
+  it('预算可配置（questionBudget=1）：第二批即被自动回答案', async () => {
+    const { relay } = await relayWithTasks({ questionBudget: 1 })
+    const next = async () => {
+      throw new Error('超预算不应放行')
+    }
+    const first = relay.claimQuestion(askRequest('worker-s-1', [{ id: 'f1', question: '第一批' }]), next)
+    await awaitParked(relay, 1)
+    await relay.answerQuestion(relay.pendingCards()[0]!.questionId, [{ id: 'f1', selected: [] }])
+    await first
+    const second = await relay.claimQuestion(askRequest('worker-s-1', [{ id: 'f2', question: '第二批' }]), next)
+    expect(second).toEqual({ answers: [{ id: 'f2', selected: [], custom: EXHAUSTED }] })
+    expect(relay.pendingCards()).toHaveLength(0)
+  })
+
+  it('预算按任务计：T-001 用尽后 T-002（另一任务）仍可认领', async () => {
+    const { relay } = await relayWithTasks({ questionBudget: 2 })
+    const next = async () => {
+      throw new Error('超预算不应放行')
+    }
+    for (let batch = 1; batch <= 2; batch += 1) {
+      const claim = relay.claimQuestion(askRequest('worker-s-1', [{ id: `p${batch}`, question: `T-001 第 ${batch} 批` }]), next)
+      await awaitParked(relay, 1)
+      await relay.answerQuestion(relay.pendingCards()[0]!.questionId, [{ id: `p${batch}`, selected: [] }])
+      await claim
+    }
+    const third = await relay.claimQuestion(askRequest('worker-s-1', [{ id: 'p3', question: '第三批' }]), next)
+    expect(third).toEqual({ answers: [{ id: 'p3', selected: [], custom: EXHAUSTED }] })
+    // 另一个任务不受影响
+    const other = relay.claimQuestion(askRequest('sup-s-1', [{ id: 's1', question: 'T-002 的问题' }]), next)
+    await awaitParked(relay, 1)
+    expect(relay.pendingCards()[0]!.taskId).toBe('T-002')
+    await relay.answerQuestion(relay.pendingCards()[0]!.questionId, [{ id: 's1', selected: [] }])
+    await expect(other).resolves.toEqual({ answers: [{ id: 's1', selected: [] }] })
   })
 })
 

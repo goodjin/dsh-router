@@ -9,6 +9,17 @@
  */
 
 import { LedgerError } from '../ledger/errors.ts'
+import type { TaskRecord } from '../../shared/types.ts'
+
+/**
+ * 空壳任务判定（v1.1 规格 §3.7 / Review Focus 5）：cancelled/failed 且无会话。
+ * 清理只影响标签条与活动快照的**投影**，账本文件记录一律保留（归档可查）。
+ * record 缺省（标签行没有可判定的任务）→ 不是空壳，照常显示。
+ */
+export function isHuskTask(record: Pick<TaskRecord, 'status' | 'sessionId'> | undefined): boolean {
+  if (record === undefined) return false
+  return (record.status === 'cancelled' || record.status === 'failed') && record.sessionId === undefined
+}
 
 /** 落盘形状。 */
 export interface UiStateFile {

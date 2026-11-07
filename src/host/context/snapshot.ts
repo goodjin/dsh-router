@@ -4,7 +4,8 @@
  * Router 每轮实际可见的「全部未结束任务短卡」（规格 §4）：字段是任务 ID/标题、
  * 目标与关键验收、worker 类型/会话 ID、状态/一句话进度、依赖、待回答事项、
  * 最新补充约束。终态里 completed/cancelled 剔除；failed（失败待处理）按规格
- * §4「失败待处理」保留在活动上下文里（它需要 Router 处理，不该静默消失）。
+ * §4「失败待处理」保留在活动上下文里——但 failed 且无会话的空壳（v1.1 规格
+ * §3.7 空壳清理）不进快照：它没有执行会话可恢复，Router 只能从归档追溯。
  * 超过 maxCards 时全部任务统一转紧凑单行卡——缩短但不丢弃（规格 §4）。
  */
 
@@ -35,9 +36,14 @@ const STATUS_LABEL: Record<TaskStatus, string> = {
   failed: '失败',
 }
 
-/** 快照里保留的任务：completed / cancelled 剔除，其余（含 failed）保留。 */
+/**
+ * 快照里保留的任务：completed / cancelled 剔除；failed 只有绑定了执行会话的
+ * 才保留（失败待处理），无会话的 failed 空壳不进快照（v1.1 规格 §3.7）。
+ */
 function isSnapshotVisible(record: TaskRecord): boolean {
-  return record.status !== 'completed' && record.status !== 'cancelled'
+  if (record.status === 'completed' || record.status === 'cancelled') return false
+  if (record.status === 'failed' && record.sessionId === undefined) return false
+  return true
 }
 
 /** 完整短卡（多行）。 */
