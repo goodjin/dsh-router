@@ -31,7 +31,7 @@ import { Scheduler } from './host/ledger/scheduler.ts'
 import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace, releaseObservation } from './host/bridge/sessions.ts'
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
-import { RouterDedup, stateWithRedirect, type SessionSnapshotLike } from './host/bridge/dedup.ts'
+import { RouterDedup, stateWithRedirect, type VerdictEntry, type SessionSnapshotLike } from './host/bridge/dedup.ts'
 import { adoptCanonicalRouterSessions } from './host/bridge/dedup-adopt.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
@@ -376,9 +376,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       },
       routerPreset: config.routerPreset,
       logger: { warn: (message) => log.warn(message) },
+    }, {
+      // 成本护栏（2026-11-07 现场）：判定缓存持久化（重启不再全量重放）、
+      // 每轮判定预算、失败冷却。详见 dedup.ts 的 RouterDedupOptions。
+      persistence: jsonFilePersistence<Record<string, VerdictEntry>>(join(config.dataDir, 'dedup-verdicts.json')),
     })
     : undefined
   if (dedup === undefined) log.warn('宿主缺 sessionQuery.readSession / workspaceRegistry.pinSession，入口去重降级为直通')
+  else void dedup.hydrate()
 
   const hosts: RouterCoreHosts = {
     sessionController: ctx.sessionController,

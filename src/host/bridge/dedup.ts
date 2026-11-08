@@ -59,7 +59,7 @@ export interface RouterDedupDeps {
 }
 
 /** 单个会话的判定缓存条目。 */
-interface VerdictEntry {
+export interface VerdictEntry {
   router: boolean
   /** header.createdAt（排序正主用；缺失按最晚处理）。 */
   createdAt?: number
@@ -77,6 +77,22 @@ export function stateWithRedirect<T extends RouterState>(state: T, redirect: Rou
   return { ...state, redirect }
 }
 
+/** 判定缓存的持久化面：boot 载入、变更后延迟保存（重启不再全量重放）。 */
+export interface DedupPersistence {
+  load(): Promise<Record<string, VerdictEntry> | null | undefined>
+  save(entries: Record<string, VerdictEntry>): void | Promise<void>
+}
+
+/** 去重扫描的成本护栏（2026-11-07 现场：轮询并发 + 失败每轮重试 + 首轮全量重放把宿主堆读爆）。 */
+export interface RouterDedupOptions {
+  /** 每轮 resolve 最多新判定（readSession）的会话数；0 = 不限。默认 10。 */
+  budgetPerResolve?: number
+  /** 单会话读失败后的重试冷却 ms。默认 10 分钟。 */
+  failureRetryMs?: number
+  /** 判定缓存持久化。缺席 = 仅内存缓存。 */
+  persistence?: DedupPersistence
+}
+
 export class RouterDedup {
   private deps: RouterDedupDeps
   /** 判定缓存：判定过的会话不再 readSession。 */
@@ -85,9 +101,58 @@ export class RouterDedup {
   private pinnedCanonical = new Map<string, string>()
   /** 待消费指令队列：workspaceId → 指令（先到先消费）。 */
   private pending = new Map<string, RouterRedirect[]>()
+  /** 单飞：上一轮未落定时，后续 resolve 并入同一轮（轮询并发会放大重放）。 */
+  private inflight: Promise<void> | undefined
+  /** 读失败冷却：sessionId → 最早重试时刻。 */
+  private failures = new Map<string, number>()
+  private readonly budgetPerResolve: number
+  private readonly failureRetryMs: number
+  private readonly persistence: DedupPersistence | undefined
+  private saveTimer: ReturnType<typeof setTimeout> | undefined
 
-  constructor(deps: RouterDedupDeps) {
+  constructor(deps: RouterDedupDeps, options: RouterDedupOptions = {}) {
     this.deps = deps
+    this.budgetPerResolve = options.budgetPerResolve ?? 10
+    this.failureRetryMs = options.failureRetryMs ?? 10 * 60_000
+    this.persistence = options.persistence
+  }
+
+  /** 载入持久化判定缓存；必须在第一轮 resolve 前调用。缺席/损坏静默跳过。 */
+  async hydrate(): Promise<void> {
+    if (this.persistence === undefined) return
+    let stored: Record<string, VerdictEntry> | null | undefined
+    try {
+      stored = await this.persistence.load()
+    } catch (error) {
+      this.warn(`判定缓存载入失败（忽略）: ${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    if (stored === null || stored === undefined) return
+    for (const [sessionId, entry] of Object.entries(stored)) {
+      if (entry !== null && typeof entry === 'object' && typeof entry.router === 'boolean') {
+        this.verdicts.set(sessionId, {
+          router: entry.router,
+          createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : undefined,
+          superseded: entry.superseded === true,
+        })
+      }
+    }
+  }
+
+  /** 判定缓存变更后的延迟保存（2s 去抖）；持久化缺席时为空操作。 */
+  private scheduleSave(): void {
+    if (this.persistence === undefined) return
+    clearTimeout(this.saveTimer)
+    this.saveTimer = setTimeout(() => {
+      try {
+        const entries: Record<string, VerdictEntry> = {}
+        for (const [sessionId, entry] of this.verdicts) entries[sessionId] = entry
+        void this.persistence?.save(entries)
+      } catch (error) {
+        this.warn(`判定缓存保存失败（忽略）: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }, 2_000)
+    ;(this.saveTimer as { unref?: () => void }).unref?.()
   }
 
   private warn(message: string): void {
@@ -117,6 +182,7 @@ export class RouterDedup {
       superseded: false,
     }
     this.verdicts.set(sessionId, entry)
+    this.scheduleSave()
     return entry
   }
 
@@ -126,6 +192,18 @@ export class RouterDedup {
    * 自然重试。
    */
   async resolve(): Promise<void> {
+    if (this.inflight !== undefined) return this.inflight
+    const run = this.resolveOnce().finally(() => { this.inflight = undefined })
+    this.inflight = run
+    return run
+  }
+
+  /**
+   * 一轮扫描的成本护栏（2026-11-07 现场：轮询并发堆叠 + 首轮全量整日志重放 +
+   * 读失败每轮重试，宿主 200%+ CPU、30-60 分钟堆满 4GB OOM）。单飞合并并发；
+   * 预算限每轮新判定数；失败冷却避免对同一坏会话每拍重放。
+   */
+  private async resolveOnce(): Promise<void> {
     // 宿主把 archivedSessionIds 暴露为 getter 属性（数组，dsh-workspace
     // lib/index.js:506-507）；防御性兼容「函数返回数组」的旧假设。
     const rawArchived: unknown = (this.deps.registry as { archivedSessionIds?: unknown }).archivedSessionIds
@@ -138,13 +216,23 @@ export class RouterDedup {
     const archived = new Set<string>(archivedList)
     for (const workspace of this.deps.workspaces.list()) {
       const members = workspace.sessionIds ?? []
+      let classified = 0
       for (const sessionId of members) {
         if (this.verdicts.has(sessionId)) continue
+        const retryAt = this.failures.get(sessionId)
+        if (retryAt !== undefined) {
+          // 失败冷却期内：本轮不重试（readSession 是整日志重放，对大日志
+          // 每拍重放一次到失败为止 = 持续烧 CPU/堆）。
+          if (Date.now() < retryAt) continue
+          this.failures.delete(sessionId)
+        }
+        if (this.budgetPerResolve > 0 && classified >= this.budgetPerResolve) continue
         try {
           await this.classify(sessionId)
+          classified += 1
         } catch (error) {
-          // 读失败不缓存：下轮重试（判定错了会把正主选歪，宁可多读一次）。
-          this.warn(`去重扫描读会话 ${sessionId} 失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`)
+          this.failures.set(sessionId, Date.now() + this.failureRetryMs)
+          this.warn(`去重扫描读会话 ${sessionId} 失败（${Math.round(this.failureRetryMs / 60_000)} 分钟后重试）: ${error instanceof Error ? error.message : String(error)}`)
         }
       }
       // 正主候选：已判定为 router、未归档、未收编；按 createdAt 升序取最早。

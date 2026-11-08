@@ -10,7 +10,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { RouterDedup, stateWithRedirect } from '../src/host/bridge/dedup.ts'
+import { RouterDedup, stateWithRedirect, type RouterDedupOptions } from '../src/host/bridge/dedup.ts'
 import type { RouterDedupDeps } from '../src/host/bridge/dedup.ts'
 import type { RouterRedirect } from '../src/shared/view-contract.ts'
 import type { WorkspaceInfo } from '../src/host/bridge/sessions.ts'
@@ -35,6 +35,8 @@ interface EnvOptions {
   snapshots: Map<string, ReturnType<typeof snapshot>>
   /** 首次读这些会话时抛错（下轮恢复）。 */
   failFirstReadFor?: string[]
+  /** 透传给 RouterDedup 的成本护栏选项（预算/冷却/持久化）。 */
+  dedupOptions?: RouterDedupOptions
   /** 首次归档这些会话时抛错（下轮恢复）。 */
   failFirstArchiveFor?: string[]
   /** 首次 pin 时抛错（下轮恢复）。 */
@@ -92,7 +94,7 @@ function createEnv(options: EnvOptions) {
     routerPreset: 'dsh-router',
     logger: { warn: (message: string) => { warns.push(message) } },
   }
-  return { dedup: new RouterDedup(deps), readCalls, pinCalls, archiveCalls, warns }
+  return { dedup: new RouterDedup(deps, options.dedupOptions), readCalls, pinCalls, archiveCalls, warns }
 }
 
 const WS = (id: string, sessionIds: string[]): WorkspaceInfo => ({ id, sessionIds })
@@ -281,7 +283,7 @@ describe('RouterDedup.resolve：归档失败重试（Review Focus 2）', () => {
     expect(env.dedup.pendingRedirectFor('ws-1')).toEqual({ sessionId: 's-old', supersededSessionId: 's-new' })
   })
 
-  it('readSession 抛错：本轮不判定不缓存，下轮重试', async () => {
+  it('readSession 抛错：进失败冷却不每轮重试；failureRetryMs=0 时下轮立即可重试', async () => {
     const env = createEnv({
       workspaces: [WS('ws-1', ['s-old', 's-new'])],
       snapshots: new Map([
@@ -289,6 +291,7 @@ describe('RouterDedup.resolve：归档失败重试（Review Focus 2）', () => {
         ['s-new', snapshot('dsh-router', 200)],
       ]),
       failFirstReadFor: ['s-new'],
+      dedupOptions: { failureRetryMs: 0 },
     })
     await env.dedup.resolve()
     expect(env.archiveCalls).toEqual([]) // s-new 未判定，不归档
