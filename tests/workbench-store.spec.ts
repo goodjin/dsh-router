@@ -453,36 +453,6 @@ describe('startWorkbenchPolling：定时器接线', () => {
   })
 })
 
-/* ────────────────────────── 提示词编辑器开关状态（v1.1 Task C5） ────────────────────────── */
-
-describe('提示词编辑器开关（C5）', () => {
-  it('openPromptEditor 记住会话 id，closePromptEditor 清掉；重复 open 覆盖', () => {
-    const api = fakeApi([])
-    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([]) })
-    expect(store.get().promptEditorSessionId).toBeUndefined()
-    store.openPromptEditor('s-router')
-    expect(store.get().promptEditorSessionId).toBe('s-router')
-    store.openPromptEditor('s-other')
-    expect(store.get().promptEditorSessionId).toBe('s-other')
-    store.closePromptEditor()
-    expect(store.get().promptEditorSessionId).toBeUndefined()
-    // 重复 close 幂等
-    store.closePromptEditor()
-    expect(store.get().promptEditorSessionId).toBeUndefined()
-  })
-
-  it('开关变更通知订阅者（浮层组件跟着开/关）', () => {
-    const api = fakeApi([])
-    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: workspaces([]) })
-    let snapshots: Array<string | undefined> = []
-    const dispose = store.subscribe(() => { snapshots.push(store.get().promptEditorSessionId) })
-    store.openPromptEditor('s-router')
-    store.closePromptEditor()
-    dispose()
-    expect(snapshots).toEqual(['s-router', undefined])
-  })
-})
-
 describe('isRouterSessionView：浮窗只在 Router 会话视图展示（v1.4）', () => {
   // isRouterSessionView 只读 currentSessionId 与 routerState.routerSessions，
   // 测试用最小形状直构（不启完整 store）。

@@ -26,7 +26,7 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
-import { registerPromptAction, registerPromptEditor } from './prompt-editor.tsx'
+import { registerSystemPromptView } from './system-prompt-view.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
@@ -145,7 +145,12 @@ export function apply(ctx?: PluginContext): void {
   } catch (error) {
     log.warn(`workbench tabs failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
+
   try {
+    registerSystemPromptView(slotsHost, { store, api })
+  } catch (error) {
+    log.warn(`system prompt view failed to register: ${error instanceof Error ? error.message : String(error)}`)
+  }  try {
     registerQuestionCards(slotsHost, { store, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`notification overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
@@ -159,16 +164,6 @@ export function apply(ctx?: PluginContext): void {
     registerBackButton(slotsHost, { store, uiWorkspace })
   } catch (error) {
     log.warn(`back button failed to register: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  try {
-    registerPromptEditor(slotsHost, { store, api })
-  } catch (error) {
-    log.warn(`prompt editor failed to register: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  try {
-    registerPromptAction(slotsHost, { store })
-  } catch (error) {
-    log.warn(`prompt action failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
   try {
     registerSettingsSection(slotsHost, { prefs, api })

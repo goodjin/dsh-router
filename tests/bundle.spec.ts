@@ -304,9 +304,8 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
-      'conversation.session.header.actions',
+      'conversation.view',
       'settings.section',
-      'shell.overlay',
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
@@ -314,12 +313,11 @@ describe('lib/client.js 是页面能装的产物', () => {
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toEqual([
       'router-workbench-tabs',
+    'router-system-prompt',
       'router-question-overlay',
       'router-notification-overlay',
       'router-back-button',
-      'router-prompt-editor',
-      'router-prompt-action',
-      'router-settings',
+          'router-settings',
     ])
     expect(captured.infos.join(' ')).toMatch(/client loaded/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
