@@ -153,6 +153,60 @@ describe('CircuitBreaker：持久化与解除（规格 §2 解除仅用户）', 
   })
 })
 
+describe('CircuitBreaker：遗留的紧急暂停冻结标记自动作废（v1.4）', () => {
+  it('装载时遇到 reason=user-emergency → 不冻（用户被旧标记永久锁死的现场修复）', async () => {
+    const { memfs, clock } = await breakerWith()
+    await memfs.fs.writeFile('/guard/guard-state.json', JSON.stringify({
+      schemaVersion: 1,
+      frozen: true,
+      reason: 'user-emergency',
+      frozenAt: 1794053010634,
+      infraFailures: [],
+      creations: [],
+      completions: [],
+    }))
+    const restored = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    const state = await restored.state()
+    expect(state.frozen).toBe(false)
+    expect(state.reason).toBeUndefined()
+    expect(state.frozenAt).toBeUndefined()
+  })
+
+  it('作废会落盘：重启后仍是未冻（不会又冻回来）', async () => {
+    const { memfs, clock } = await breakerWith()
+    await memfs.fs.writeFile('/guard/guard-state.json', JSON.stringify({
+      schemaVersion: 1,
+      frozen: true,
+      reason: 'user-emergency',
+      frozenAt: 1794053010634,
+      infraFailures: [],
+      creations: [],
+      completions: [],
+    }))
+    const first = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    expect((await first.state()).frozen).toBe(false)
+    const second = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    expect((await second.state()).frozen).toBe(false)
+  })
+
+  it('自动冻结的原因照旧恢复（只作废遗留的手动标记，不放过真故障）', async () => {
+    const { memfs, clock } = await breakerWith()
+    await memfs.fs.writeFile('/guard/guard-state.json', JSON.stringify({
+      schemaVersion: 1,
+      frozen: true,
+      reason: 'infra 失败 3 次（10 分钟窗口）',
+      frozenAt: 1794053010634,
+      infraFailures: [],
+      creations: [],
+      completions: [],
+    }))
+    const restored = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    const state = await restored.state()
+    expect(state.frozen).toBe(true)
+    expect(state.reason).toBe('infra 失败 3 次（10 分钟窗口）')
+  })
+})
+
 /* ────────────────────────── 故障分类器 ────────────────────────── */
 
 describe('classifyDispatchFailure：infra/task 分类（规格 §1）', () => {

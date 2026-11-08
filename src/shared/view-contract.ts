@@ -11,7 +11,7 @@
  * 让浏览器侧不依赖宿主包。
  */
 
-import type { TaskStatus } from './types.ts'
+import type { BreakerVisibility, TaskStatus } from './types.ts'
 
 /** 任务短卡（列表/标签条/模型快照共用的视图单元）。 */
 export interface TaskCard {
@@ -247,6 +247,37 @@ export interface SessionPromptPutRequest {
  * （C1 形状：actions/deliveryOrigin 等），本类型届时对齐收编。
  */
 
+/**
+ * 作用域紧急暂停：单个任务的如实结果（v1.4）。
+ * paused = 账本是否已置 paused；interrupted = 执行会话是否已中断；
+ * detail = 未完成的原因（如实；全部完成则不出现）。
+ */
+export interface ScopedPauseTaskResult {
+  taskId: string
+  title: string
+  sessionId: string
+  paused: boolean
+  interrupted: boolean
+  detail?: string
+}
+
+/**
+ * 作用域紧急暂停的报告（v1.4）：只停该 Router 会话派出的任务 + 其下游
+ * 子任务。不碰全局熔断、不留全局标记、之后的新派发不受影响。
+ */
+export interface ScopedPauseReport {
+  /** 逐任务如实结果。 */
+  tasks: ScopedPauseTaskResult[]
+  /** 已暂停（账本 paused 且会话已中断）的任务数。 */
+  pausedCount: number
+  /** 未完全停下的任务数（落账本失败或中断失败）。 */
+  failedCount: number
+  /** 是否已把「已暂停，等用户指示」告知 Router 会话。 */
+  notified: boolean
+  /** 告知失败的原因（如实；告知成功则不出现）。 */
+  notifyDetail?: string
+}
+
 /** GET /router/state 的完整返回。 */
 export interface RouterState {
   routerSessions: RouterSessionInfo[]
@@ -261,4 +292,9 @@ export interface RouterState {
    * 无未读卡时该键不出现。
    */
   notifications?: NotificationCard[]
+  /**
+   * 全局熔断冻结态（v1.4）：真实冻结投影，界面据此显示「解除冻结」。
+   * 缺省 = 宿主未接熔断器（无冻结概念）。
+   */
+  breaker?: BreakerVisibility
 }

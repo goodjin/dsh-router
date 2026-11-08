@@ -34,6 +34,21 @@ export function anomalyActions(): NotificationAction[] {
   ]
 }
 
+/**
+ * 暂停卡动作集（v1.4 作用域紧急暂停）：打开会话 / 取消任务 / 知道了。
+ *
+ * 与异常卡不同——**不给「重派」**：这张卡说的是「这个任务被暂停了」，重派会把
+ * 用户刚叫停的活立刻再开起来，正好和暂停的意思相反。要恢复走 control_task
+ * resume（工作台的恢复入口），不在卡上做。
+ */
+export function pausedActions(): NotificationAction[] {
+  return [
+    { action: 'open-session', label: '打开会话' },
+    { action: 'cancel', label: '取消任务' },
+    { action: 'ack', label: '知道了' },
+  ]
+}
+
 /** 写卡入参（cardId/at/ack 由存储生成，调用方不产 ID）。 */
 export interface NotificationInput {
   kind: 'completion' | 'anomaly'

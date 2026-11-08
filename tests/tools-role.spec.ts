@@ -119,6 +119,10 @@ function coreOf(calls: string[] = []): RouterCore {
       return { templateId: 'docs-writer', presetRegistered: true }
     },
     getTask: (id: string) => (id === 'T-001' ? task({ id: 'T-001', sessionId: 'worker-s-1' }) : undefined),
+    async scopedPause(routerSessionId: string) {
+      calls.push(`scoped-pause:${routerSessionId}`)
+      return { tasks: [], pausedCount: 0, failedCount: 0, notified: true }
+    },
   }
 }
 

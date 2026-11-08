@@ -656,9 +656,9 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
       calls.push('unfreeze')
       return { before: { frozen: true }, after: { frozen: false } }
     },
-    async emergencyPause() {
-      calls.push('emergency-pause')
-      return { frozen: true, interrupted: [], failedCount: 0 }
+    async scopedPause(routerSessionId: string) {
+      calls.push('scoped-pause')
+      return { tasks: [], pausedCount: 0, failedCount: 0, notified: true }
     },
     ...state,
   }

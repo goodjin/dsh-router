@@ -28,9 +28,10 @@ import type {
 } from './core-types.ts'
 import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
 import type { CircuitBreaker, BreakerVisibility } from './guard/breaker.ts'
+import { runScopedPause, scopedPauseTargets } from './guard/emergency.ts'
 import type { DispatchBudgets, BudgetSnapshot } from './guard/budgets.ts'
 import { classifyDispatchFailure } from './guard/classify.ts'
-import { anomalyActions, completionActions, type NotificationSink } from './guard/notifications.ts'
+import { anomalyActions, completionActions, pausedActions, type NotificationSink } from './guard/notifications.ts'
 import type {
   AskUserQuestionAnswerItem,
   QuestionCard,
@@ -194,6 +195,20 @@ export interface RouterCoreAssembly {
   snapshotText(): string
   refreshSnapshot(): Promise<void>
   recoverOrphans(): Promise<string[]>
+}
+
+/**
+ * 熔断冻结态的可见投影（lossless：未冻结只带 frozen；冻结才带原因与时间）。
+ * query_tasks.breaker（模型可见）与 RouterState.breaker（界面可见）共用它。
+ */
+async function breakerView(breaker: CircuitBreaker): Promise<BreakerVisibility> {
+  const state = await breaker.state()
+  const view: BreakerVisibility = { frozen: state.frozen }
+  if (state.frozen) {
+    if (state.reason !== undefined) view.reason = state.reason
+    if (state.frozenAt !== undefined) view.frozenAt = state.frozenAt
+  }
+  return view
 }
 
 /**
@@ -430,6 +445,9 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         role: input.role,
         templateId: input.templateId,
         parentId: parentTaskId,
+        // v1.4：记下派发者会话（宿主记，不靠模型自填的 parentId）——作用域紧急
+        // 暂停据此圈定「当前 Router 派出的活 + 其下游子任务」。
+        dispatchedBySessionId: callerSessionId,
         dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
         acceptancePolicy: 'auto',
       })
@@ -562,13 +580,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         result.budgets = deps.budgets.snapshot(viewerSessionId)
       }
       if (deps.breaker !== undefined) {
-        const breakerState = await deps.breaker.state()
-        const view: BreakerVisibility = { frozen: breakerState.frozen }
-        if (breakerState.frozen) {
-          if (breakerState.reason !== undefined) view.reason = breakerState.reason
-          if (breakerState.frozenAt !== undefined) view.frozenAt = breakerState.frozenAt
-        }
-        result.breaker = view
+        result.breaker = await breakerView(deps.breaker)
       }
       return result
     },
@@ -708,6 +720,42 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       return ledger.get(taskId)
     },
 
+    /**
+     * 作用域紧急暂停（v1.4）：只停「该 Router 会话派出的任务 + 其下游子任务」。
+     * 不碰全局熔断、不留任何全局标记、之后的新派发不受影响、别的 Router 会话
+     * 不受影响。派发树按宿主记的派发者会话闭包（见 guard/emergency.ts）。
+     */
+    async scopedPause(routerSessionId: string) {
+      // 只认已登记的 Router 会话：防止拿任意会话 id 圈出不属于它的范围。
+      if (!ui.routerSessions().some((entry) => entry.sessionId === routerSessionId)) {
+        throw new LedgerError('bad-request', `不是已登记的 Router 会话: ${routerSessionId}`)
+      }
+      const report = await runScopedPause(
+        {
+          targets: async () => scopedPauseTargets(await ledger.listAll(), routerSessionId),
+          markPaused: async (taskId) => {
+            await ledger.transition(taskId, 'paused')
+          },
+          interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
+          notifyTask: async (input) =>
+            deps.notifications?.push({
+              kind: 'anomaly',
+              taskId: input.taskId,
+              title: input.title,
+              summary: input.summary,
+              actions: pausedActions(),
+            }),
+          notifyRouter: async (sessionId, text) => {
+            await bridge.notify(sessionId, `scoped-pause-${sessionId}`, text)
+          },
+          logger: deps.logger,
+        },
+        routerSessionId,
+      )
+      await refreshSnapshot()
+      return report
+    },
+
     callerRoleOf,
   }
 
@@ -741,6 +789,11 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         types: deps.types !== undefined
           ? deps.types.summaries()
           : config.templates.map((template) => ({ ...template, enabled: true, origin: 'user' as const })),
+        // v1.4：把真实熔断态投影进 RouterState——界面据此显示「解除冻结」。
+        // （历史上界面靠「有没有带 unfreeze 动作的卡」推断，而没有任何代码路径
+        // 产出那种卡，于是用户永远看不到「解除冻结」，被旧版紧急暂停的全局
+        // 冻结标记永久锁死。）
+        ...(deps.breaker !== undefined ? { breaker: await breakerView(deps.breaker) } : {}),
         ...(notificationCards.length > 0 ? { notifications: notificationCards } : {}),
       }
     },

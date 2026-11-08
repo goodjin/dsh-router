@@ -41,6 +41,11 @@ export interface NewTaskInput {
   role: TaskRecord['role']
   templateId?: string
   parentId?: string
+  /**
+   * 派发者会话 ID（v1.4）：宿主记「谁派的我」，作用域紧急暂停据此圈定
+   * 当前 Router 的派发树（含下游子任务）。缺省 = 未知派发者。
+   */
+  dispatchedBySessionId?: string
   /** 依赖任务 ID；允许前向引用尚未创建的任务（环检测在创建时把关）。 */
   dependsOn?: string[]
   /** 默认 'auto'。 */
@@ -195,6 +200,7 @@ export class TaskLedger {
       role: input.role,
       templateId: input.templateId,
       parentId: input.parentId,
+      dispatchedBySessionId: input.dispatchedBySessionId,
       dependsOn,
       status: depsSatisfied ? 'draft' : 'queued',
       docVersion: 1,

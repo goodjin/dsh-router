@@ -955,8 +955,8 @@ describe('POST /router/notifications/ack（C1 只消费）', () => {
       async unfreezeBreaker() {
         return { before: { frozen: false }, after: { frozen: false } }
       },
-      async emergencyPause() {
-        return { frozen: true, interrupted: [], failedCount: 0 }
+      async scopedPause(routerSessionId: string) {
+        return { tasks: [], pausedCount: 0, failedCount: 0, notified: true }
       },
     }
     registerRouterRoutes(ctx, deps)

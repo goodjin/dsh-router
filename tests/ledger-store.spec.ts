@@ -65,6 +65,22 @@ async function completeFromDraft(ledger: TaskLedger, id: string, docVersion = 1)
   return ledger.complete(id, { docVersion, summary: '完成' })
 }
 
+describe('派发溯源：dispatchedBySessionId（v1.4 作用域暂停的归属依据）', () => {
+  it('createTask 落库派发者会话', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const record = await ledger.createTask(taskInput({ dispatchedBySessionId: 'router-s-1' }))
+    expect(record.dispatchedBySessionId).toBe('router-s-1')
+  })
+
+  it('未给派发者 → 字段缺席（旧任务：无法归属，不臆造）', async () => {
+    const p = new MemoryPersistence()
+    const ledger = new TaskLedger(p, stepClock().now)
+    const record = await ledger.createTask(taskInput())
+    expect(record.dispatchedBySessionId).toBeUndefined()
+  })
+})
+
 describe('ID 分配：T-%03d 单调', () => {
   it('同一账本内 T-001、T-002 依次分配', async () => {
     const p = new MemoryPersistence()
