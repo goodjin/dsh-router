@@ -1487,6 +1487,22 @@ export class SessionHeaderIndex {
     return this.claimedGrants.get(sessionId) ?? this.pendingGrants.get(sessionId)
   }
 
+  /** 未领取授予的条数（O(1)；诊断"是否还有新工作"用）。 */
+  unclaimedRouterGrantCount(): number {
+    return this.pendingGrants.size
+  }
+
+  /**
+   * **交还**一条已领取的授予（回到未领取面）：消费方在异常路径上没能给这条
+   * 授予安排所有者（deferred/pending）时用它兜底——交还后下一轮会重新领取，
+   * 绝不留下"已领取但无主"的孤儿（review N1）。
+   */
+  releaseRouterGrant(sessionId: string, generation: number): void {
+    if (this.claimedGrants.get(sessionId) !== generation) return
+    this.claimedGrants.delete(sessionId)
+    this.pendingGrants.set(sessionId, generation)
+  }
+
   /**
    * 消费方 ack（记账点）：代数不符即忽略——新一代资格未被消费，旧的一代
    * 不能把新一代标记成已消费。

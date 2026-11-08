@@ -53,6 +53,10 @@ export interface RouterAdoptionIndexFace {
   claimRouterGrants(limit: number): readonly RouterGrant[]
   /** 某 id 当前的资格代数（已领取或未领取都算；没有授予则 undefined）。 */
   routerGrantGeneration(sessionId: string): number | undefined
+  /** 未领取授予的条数（O(1)；判断"是否还有新工作"）。 */
+  unclaimedRouterGrantCount(): number
+  /** 交还一条已领取的授予（异常路径兜底：绝不留下无主的已领取授予）。 */
+  releaseRouterGrant(sessionId: string, generation: number): void
   /** 记账点：消费方确认已消费（代数不符即忽略）。 */
   ackRouterGrant(sessionId: string, generation: number): void
   /** 生命周期代际（await 后的授权屏障）。 */
@@ -120,6 +124,12 @@ export interface RouterAdoptionCache {
    * 时弹出即丢）。
    */
   readonly deferredHeap: DeferredHeapEntry[]
+  /**
+   * 来源轮转位（review I7 round 3）：0 = 下一���先试到期重试，1 = 先试新
+   * 授予。每完成一步翻转，**跨轮保留** → 即使 budget=1 也是交替的，新授予
+   * 不会被到期的失败积压长期饿死。
+   */
+  rotation: number
   /** 进行中的扫描（单飞）。 */
   pending: Promise<void> | undefined
   /** 诊断计数（/router/health 投喂；只计数不含私有内容）。 */
@@ -136,6 +146,10 @@ export interface RouterAdoptionCounters {
   /** 兼容字段：v1.4 起不再"永久放弃"，恒为 0（保留 wire 形状）。 */
   retriesDropped: number
   errors: number
+  /** 维护消耗：被清理的失效/墓碑延期项（占预算）。 */
+  maintenance: number
+  /** 预算耗尽的轮数（还有工作但本轮预算用完——与"没有到期项"区分）。 */
+  budgetExhausted: number
 }
 
 /** /router/health 的收编诊断面（adoption 段）。 */
@@ -156,6 +170,10 @@ export interface RouterAdoptionDiagnostics {
   /** 兼容字段：v1.4 起不再永久放弃，恒为 0。 */
   retriesDropped: number
   errors: number
+  /** 维护消耗（清理失效/墓碑延期项，占预算）。 */
+  maintenance: number
+  /** 预算耗尽的轮数（还有工作但本轮预算用完）。 */
+  budgetExhausted: number
   inflight: boolean
 }
 
@@ -172,8 +190,19 @@ export function createRouterAdoptionCache(): RouterAdoptionCache {
     delivered: new Set<string>(),
     deferred: new Map<string, DeferredCandidate>(),
     deferredHeap: [],
+    rotation: 0,
     pending: undefined,
-    counters: { rounds: 0, registered: 0, delivered: 0, verifyRejected: 0, staleSkipped: 0, retriesDropped: 0, errors: 0 },
+    counters: {
+      rounds: 0,
+      registered: 0,
+      delivered: 0,
+      verifyRejected: 0,
+      staleSkipped: 0,
+      retriesDropped: 0,
+      errors: 0,
+      maintenance: 0,
+      budgetExhausted: 0,
+    },
   }
 }
 
@@ -197,6 +226,8 @@ export function routerAdoptionDiagnostics(cache: RouterAdoptionCache): RouterAdo
     staleSkipped: cache.counters.staleSkipped,
     retriesDropped: cache.counters.retriesDropped,
     errors: cache.counters.errors,
+    maintenance: cache.counters.maintenance,
+    budgetExhausted: cache.counters.budgetExhausted,
     inflight: cache.pending !== undefined,
   }
 }
@@ -243,6 +274,15 @@ interface AdoptionCandidate {
   generation: number
 }
 
+/** 选择循环的一步（review I7 round 3）。 */
+type SelectionStep =
+  /** 一条可处理候选（到期重试或新授予）。 */
+  | { kind: 'candidate'; candidate: AdoptionCandidate }
+  /** 清理了一条失效/墓碑延期项——**占预算**（维护量与副作用共用预算）。 */
+  | { kind: 'maintenance' }
+  /** 当前两个来源都没有可做的事（不是"预算耗尽"）。 */
+  | { kind: 'none' }
+
 /** 一轮实际扫描。 */
 async function adoptPass(
   deps: RouterAdoptionDeps,
@@ -255,78 +295,103 @@ async function adoptPass(
   const now = (options.now ?? Date.now)()
   cache.counters.rounds += 1
 
-  // ── 候选集合：到期重试（堆驱动）与新授予（领取驱动）**分开枚举** ──────
-  // review I7 round 2：round 1 每轮复制全延期 Map + 构造全量 skip 集合，并从
-  // 授予面头部逐个跳过被跳项 → N 个延期项 = 每轮 O(N) 检查/分配（逐批可达
-  // O(N²/budget)）。现在：
-  // - 到期重试由**最小堆**驱动：堆顶未到期 → 本轮没有任何到期重试（O(1) 空过，
-  //   不遍历延期队列、不构造快照）；
-  // - 新授予只从**未领取面**领取（消费方正在退避重试的那些已在"已领取"面，
-  //   不参与枚举）→ 枚举到 limit 条即止（O(limit)）。
-  // 两条路都受**同一个单轮预算**约束（检查量与维护量一起封顶）。
-  const candidates: AdoptionCandidate[] = []
-  while (candidates.length < budget) {
-    const due = popDueCandidate(deps, cache, now)
-    const grant = due === undefined ? claimOneGrant(deps, cache) : undefined
-    if (due !== undefined) candidates.push(due)
-    if (grant !== undefined) candidates.push(grant)
-    if (due === undefined && grant === undefined) break
-    // 交错：到期重试与新授予轮流取 → 失败的头部不反复占预算，后来者公平前进。
-  }
-
-  // ── 逐个处理 ──────────────────────────────────────────────────────
-  for (const candidate of candidates) {
+  // ── 统一选择循环（review I7 round 3）─────────────────────────────────
+  // 一个预算 `spent` 同时约束**维护**与**副作用**：
+  // - 每弹出一个堆条目（无论有效还是失效/墓碑）都扣 1 → 维护量有界，不会
+  //   "一轮清空整个失效积压"（round 2 的 `while … continue` 就是这个问题）；
+  // - 每个被处理的候选扣 1 → 副作用数仍然 ≤ 预算。
+  // "预算耗尽"与"没有到期项"是两回事：前者意味着还有工作但本轮用完了预算
+  // （下一轮从剩余积压继续），后者意味着两侧都没活干。
+  let spent = 0
+  while (spent < budget) {
+    const step = nextStep(deps, cache, now)
+    if (step.kind === 'none') break
+    if (step.kind === 'maintenance') {
+      cache.counters.maintenance += 1
+      spent += 1
+      continue
+    }
     try {
-      await adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff)
+      await adoptCandidate(deps, cache, step.candidate, now, baseBackoff, maxBackoff)
     } catch (error) {
       // 兜底：adoptCandidate 内部已经兜住了所有异常；这里防的是"连兜底都
-      // 失败"（例如告警面本身抛错）。此时**不能丢掉已领取的授予**——否则该
-      // 候选在本进程内永远不会被再次交付。改为尽力延期。
+      // 失败"（例如告警面本身抛错）。此时**不能丢掉已领取的授予**——先保住
+      // 所有权（延期；连延期都失败就交还给未领取面），再告警。
       cache.counters.errors += 1
-      try {
-        deferCandidate(deps, cache, candidate.sessionId, candidate.generation, 'error', now, baseBackoff, maxBackoff)
-      } catch {
-        cache.deferred.delete(candidate.sessionId)
-      }
-      deps.logger?.warn(`Router 会话收编异常（${candidate.sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
+      retainOwnership(deps, cache, step.candidate, now, baseBackoff, maxBackoff)
+      safeWarn(deps, `Router 会话收编异常（${step.candidate.sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
     }
+    spent += 1
   }
+  if (spent >= budget && hasMoreWork(deps, cache, now)) cache.counters.budgetExhausted += 1
 }
 
 /**
- * 取一条**到期**的延期候选（最小堆驱动，review I7 round 2）。
+ * 取下一步工作（review I7 round 3：来源**明确交替**，轮转位跨轮保留）。
  *
- * - 堆顶未到期 → 直接返回 undefined（O(1) 空过；不遍历延期队列）；
- * - 堆条目与延期记录不一致（已删/已改期）→ 惰性丢弃，继续看下一条；
- * - 资格已被索引撤销 / 资格换代 → 该延期项作废（不是丢弃：新资格由领取面
- *   单独交付），返回 undefined。
+ * - 轮转位 `cache.rotation` 决定本步**先试哪个来源**（0 = 到期重试，
+ *   1 = 新授予），每完成一步就翻转 —— 因此 budget=1 时也是交替的，新授予
+ *   不会被到期的失败积压长期饿死（round 2 的"到期优先"就是这个问题）。
+ * - 首选来源暂时没活时，回落到另一来源（不消耗预算：空检查是 O(1)）。
+ */
+function nextStep(deps: RouterAdoptionDeps, cache: RouterAdoptionCache, now: number): SelectionStep {
+  const preferDue = cache.rotation === 0
+  const take = (step: SelectionStep): SelectionStep => {
+    if (step.kind !== 'none') cache.rotation = preferDue ? 1 : 0
+    return step
+  }
+  if (preferDue) {
+    const due = popDueCandidate(deps, cache, now)
+    if (due.kind !== 'none') return take(due)
+    const grant = claimOneGrant(deps, cache)
+    if (grant !== undefined) return take({ kind: 'candidate', candidate: grant })
+    return { kind: 'none' }
+  }
+  const grant = claimOneGrant(deps, cache)
+  if (grant !== undefined) return take({ kind: 'candidate', candidate: grant })
+  const due = popDueCandidate(deps, cache, now)
+  if (due.kind !== 'none') return take(due)
+  return { kind: 'none' }
+}
+
+/** 是否还有（可能）可做的事：到期堆顶已到期，或未领取面非空。 */
+function hasMoreWork(deps: RouterAdoptionDeps, cache: RouterAdoptionCache, now: number): boolean {
+  const top = cache.deferredHeap[0]
+  if (top !== undefined && top.nextAttemptAt <= now) return true
+  return deps.index.unclaimedRouterGrantCount() > 0
+}
+
+/**
+ * 取一条**到期**的延期候选（最小堆驱动）。
+ *
+ * **每次调用最多弹出一个堆条目**（review I7 round 3）：失效/墓碑条目返回
+ * `maintenance`（由调用方扣预算），不能内部无限 `continue` —— 否则一轮就能
+ * 清空整个失效积压（维护量 O(backlog) 且不占预算）。
  */
 function popDueCandidate(
   deps: RouterAdoptionDeps,
   cache: RouterAdoptionCache,
   now: number,
-): AdoptionCandidate | undefined {
-  while (cache.deferredHeap.length > 0) {
-    const top = cache.deferredHeap[0]!
-    if (top.nextAttemptAt > now) return undefined // 未到期 → 本轮无到期重试
-    heapPop(cache)
-    const record = cache.deferred.get(top.sessionId)
-    if (record === undefined) continue // 已移出 → 惰性丢弃
-    if (record.nextAttemptAt !== top.nextAttemptAt) continue // 已改期 → 惰性丢弃
-    const generation = deps.index.routerGrantGeneration(top.sessionId)
-    if (generation === undefined) {
-      // 资格已被撤销（不再成立）→ 不再重试这条（将来重新成立会有新一代授予）。
-      cache.deferred.delete(top.sessionId)
-      continue
-    }
-    if (generation !== record.generation) {
-      // 资格换代（新一代已由领取面交付）→ 旧的延期项作废，不与新代抢。
-      cache.deferred.delete(top.sessionId)
-      continue
-    }
-    return { sessionId: top.sessionId, generation: record.generation }
+): SelectionStep {
+  const top = cache.deferredHeap[0]
+  if (top === undefined) return { kind: 'none' }
+  if (top.nextAttemptAt > now) return { kind: 'none' } // 未到期 → 本轮无到期重试
+  heapPop(cache)
+  const record = cache.deferred.get(top.sessionId)
+  if (record === undefined) return { kind: 'maintenance' } // 已移出 → 墓碑
+  if (record.nextAttemptAt !== top.nextAttemptAt) return { kind: 'maintenance' } // 已改期 → 旧条目
+  const generation = deps.index.routerGrantGeneration(top.sessionId)
+  if (generation === undefined) {
+    // 资格已被撤销（不再成立）→ 不再重试这条（将来重新成立会有新一代授予）。
+    cache.deferred.delete(top.sessionId)
+    return { kind: 'maintenance' }
   }
-  return undefined
+  if (generation !== record.generation) {
+    // 资格换代（新一代已由领取面交付）→ 旧的延期项作废，不与新代抢。
+    cache.deferred.delete(top.sessionId)
+    return { kind: 'maintenance' }
+  }
+  return { kind: 'candidate', candidate: { sessionId: top.sessionId, generation: record.generation } }
 }
 
 /** 领取一条新授予（未领取面；O(1) 摊还，稳态未领取面为空 → 空过）。 */
@@ -500,8 +565,47 @@ async function adoptCandidate(
     cache.deferred.delete(sessionId)
   } catch (error) {
     cache.counters.errors += 1
-    deps.logger?.warn(`Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
+    // **先保住所有权再告警**：告警面本身抛错不得打断恢复路径（round 3 N1）。
     deferCandidate(deps, cache, sessionId, candidate.generation, 'error', now, baseBackoff, maxBackoff)
+    safeWarn(deps, `Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 告警（**吞掉自己的异常**）：告警面抛错不得打断收编的恢复路径——否则
+ * 已领取的授予会失去所有者（round 3 N1）。
+ */
+function safeWarn(deps: RouterAdoptionDeps, message: string): void {
+  try {
+    deps.logger?.warn(message)
+  } catch {
+    // 告警面自身失败：忽略（不能让它中断收编/重试的所有权交接）。
+  }
+}
+
+/**
+ * 保住一个已领取候选的**所有权**（round 3 N1）：正常路径是"延期"；连延期都
+ * 失败（索引面异常）时，把授予**交还**未领取面——下一轮重新领取，绝不留下
+ * "已领取但既不在 pending 也不在 deferred"的孤儿。
+ */
+function retainOwnership(
+  deps: RouterAdoptionDeps,
+  cache: RouterAdoptionCache,
+  candidate: AdoptionCandidate,
+  now: number,
+  baseBackoff: number,
+  maxBackoff: number,
+): void {
+  try {
+    deferCandidate(deps, cache, candidate.sessionId, candidate.generation, 'error', now, baseBackoff, maxBackoff)
+    if (cache.deferred.has(candidate.sessionId)) return
+  } catch {
+    // 延期失败 → 走交还路径。
+  }
+  try {
+    deps.index.releaseRouterGrant(candidate.sessionId, candidate.generation)
+  } catch {
+    // 交还也失败：只能留给索引侧（下轮由资格重新发放兜底）。
   }
 }
 

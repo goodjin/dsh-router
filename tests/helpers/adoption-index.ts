@@ -138,6 +138,14 @@ export function createFakeIndex(init: FakeIndexInit = {}): FakeIndex {
     routerGrantGeneration(sessionId: string): number | undefined {
       return claimed.get(sessionId) ?? grants.get(sessionId)
     },
+    unclaimedRouterGrantCount(): number {
+      return grants.size
+    },
+    releaseRouterGrant(sessionId: string, generation: number): void {
+      if (claimed.get(sessionId) !== generation) return
+      claimed.delete(sessionId)
+      grants.set(sessionId, generation)
+    },
     ackRouterGrant(sessionId: string, generation: number): void {
       if (claimed.get(sessionId) === generation) {
         claimed.delete(sessionId)

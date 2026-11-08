@@ -2004,6 +2004,7 @@ function createRouterAdoptionCache() {
 		delivered: /* @__PURE__ */ new Set(),
 		deferred: /* @__PURE__ */ new Map(),
 		deferredHeap: [],
+		rotation: 0,
 		pending: void 0,
 		counters: {
 			rounds: 0,
@@ -2012,7 +2013,9 @@ function createRouterAdoptionCache() {
 			verifyRejected: 0,
 			staleSkipped: 0,
 			retriesDropped: 0,
-			errors: 0
+			errors: 0,
+			maintenance: 0,
+			budgetExhausted: 0
 		}
 	};
 }
@@ -2036,6 +2039,8 @@ function routerAdoptionDiagnostics(cache) {
 		staleSkipped: cache.counters.staleSkipped,
 		retriesDropped: cache.counters.retriesDropped,
 		errors: cache.counters.errors,
+		maintenance: cache.counters.maintenance,
+		budgetExhausted: cache.counters.budgetExhausted,
 		inflight: cache.pending !== void 0
 	};
 }
@@ -2073,56 +2078,96 @@ async function adoptPass(deps, cache, options) {
 	const maxBackoff = Math.max(baseBackoff, options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS);
 	const now = (options.now ?? Date.now)();
 	cache.counters.rounds += 1;
-	const candidates = [];
-	while (candidates.length < budget) {
-		const due = popDueCandidate(deps, cache, now);
-		const grant = due === void 0 ? claimOneGrant(deps, cache) : void 0;
-		if (due !== void 0) candidates.push(due);
-		if (grant !== void 0) candidates.push(grant);
-		if (due === void 0 && grant === void 0) break;
-	}
-	for (const candidate of candidates) try {
-		await adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff);
-	} catch (error) {
-		cache.counters.errors += 1;
-		try {
-			deferCandidate(deps, cache, candidate.sessionId, candidate.generation, "error", now, baseBackoff, maxBackoff);
-		} catch {
-			cache.deferred.delete(candidate.sessionId);
+	let spent = 0;
+	while (spent < budget) {
+		const step = nextStep(deps, cache, now);
+		if (step.kind === "none") break;
+		if (step.kind === "maintenance") {
+			cache.counters.maintenance += 1;
+			spent += 1;
+			continue;
 		}
-		deps.logger?.warn(`Router 会话收编异常（${candidate.sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`);
+		try {
+			await adoptCandidate(deps, cache, step.candidate, now, baseBackoff, maxBackoff);
+		} catch (error) {
+			cache.counters.errors += 1;
+			retainOwnership(deps, cache, step.candidate, now, baseBackoff, maxBackoff);
+			safeWarn(deps, `Router 会话收编异常（${step.candidate.sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		spent += 1;
 	}
+	if (spent >= budget && hasMoreWork(deps, cache, now)) cache.counters.budgetExhausted += 1;
 }
 /**
-* 取一条**到期**的延期候选（最小堆驱动，review I7 round 2）。
+* 取下一步工作（review I7 round 3：来源**明确交替**，轮转位跨轮保留）。
 *
-* - 堆顶未到期 → 直接返回 undefined（O(1) 空过；不遍历延期队列）；
-* - 堆条目与延期记录不一致（已删/已改期）→ 惰性丢弃，继续看下一条；
-* - 资格已被索引撤销 / 资格换代 → 该延期项作废（不是丢弃：新资格由领取面
-*   单独交付），返回 undefined。
+* - 轮转位 `cache.rotation` 决定本步**先试哪个来源**（0 = 到期重试，
+*   1 = 新授予），每完成一步就翻转 —— 因此 budget=1 时也是交替的，新授予
+*   不会被到期的失败积压长期饿死（round 2 的"到期优先"就是这个问题）。
+* - 首选来源暂时没活时，回落到另一来源（不消耗预算：空检查是 O(1)）。
+*/
+function nextStep(deps, cache, now) {
+	const preferDue = cache.rotation === 0;
+	const take = (step) => {
+		if (step.kind !== "none") cache.rotation = preferDue ? 1 : 0;
+		return step;
+	};
+	if (preferDue) {
+		const due$1 = popDueCandidate(deps, cache, now);
+		if (due$1.kind !== "none") return take(due$1);
+		const grant$1 = claimOneGrant(deps, cache);
+		if (grant$1 !== void 0) return take({
+			kind: "candidate",
+			candidate: grant$1
+		});
+		return { kind: "none" };
+	}
+	const grant = claimOneGrant(deps, cache);
+	if (grant !== void 0) return take({
+		kind: "candidate",
+		candidate: grant
+	});
+	const due = popDueCandidate(deps, cache, now);
+	if (due.kind !== "none") return take(due);
+	return { kind: "none" };
+}
+/** 是否还有（可能）可做的事：到期堆顶已到期，或未领取面非空。 */
+function hasMoreWork(deps, cache, now) {
+	const top = cache.deferredHeap[0];
+	if (top !== void 0 && top.nextAttemptAt <= now) return true;
+	return deps.index.unclaimedRouterGrantCount() > 0;
+}
+/**
+* 取一条**到期**的延期候选（最小堆驱动）。
+*
+* **每次调用最多弹出一个堆条目**（review I7 round 3）：失效/墓碑条目返回
+* `maintenance`（由调用方扣预算），不能内部无限 `continue` —— 否则一轮就能
+* 清空整个失效积压（维护量 O(backlog) 且不占预算）。
 */
 function popDueCandidate(deps, cache, now) {
-	while (cache.deferredHeap.length > 0) {
-		const top = cache.deferredHeap[0];
-		if (top.nextAttemptAt > now) return void 0;
-		heapPop(cache);
-		const record = cache.deferred.get(top.sessionId);
-		if (record === void 0) continue;
-		if (record.nextAttemptAt !== top.nextAttemptAt) continue;
-		const generation = deps.index.routerGrantGeneration(top.sessionId);
-		if (generation === void 0) {
-			cache.deferred.delete(top.sessionId);
-			continue;
-		}
-		if (generation !== record.generation) {
-			cache.deferred.delete(top.sessionId);
-			continue;
-		}
-		return {
+	const top = cache.deferredHeap[0];
+	if (top === void 0) return { kind: "none" };
+	if (top.nextAttemptAt > now) return { kind: "none" };
+	heapPop(cache);
+	const record = cache.deferred.get(top.sessionId);
+	if (record === void 0) return { kind: "maintenance" };
+	if (record.nextAttemptAt !== top.nextAttemptAt) return { kind: "maintenance" };
+	const generation = deps.index.routerGrantGeneration(top.sessionId);
+	if (generation === void 0) {
+		cache.deferred.delete(top.sessionId);
+		return { kind: "maintenance" };
+	}
+	if (generation !== record.generation) {
+		cache.deferred.delete(top.sessionId);
+		return { kind: "maintenance" };
+	}
+	return {
+		kind: "candidate",
+		candidate: {
 			sessionId: top.sessionId,
 			generation: record.generation
-		};
-	}
+		}
+	};
 }
 /** 领取一条新授予（未领取面；O(1) 摊还，稳态未领取面为空 → 空过）。 */
 function claimOneGrant(deps, cache) {
@@ -2269,9 +2314,32 @@ async function adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBacko
 		cache.deferred.delete(sessionId);
 	} catch (error) {
 		cache.counters.errors += 1;
-		deps.logger?.warn(`Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`);
 		deferCandidate(deps, cache, sessionId, candidate.generation, "error", now, baseBackoff, maxBackoff);
+		safeWarn(deps, `Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`);
 	}
+}
+/**
+* 告警（**吞掉自己的异常**）：告警面抛错不得打断收编的恢复路径——否则
+* 已领取的授予会失去所有者（round 3 N1）。
+*/
+function safeWarn(deps, message) {
+	try {
+		deps.logger?.warn(message);
+	} catch {}
+}
+/**
+* 保住一个已领取候选的**所有权**（round 3 N1）：正常路径是"延期"；连延期都
+* 失败（索引面异常）时，把授予**交还**未领取面——下一轮重新领取，绝不留下
+* "已领取但既不在 pending 也不在 deferred"的孤儿。
+*/
+function retainOwnership(deps, cache, candidate, now, baseBackoff, maxBackoff) {
+	try {
+		deferCandidate(deps, cache, candidate.sessionId, candidate.generation, "error", now, baseBackoff, maxBackoff);
+		if (cache.deferred.has(candidate.sessionId)) return;
+	} catch {}
+	try {
+		deps.index.releaseRouterGrant(candidate.sessionId, candidate.generation);
+	} catch {}
 }
 /**
 * 延期一个候选（**不丢**）：失败按指数退避改期（封顶），下一轮到期再试。
@@ -4886,6 +4954,20 @@ var SessionHeaderIndex = class {
 	/** 某 id 当前的资格代数（已领取或未领取都算；没有授予则 undefined）。 */
 	routerGrantGeneration(sessionId) {
 		return this.claimedGrants.get(sessionId) ?? this.pendingGrants.get(sessionId);
+	}
+	/** 未领取授予的条数（O(1)；诊断"是否还有新工作"用）。 */
+	unclaimedRouterGrantCount() {
+		return this.pendingGrants.size;
+	}
+	/**
+	* **交还**一条已领取的授予（回到未领取面）：消费方在异常路径上没能给这条
+	* 授予安排所有者（deferred/pending）时用它兜底——交还后下一轮会重新领取，
+	* 绝不留下"已领取但无主"的孤儿（review N1）。
+	*/
+	releaseRouterGrant(sessionId, generation) {
+		if (this.claimedGrants.get(sessionId) !== generation) return;
+		this.claimedGrants.delete(sessionId);
+		this.pendingGrants.set(sessionId, generation);
 	}
 	/**
 	* 消费方 ack（记账点）：代数不符即忽略——新一代资格未被消费，旧的一代
