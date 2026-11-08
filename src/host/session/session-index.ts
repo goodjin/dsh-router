@@ -415,19 +415,25 @@ export class SessionHeaderIndex {
    */
   private membershipIndex = new Map<string, string>()
   /**
-   * router 资格授予（review I1）：`grantState` 是每个 id 的资格记录
-   * （代数 + 当前是否成立），`pendingGrants` 只装**未被消费方 ack** 的授予
-   * （插入序；稳态为空 → 每轮 O(1)）。资格"不再成立"时撤下待消费授予；
-   * "又成立"时发**新一代**授予（代数 +1）——旧基线不会把 id 永久吞掉。
+   * router 资格授予（review I1 + I7 round 2）：`grantState` 是每个 id 的资格
+   * 记录（代数 + 当前是否成立）；`pendingGrants` 装**未被领取**的授予（新事实，
+   * 插入序；稳态为空 → 每轮 O(1)）；`claimedGrants` 装**已被消费方领取但尚未
+   * ack** 的授予（消费方正在自行排期重试的那些 —— 不再参与每轮枚举）。
+   * 资格"不再成立"时两侧都撤下；"又成立"时发**新一代**授予（回未领取面）。
    */
   private readonly grantState = new Map<string, { generation: number; eligible: boolean }>()
   private readonly pendingGrants = new Map<string, number>()
+  private readonly claimedGrants = new Map<string, number>()
   private eligibilitySeq = 0
   /**
    * live 实例身份（生命周期 token）：`session/created` 认领当前实例；被替换
    * 的旧实例进 `retiredInstances`（弱引用集）——旧实例的迟到事件与 disposed
-   * 都不再影响新实例（review I6）。事件面**不夺走**已认领的实例（宿主可能
-   * 用包装对象投递事件），只在还没有实例时认领。
+   * 都不再影响新实例（review I6）。
+   *
+   * 事件面的身份检查是**兼容护栏**而不是事实假设：已核实的当前宿主在
+   * created / event / disposed 三处传的是**同一个 Session 实例**，因此严格
+   * 比对是可靠的；这里对"未被认领过的其它对象"保持宽容，只是为了将来宿主
+   * 改用包装对象投递时不至于丢掉权威事件（旧实例仍被退休集挡住）。
    */
   private readonly liveInstances = new Map<string, object>()
   private readonly retiredInstances = new WeakSet<object>()
@@ -461,6 +467,8 @@ export class SessionHeaderIndex {
     scanFinals: 0,
     scanCaps: 0,
     scanUnstable: 0,
+    /** I7 round 2：领取面枚举时真正访问过的未领取授予条数（成本口径）。 */
+    grantVisits: 0,
   }
 
   constructor(deps: SessionIndexDeps) {
@@ -1377,7 +1385,8 @@ export class SessionHeaderIndex {
     const eventId = liveSessionId(session)
     if (eventId === undefined) return
     // 生命周期 token：**被替换的旧实例**的迟到事件不改新实例的事实
-    // （review I6）；已认领的实例不被事件夺走（宿主可能用包装对象投递）。
+    // （review I6）。已核实的宿主三事件传同一实例；这里对未被认领过的其它
+    // 对象保持宽容（兼容护栏），已认领的实例不被事件夺走。
     if (this.retiredInstances.has(session as object)) return
     if (!this.liveInstances.has(eventId)) this.liveInstances.set(eventId, session as object)
     this.membershipStale = true
@@ -1434,23 +1443,48 @@ export class SessionHeaderIndex {
    * - 稳态：待消费面为空 → 本方法 O(1)，不做全库重建。
    *
    * @param limit - 本次最多取几条（消费方的单轮预算）。
-   * @param skip - 消费方正在**自行排期重试**的 id（跳过它们，避免同一候选
-   *   反复占用预算；它们仍在待消费面，恢复后仍会被取到）。
    */
-  pendingRouterGrants(limit: number, skip?: ReadonlySet<string>): readonly RouterGrant[] {
+  unclaimedRouterGrants(limit: number): readonly RouterGrant[] {
     const out: RouterGrant[] = []
     if (limit <= 0) return out
     for (const [sessionId, generation] of this.pendingGrants) {
       if (out.length >= limit) break
-      if (skip?.has(sessionId)) continue
       out.push({ sessionId, generation })
     }
     return out
   }
 
-  /** 待消费面上某 id 当前的资格代数（没有待消费授予则 undefined）。 */
+  /**
+   * **领取**未领取的资格授予（review I7 round 2）：把至多 `limit` 条从未领取
+   * 的授予移入「已领取」面并返回。
+   *
+   * 为什么要有"领取"这一步（与 round 1 的"读 + skip 集合"不同）：消费方需要
+   * **把"新授予"和"自己正在退避重试的旧授予"分开枚举**。round 1 用 skip 集合
+   * 跳过已延期项，但 skip 项不消耗访问预算 → 每轮仍要从头遍历全部积压
+   * （N 个延期项 → 每轮 O(N) 检查/分配）。拆成两个面之后：
+   * - 未领取面只装**新**授予 → 枚举到 `limit` 条即止（O(limit)）；
+   * - 已领取面装消费方**正在自行排期重试**的授予 → 它们由消费方的到期调度
+   *   驱动，不再参与每轮枚举。
+   *
+   * 记账不变：ack 前授予不丢；资格撤销（不再成立）时两侧都撤下；重新成立发
+   * **新一代**授予（回到未领取面，不会被旧的延期项吞掉）。
+   */
+  claimRouterGrants(limit: number): readonly RouterGrant[] {
+    const out: RouterGrant[] = []
+    if (limit <= 0) return out
+    for (const [sessionId, generation] of this.pendingGrants) {
+      if (out.length >= limit) break
+      this.counters.grantVisits += 1
+      this.pendingGrants.delete(sessionId)
+      this.claimedGrants.set(sessionId, generation)
+      out.push({ sessionId, generation })
+    }
+    return out
+  }
+
+  /** 某 id 当前的资格代数（已领取或未领取都算；没有授予则 undefined）。 */
   routerGrantGeneration(sessionId: string): number | undefined {
-    return this.pendingGrants.get(sessionId)
+    return this.claimedGrants.get(sessionId) ?? this.pendingGrants.get(sessionId)
   }
 
   /**
@@ -1458,13 +1492,18 @@ export class SessionHeaderIndex {
    * 不能把新一代标记成已消费。
    */
   ackRouterGrant(sessionId: string, generation: number): void {
+    if (this.claimedGrants.get(sessionId) === generation) {
+      this.claimedGrants.delete(sessionId)
+      return
+    }
     if (this.pendingGrants.get(sessionId) === generation) this.pendingGrants.delete(sessionId)
   }
 
   /**
    * 资格同步（唯一入口）：某 id 的资格当前是否成立 = 条目判定为 router
    * **且**已核验（不在 unverified 集里——载入缓存未核指纹前不授权）。
-   * 成立且此前不成立 → 发新一代授予；此前成立现在不成立 → 撤下待消费授予。
+   * 成立且此前不成立 → 发新一代授予（回未领取面）；此前成立现在不成立 →
+   * 撤下两侧的授予。
    */
   private syncRouterGrant(sessionId: string): void {
     const entry = this.entries.get(sessionId)
@@ -1481,6 +1520,7 @@ export class SessionHeaderIndex {
     if (state !== undefined && state.eligible) {
       state.eligible = false
       this.pendingGrants.delete(sessionId)
+      this.claimedGrants.delete(sessionId)
     }
   }
 
@@ -1828,7 +1868,7 @@ export class SessionHeaderIndex {
     concurrency: { inflightAdvance: boolean; inflightReconcile: boolean; reconcileRuns: number; advanceRuns: number }
     degraded: { unsupportedCodec: boolean }
     /** 资格授予面（review I1）：待消费授予数 + 当前成立资格数。 */
-    grant: { pending: number; eligible: number }
+    grant: { pending: number; claimed: number; eligible: number; visits: number }
   } {
     const breakdown = { total: this.entries.size, router: 0, nonrouter: 0, unknown: 0, live: 0 }
     const byEvidence = { 'stable-eof': 0, 'header-seeded': 0, live: 0, none: 0 }
@@ -1881,7 +1921,9 @@ export class SessionHeaderIndex {
       },
       grant: {
         pending: this.pendingGrants.size,
+        claimed: this.claimedGrants.size,
         eligible: [...this.grantState.values()].filter((state) => state.eligible).length,
+        visits: this.counters.grantVisits,
       },
     }
   }

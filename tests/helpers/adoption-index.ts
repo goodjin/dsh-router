@@ -20,21 +20,25 @@ export interface FakeIndex {
   archived: Set<string>
   /** 定点磁盘核验结果（false = untrusted/changed/missing）。 */
   diskOk: Map<string, boolean>
-  /** 资格授予：id → 代数（未 ack 的都在待消费面）。 */
+  /** **未领取**的资格授予：id → 代数。 */
   grants: Map<string, number>
+  /** **已领取未 ack** 的资格授予：id → 代数。 */
+  claimed: Map<string, number>
   /** 生命周期代际。 */
   tokens: Map<string, number>
   /** 定点核验调用记录（每轮一个候选名）。 */
   verifyCalls: string[][]
   /** verifyTargets 调用记录。 */
   targetCalls: Array<{ workspaceId: string; sessionIds: readonly string[] }>
+  /** 领取面枚举时真正访问过的未领取授予条数（成本口径）。 */
+  grantVisits: number
   /** 核验等待期间触发的钩子（模拟异步间隙的变化）。 */
   onVerify?: (sessionId: string) => void
   /** 核验等待期间的目标核验钩子。 */
   onVerifyTargets?: (sessionId: string) => void
-  /** 递增资格代数并发新一代授予。 */
+  /** 递增资格代数并发新一代授予（回未领取面）。 */
   regrant(sessionId: string): void
-  /** 撤下资格（不再成立）。 */
+  /** 撤下资格（不再成立；两侧都撤）。 */
   revokeGrant(sessionId: string): void
   /** 推进生命周期代际（模拟 live 权威变化）。 */
   bumpToken(sessionId: string): void
@@ -56,6 +60,7 @@ export function createFakeIndex(init: FakeIndexInit = {}): FakeIndex {
   const diskOk = new Map<string, boolean>(Object.entries(init.diskOk ?? {}))
   const grants = new Map<string, number>()
   for (const id of init.grants ?? []) grants.set(id, 1)
+  const claimed = new Map<string, number>()
   const tokens = new Map<string, number>()
 
   const fake: FakeIndex = {
@@ -65,15 +70,19 @@ export function createFakeIndex(init: FakeIndexInit = {}): FakeIndex {
     archived,
     diskOk,
     grants,
+    claimed,
     tokens,
     verifyCalls: [],
     targetCalls: [],
+    grantVisits: 0,
     regrant(sessionId: string) {
-      const generation = (grants.get(sessionId) ?? 0) + 1
+      const generation = (grants.get(sessionId) ?? claimed.get(sessionId) ?? 0) + 1
+      claimed.delete(sessionId)
       grants.set(sessionId, generation)
     },
     revokeGrant(sessionId: string) {
       grants.delete(sessionId)
+      claimed.delete(sessionId)
     },
     bumpToken(sessionId: string) {
       tokens.set(sessionId, (tokens.get(sessionId) ?? 0) + 1)
@@ -114,19 +123,26 @@ export function createFakeIndex(init: FakeIndexInit = {}): FakeIndex {
       if (workspaceId === undefined) return undefined
       return { workspaceId, archived: archived.has(sessionId) }
     },
-    pendingRouterGrants(limit: number, skip?: ReadonlySet<string>): readonly RouterGrant[] {
+    claimRouterGrants(limit: number): readonly RouterGrant[] {
       const out: RouterGrant[] = []
-      for (const [sessionId, generation] of grants) {
+      if (limit <= 0) return out
+      for (const [sessionId, generation] of [...grants]) {
         if (out.length >= limit) break
-        if (skip?.has(sessionId)) continue
+        fake.grantVisits += 1
+        grants.delete(sessionId)
+        claimed.set(sessionId, generation)
         out.push({ sessionId, generation })
       }
       return out
     },
     routerGrantGeneration(sessionId: string): number | undefined {
-      return grants.get(sessionId)
+      return claimed.get(sessionId) ?? grants.get(sessionId)
     },
     ackRouterGrant(sessionId: string, generation: number): void {
+      if (claimed.get(sessionId) === generation) {
+        claimed.delete(sessionId)
+        return
+      }
       if (grants.get(sessionId) === generation) grants.delete(sessionId)
     },
     authorityToken(sessionId: string): number {

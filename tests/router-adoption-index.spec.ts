@@ -208,7 +208,7 @@ describe('review I2：投递失败必须传播（只有真成功才记账）', (
     await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now })
     expect(state.deliveries, '投递失败不能记成已投递').toEqual([])
     expect(cache.delivered.has('router-a')).toBe(false)
-    expect(fake.grants.has('router-a'), '投递失败不能 ack 掉资格').toBe(true)
+    expect(fake.claimed.has('router-a'), '投递失败不能 ack 掉资格').toBe(true)
     expect(cache.deferred.size).toBe(1)
 
     failing = false

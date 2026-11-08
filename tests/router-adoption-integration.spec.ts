@@ -220,7 +220,7 @@ describe('冷日志 → 索引 → 收编：真实 FS 集成', () => {
     })
     await second.hydrate()
     expect(second.verdictOf('router-cold').status, '载入缓存未核指纹前不得授权').toBe('pending')
-    expect(second.pendingRouterGrants(10), '未核验的候选不该出现在待消费面').toEqual([])
+    expect(second.unclaimedRouterGrants(10), '未核验的候选不该出现在待消费面').toEqual([])
 
     // 对账核到同一指纹 → 资格成立 → 收编照常发生。
     const { deps, registered, deliveries } = adoptionDeps(second)
@@ -230,7 +230,7 @@ describe('冷日志 → 索引 → 收编：真实 FS 集成', () => {
 
     await second.reconcile()
     expect(second.verdictOf('router-cold')).toMatchObject({ status: 'classified', verdict: 'router' })
-    expect(second.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['router-cold'])
+    expect(second.unclaimedRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['router-cold'])
 
     await scanAndAdoptRouterSessions(deps, 'dsh-router', cache)
     expect(registered).toEqual(['router-cold'])

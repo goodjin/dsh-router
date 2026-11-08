@@ -207,3 +207,197 @@ describe('健康诊断（延期 / 下次重试）', () => {
     await index.dispose()
   })
 })
+
+/* ─────────────────── I7 round 2：延期积压不得让每轮全扫 ─────────────────── */
+
+/** 计数包装：统计消费侧对真实索引的判定查询次数。 */
+function countedIndex(index: SessionHeaderIndex, checks: { verdict: number }) {
+  return new Proxy(index, {
+    get(target, prop, receiver) {
+      if (prop === 'verdictOf') {
+        return (sessionId: string) => {
+          checks.verdict += 1
+          return target.verdictOf(sessionId)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
+
+/** 可注入时钟。 */
+function clock(start = 0) {
+  let value = start
+  return { now: () => value, advance: (ms: number) => { value += ms } }
+}
+
+describe('I7 round 2：大量未到期延期候选不得让每轮全扫（真实索引计数）', () => {
+  /** 造 1000 个 live router 候选（成员表为空 → 全部进入延期队列）。 */
+  function backlog(count: number) {
+    const membership = countedMembership([{ id: 'ws', sessionIds: [] as string[] }])
+    const index = new SessionHeaderIndex({
+      root: '/nonexistent-router-backlog-root',
+      routerPreset: 'dsh-router',
+      membership: membership.face,
+      resolveLivePreset: () => 'dsh-router',
+    })
+    for (let i = 0; i < count; i += 1) index.onLiveSession(liveRouterSession(`s${i}`))
+    const checks = { verdict: 0 }
+    const deps = {
+      index: countedIndex(index, checks),
+      known: () => false,
+      register: async () => {},
+      deliver: async () => {},
+    }
+    return { index, membership, checks, deps }
+  }
+
+  it('1000 个未到期延期 + 零新授予：一轮零判定查询、零授予访问', async () => {
+    const { index, checks, deps } = backlog(1000)
+    await index.reconcile()
+    const cache = createRouterAdoptionCache()
+    const time = clock(0)
+    // 100 轮预算 10 → 1000 个候选全部延期（成员表为空 → not-member）。
+    for (let round = 0; round < 100; round += 1) {
+      await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    }
+    expect(cache.deferred.size, '1000 个候选都该在延期队列里').toBe(1000)
+
+    // 关键一轮：没有到期重试、也没有新授予 → 不该有任何检查/枚举。
+    checks.verdict = 0
+    const visitsBefore = index.diagnostics().grant.visits
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    expect(checks.verdict, '未到期延期不得触发逐条判定查询').toBe(0)
+    expect(index.diagnostics().grant.visits - visitsBefore, '未到期延期不得触发授予面枚举').toBe(0)
+    expect(cache.deferred.size).toBe(1000)
+    await index.dispose()
+  })
+
+  it('到期重试与新授予都受单轮预算约束（检查量随有效工作增长）', async () => {
+    const { index, checks, deps } = backlog(1000)
+    await index.reconcile()
+    const cache = createRouterAdoptionCache()
+    const time = clock(0)
+    for (let round = 0; round < 100; round += 1) {
+      await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    }
+    // 让全部延期到期：下一轮只应处理预算内的候选。
+    time.advance(10_000)
+    checks.verdict = 0
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    // 每个候选最多 3 次判定查询（定位后 / 核验后 / 登记后）→ 检查量与预算同阶。
+    expect(checks.verdict).toBeLessThanOrEqual(30)
+    expect(checks.verdict).toBeGreaterThan(0)
+    await index.dispose()
+  })
+
+  it('旧延期前缀之后出现的新授予仍及时交付（不被旧积压挡住）', async () => {
+    const membership = countedMembership([{ id: 'ws', sessionIds: [] as string[] }])
+    const index = new SessionHeaderIndex({
+      root: '/nonexistent-router-backlog-root',
+      routerPreset: 'dsh-router',
+      membership: membership.face,
+      resolveLivePreset: () => 'dsh-router',
+    })
+    for (let i = 0; i < 1000; i += 1) index.onLiveSession(liveRouterSession(`s${i}`))
+    await index.reconcile()
+    const registered: string[] = []
+    const delivered: string[] = []
+    const checks = { verdict: 0 }
+    const deps = {
+      index: countedIndex(index, checks),
+      known: () => false,
+      register: async (sessionId: string) => { registered.push(sessionId) },
+      deliver: async (sessionId: string) => { delivered.push(sessionId) },
+    }
+    const cache = createRouterAdoptionCache()
+    const time = clock(0)
+    for (let round = 0; round < 100; round += 1) {
+      await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    }
+    expect(cache.deferred.size).toBe(1000)
+    expect(registered).toEqual([])
+
+    // 新候选出现且挂进工作区：下一轮就该被交付（不等 1000 个旧延期）。
+    membership.face.get('ws')!.sessionIds.push('fresh')
+    index.onLiveSession(liveRouterSession('fresh'))
+    await index.reconcile()
+    checks.verdict = 0
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now, budgetPerRound: 10 })
+    expect(registered, '新授予必须及时交付').toEqual(['fresh'])
+    expect(delivered).toEqual(['fresh'])
+    expect(checks.verdict, '这一轮只该检查新候选，不该遍历旧积压').toBeLessThanOrEqual(3)
+    await index.dispose()
+  })
+
+  it('新一代资格接管旧的延期项（不被旧退避吞掉）', async () => {
+    const membership = countedMembership([{ id: 'ws', sessionIds: [] as string[] }])
+    const index = new SessionHeaderIndex({
+      root: '/nonexistent-router-backlog-root',
+      routerPreset: 'dsh-router',
+      membership: membership.face,
+      resolveLivePreset: () => 'dsh-router',
+    })
+    const session = liveRouterSession('s0')
+    index.onLiveSession(session)
+    await index.reconcile()
+    const registered: string[] = []
+    const deps = {
+      index,
+      known: () => false,
+      register: async (sessionId: string) => { registered.push(sessionId) },
+      deliver: async () => {},
+    }
+    const cache = createRouterAdoptionCache()
+    const time = clock(0)
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now })
+    expect(cache.deferred.size).toBe(1)
+
+    // 资格先失效（组合翻到别的预设）→ 旧一代授予被撤销；
+    // 再重新成立（翻回 router）→ 新一代授予回到未领取面。
+    index.onLiveSessionEvent(session, { type: 'agent-preset/selected', data: { agentPreset: 'other' } })
+    index.onLiveSessionEvent(session, { type: 'agent-preset/selected', data: { agentPreset: 'dsh-router' } })
+    // 同时它挂进了工作区（此前 1000 个候选都因为"不是成员"而延期）。
+    membership.face.get('ws')!.sessionIds.push('s0')
+    await index.reconcile()
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { now: time.now })
+    expect(registered, '新一代资格必须立即收编，不等旧退避').toEqual(['s0'])
+    expect(cache.deferred.size).toBe(0)
+    await index.dispose()
+  })
+})
+
+describe('I7 补充：同工作区批次的成员读取成本（如实记录，不弱化授权核验）', () => {
+  it('同工作区 1000 个已确认 Router：成员读取量按 候选数 × 工作区成员数 增长', async () => {
+    const ids = Array.from({ length: 1000 }, (_, index) => `s${index}`)
+    const membership = countedMembership([{ id: 'ws', sessionIds: [...ids] }])
+    const index = new SessionHeaderIndex({
+      root: '/nonexistent-router-samews-root',
+      routerPreset: 'dsh-router',
+      membership: membership.face,
+      resolveLivePreset: () => 'dsh-router',
+    })
+    for (const id of ids) index.onLiveSession(liveRouterSession(id))
+    await index.reconcile()
+    const deps = {
+      index,
+      known: () => true, // 已登记 → 每候选只做一次定点授权核验
+      register: async () => {},
+      deliver: async () => {},
+    }
+    const cache = createRouterAdoptionCache()
+    membership.state.elementReads = 0
+    // 把 1000 个候选全部过一轮（预算 10 → 100 轮）：每个候选一次定点成员
+    // 核验 × 该工作区的 1000 个成员 = 候选数 × 工作区成员数（如实记录）。
+    for (let round = 0; round < 100; round += 1) {
+      await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { budgetPerRound: 10 })
+    }
+    expect(membership.state.elementReads).toBe(1_000_000)
+    // 稳态（无待消费授予、无到期重试）→ 零成员读取。
+    membership.state.elementReads = 0
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { budgetPerRound: 10 })
+    expect(membership.state.elementReads, '稳态不得再读成员数组').toBe(0)
+    await index.dispose()
+  })
+})

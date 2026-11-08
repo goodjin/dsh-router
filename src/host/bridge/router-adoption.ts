@@ -13,7 +13,7 @@
  * 堆（一天五次）。v1.4 因此把判定改成已验证的受限读取器 + 持久化增量索引
  * （SessionHeaderIndex）：冷盘小日志只按有界 stable-EOF 扫描取最终组合；
  * seeded 排除与 live Session 投影提供其余安全事实；索引跨重启按文件指纹
- * 复用。收编只消费索引的**资格授予**（pendingRouterGrants）与**定点**磁盘
+ * 复用。收编只消费索引的**资格授予**（claimRouterGrants）与**定点**磁盘
  * 事实核验（verifyDiskFacts，一次只点一个候选名），绝不调用整日志
  * readSession，也不做整库 stat/list/open 兜底；稳态轮次（无待消费授予、
  * 无到期重试）零副作用、零成员枚举。
@@ -46,9 +46,12 @@ export interface RouterAdoptionIndexFace {
   verifyTargets(requests: ReadonlyArray<{ workspaceId: string; sessionIds: readonly string[] }>): Map<string, TargetAuthority>
   /** 成员定位（增量缓存，O(1)）：目标工作区 + 归档状态。 */
   locateMember(sessionId: string): { workspaceId: string; archived: boolean } | undefined
-  /** 待消费的资格授予（至多 limit 个；skip 里的由消费方自行排期重试）。 */
-  pendingRouterGrants(limit: number, skip?: ReadonlySet<string>): readonly RouterGrant[]
-  /** 待消费面上某 id 当前的资格代数。 */
+  /**
+   * **领取**未领取的资格授予（至多 limit 条）。领取后该授予进入"已领取"面，
+   * 不再被重复领取，直到消费方 ack（记账点）或资格撤销。
+   */
+  claimRouterGrants(limit: number): readonly RouterGrant[]
+  /** 某 id 当前的资格代数（已领取或未领取都算；没有授予则 undefined）。 */
   routerGrantGeneration(sessionId: string): number | undefined
   /** 记账点：消费方确认已消费（代数不符即忽略）。 */
   ackRouterGrant(sessionId: string, generation: number): void
@@ -98,12 +101,25 @@ export interface DeferredCandidate {
   reason: string
 }
 
+/** 延期队列的到期堆条目（惰性失效：弹出时与记录核对）。 */
+interface DeferredHeapEntry {
+  sessionId: string
+  nextAttemptAt: number
+}
+
 /** 跨轮复用的护栏状态。 */
 export interface RouterAdoptionCache {
   /** 已投过身份卡的会话（UI 持久标记才是跨重启幂等源）。 */
   readonly delivered: Set<string>
   /** 延期队列（退避到期再试；插入序 = 轮转序，失败头部不挡住后来者）。 */
   readonly deferred: Map<string, DeferredCandidate>
+  /**
+   * 延期队列的**到期堆**（按 nextAttemptAt 排序的最小堆；review I7 round 2）：
+   * "有没有到期的重试"是一次 O(1)  peek——没有到期项时整轮**不再遍历延期
+   * 队列**，也不构造全量快照/skip 集合。堆条目惰性失效（记录已删或已改期
+   * 时弹出即丢）。
+   */
+  readonly deferredHeap: DeferredHeapEntry[]
   /** 进行中的扫描（单飞）。 */
   pending: Promise<void> | undefined
   /** 诊断计数（/router/health 投喂；只计数不含私有内容）。 */
@@ -155,6 +171,7 @@ export function createRouterAdoptionCache(): RouterAdoptionCache {
   return {
     delivered: new Set<string>(),
     deferred: new Map<string, DeferredCandidate>(),
+    deferredHeap: [],
     pending: undefined,
     counters: { rounds: 0, registered: 0, delivered: 0, verifyRejected: 0, staleSkipped: 0, retriesDropped: 0, errors: 0 },
   }
@@ -238,51 +255,131 @@ async function adoptPass(
   const now = (options.now ?? Date.now)()
   cache.counters.rounds += 1
 
-  // ── 1. 延期队列维护（资格消失/换代 → 移出；到期 → 本轮重试） ──────────
-  const dueDeferred: AdoptionCandidate[] = []
-  for (const [sessionId, record] of [...cache.deferred]) {
-    if (!isRouterNow(deps.index, sessionId)) {
-      // 资格已不成立（索引侧同时撤下授予）→ 不再重试（不是丢弃：资格重新
-      // 成立时索引会发新一代授予）。
-      cache.deferred.delete(sessionId)
-      continue
+  // ── 候选集合：到期重试（堆驱动）与新授予（领取驱动）**分开枚举** ──────
+  // review I7 round 2：round 1 每轮复制全延期 Map + 构造全量 skip 集合，并从
+  // 授予面头部逐个跳过被跳项 → N 个延期项 = 每轮 O(N) 检查/分配（逐批可达
+  // O(N²/budget)）。现在：
+  // - 到期重试由**最小堆**驱动：堆顶未到期 → 本轮没有任何到期重试（O(1) 空过，
+  //   不遍历延期队列、不构造快照）；
+  // - 新授予只从**未领取面**领取（消费方正在退避重试的那些已在"已领取"面，
+  //   不参与枚举）→ 枚举到 limit 条即止（O(limit)）。
+  // 两条路都受**同一个单轮预算**约束（检查量与维护量一起封顶）。
+  const candidates: AdoptionCandidate[] = []
+  while (candidates.length < budget) {
+    const due = popDueCandidate(deps, cache, now)
+    const grant = due === undefined ? claimOneGrant(deps, cache) : undefined
+    if (due !== undefined) candidates.push(due)
+    if (grant !== undefined) candidates.push(grant)
+    if (due === undefined && grant === undefined) break
+    // 交错：到期重试与新授予轮流取 → 失败的头部不反复占预算，后来者公平前进。
+  }
+
+  // ── 逐个处理 ──────────────────────────────────────────────────────
+  for (const candidate of candidates) {
+    try {
+      await adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff)
+    } catch (error) {
+      // 兜底：adoptCandidate 内部已经兜住了所有异常；这里防的是"连兜底都
+      // 失败"（例如告警面本身抛错）。此时**不能丢掉已领取的授予**——否则该
+      // 候选在本进程内永远不会被再次交付。改为尽力延期。
+      cache.counters.errors += 1
+      try {
+        deferCandidate(deps, cache, candidate.sessionId, candidate.generation, 'error', now, baseBackoff, maxBackoff)
+      } catch {
+        cache.deferred.delete(candidate.sessionId)
+      }
+      deps.logger?.warn(`Router 会话收编异常（${candidate.sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
     }
-    const generation = deps.index.routerGrantGeneration(sessionId)
+  }
+}
+
+/**
+ * 取一条**到期**的延期候选（最小堆驱动，review I7 round 2）。
+ *
+ * - 堆顶未到期 → 直接返回 undefined（O(1) 空过；不遍历延期队列）；
+ * - 堆条目与延期记录不一致（已删/已改期）→ 惰性丢弃，继续看下一条；
+ * - 资格已被索引撤销 / 资格换代 → 该延期项作废（不是丢弃：新资格由领取面
+ *   单独交付），返回 undefined。
+ */
+function popDueCandidate(
+  deps: RouterAdoptionDeps,
+  cache: RouterAdoptionCache,
+  now: number,
+): AdoptionCandidate | undefined {
+  while (cache.deferredHeap.length > 0) {
+    const top = cache.deferredHeap[0]!
+    if (top.nextAttemptAt > now) return undefined // 未到期 → 本轮无到期重试
+    heapPop(cache)
+    const record = cache.deferred.get(top.sessionId)
+    if (record === undefined) continue // 已移出 → 惰性丢弃
+    if (record.nextAttemptAt !== top.nextAttemptAt) continue // 已改期 → 惰性丢弃
+    const generation = deps.index.routerGrantGeneration(top.sessionId)
     if (generation === undefined) {
-      cache.deferred.delete(sessionId)
+      // 资格已被撤销（不再成立）→ 不再重试这条（将来重新成立会有新一代授予）。
+      cache.deferred.delete(top.sessionId)
       continue
     }
     if (generation !== record.generation) {
-      // 资格重新成立（新一代）→ 重置退避，本轮重新参与。
-      cache.deferred.delete(sessionId)
+      // 资格换代（新一代已由领取面交付）→ 旧的延期项作废，不与新代抢。
+      cache.deferred.delete(top.sessionId)
       continue
     }
-    if (record.nextAttemptAt <= now) dueDeferred.push({ sessionId, generation })
+    return { sessionId: top.sessionId, generation: record.generation }
   }
+  return undefined
+}
 
-  // ── 2. 新授予（索引侧未消费的资格） ──────────────────────────────────
-  const skip = new Set(cache.deferred.keys())
-  const grants = budget > 0 ? deps.index.pendingRouterGrants(budget, skip) : []
+/** 领取一条新授予（未领取面；O(1) 摊还，稳态未领取面为空 → 空过）。 */
+function claimOneGrant(deps: RouterAdoptionDeps, cache: RouterAdoptionCache): AdoptionCandidate | undefined {
+  const granted = deps.index.claimRouterGrants(1)
+  const grant = granted[0]
+  if (grant === undefined) return undefined
+  // 新一代资格接管：旧的延期项作废（否则旧退避会把新代"吞"到很久以后）。
+  const record = cache.deferred.get(grant.sessionId)
+  if (record !== undefined && record.generation !== grant.generation) {
+    cache.deferred.delete(grant.sessionId)
+  }
+  return { sessionId: grant.sessionId, generation: grant.generation }
+}
 
-  // ── 3. 合并：延期到期与新授予**轮转交错**（失败头部不反复占预算） ──────
-  const candidates: AdoptionCandidate[] = []
-  let deferredIndex = 0
-  let grantIndex = 0
-  while (candidates.length < budget && (deferredIndex < dueDeferred.length || grantIndex < grants.length)) {
-    if (deferredIndex < dueDeferred.length) {
-      candidates.push(dueDeferred[deferredIndex]!)
-      deferredIndex += 1
+/** 最小堆压入（按 nextAttemptAt）。 */
+function heapPush(cache: RouterAdoptionCache, entry: DeferredHeapEntry): void {
+  const heap = cache.deferredHeap
+  heap.push(entry)
+  let index = heap.length - 1
+  while (index > 0) {
+    const parent = (index - 1) >> 1
+    if (heap[parent]!.nextAttemptAt <= heap[index]!.nextAttemptAt) break
+    const tmp = heap[parent]!
+    heap[parent] = heap[index]!
+    heap[index] = tmp
+    index = parent
+  }
+}
+
+/** 最小堆弹出（堆顶）。 */
+function heapPop(cache: RouterAdoptionCache): DeferredHeapEntry | undefined {
+  const heap = cache.deferredHeap
+  if (heap.length === 0) return undefined
+  const top = heap[0]!
+  const last = heap.pop()!
+  if (heap.length > 0) {
+    heap[0] = last
+    let index = 0
+    for (;;) {
+      const left = 2 * index + 1
+      const right = 2 * index + 2
+      let min = index
+      if (left < heap.length && heap[left]!.nextAttemptAt < heap[min]!.nextAttemptAt) min = left
+      if (right < heap.length && heap[right]!.nextAttemptAt < heap[min]!.nextAttemptAt) min = right
+      if (min === index) break
+      const tmp = heap[min]!
+      heap[min] = heap[index]!
+      heap[index] = tmp
+      index = min
     }
-    if (candidates.length < budget && grantIndex < grants.length) {
-      candidates.push(grants[grantIndex]!)
-      grantIndex += 1
-    }
   }
-
-  // ── 4. 逐个处理 ──────────────────────────────────────────────────────
-  for (const candidate of candidates) {
-    await adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff)
-  }
+  return top
 }
 
 /** 处理一个候选：定点核验 → 登记 → 复核 → 投递 → 记账。 */
@@ -309,12 +406,12 @@ async function adoptCandidate(
       deps.index.refreshMembershipIfStale?.()
       location = deps.index.locateMember(sessionId)
       if (location === undefined) {
-        deferCandidate(deps, cache, sessionId, 'not-member', now, baseBackoff, maxBackoff)
+        deferCandidate(deps, cache, sessionId, candidate.generation, 'not-member', now, baseBackoff, maxBackoff)
         return
       }
     }
     if (location.archived) {
-      deferCandidate(deps, cache, sessionId, 'archived', now, baseBackoff, maxBackoff)
+      deferCandidate(deps, cache, sessionId, candidate.generation, 'archived', now, baseBackoff, maxBackoff)
       return
     }
     let workspaceId = location.workspaceId
@@ -325,7 +422,7 @@ async function adoptCandidate(
     if (fact === undefined || !fact.ok) {
       // untrusted/changed/missing：fail-closed，跳过自身，退避后再试。
       cache.counters.verifyRejected += 1
-      deferCandidate(deps, cache, sessionId, `disk:${fact?.kind ?? 'unknown'}`, now, baseBackoff, maxBackoff)
+      deferCandidate(deps, cache, sessionId, candidate.generation, `disk:${fact?.kind ?? 'unknown'}`, now, baseBackoff, maxBackoff)
       return
     }
 
@@ -341,18 +438,18 @@ async function adoptCandidate(
       deps.index.refreshMembershipIfStale?.()
       const relocated = deps.index.locateMember(sessionId)
       if (relocated === undefined || relocated.archived) {
-        deferCandidate(deps, cache, sessionId, 'moved', now, baseBackoff, maxBackoff)
+        deferCandidate(deps, cache, sessionId, candidate.generation, 'moved', now, baseBackoff, maxBackoff)
         return
       }
       workspaceId = relocated.workspaceId
       authority = deps.index.verifyTargets([{ workspaceId, sessionIds: [sessionId] }]).get(sessionId)
       if (authority === undefined || !authority.member || authority.archived) {
-        deferCandidate(deps, cache, sessionId, 'moved', now, baseBackoff, maxBackoff)
+        deferCandidate(deps, cache, sessionId, candidate.generation, 'moved', now, baseBackoff, maxBackoff)
         return
       }
     }
     if (authority.archived) {
-      deferCandidate(deps, cache, sessionId, 'archived', now, baseBackoff, maxBackoff)
+      deferCandidate(deps, cache, sessionId, candidate.generation, 'archived', now, baseBackoff, maxBackoff)
       return
     }
 
@@ -361,32 +458,34 @@ async function adoptCandidate(
     if (!deps.known(sessionId)) {
       await deps.register(sessionId, workspaceId)
       cache.counters.registered += 1
-    }
 
-    // (5) register 等待之后：**再核一次磁盘事实**，并在同一同步屏障里复查
-    // 判定 / 生命周期代际 / 目标工作区成员与归档（review I5/I6）。
-    const factsAfter = await deps.index.verifyDiskFacts([sessionId])
-    const factAfter = factsAfter.get(sessionId)
-    if (factAfter === undefined || !factAfter.ok) {
-      cache.counters.verifyRejected += 1
-      deferCandidate(deps, cache, sessionId, `disk-after:${factAfter?.kind ?? 'unknown'}`, now, baseBackoff, maxBackoff)
-      return
-    }
-    if (!isRouterNow(deps.index, sessionId)) {
-      cache.counters.staleSkipped += 1
-      cache.deferred.delete(sessionId)
-      return
-    }
-    if (deps.index.authorityToken(sessionId) !== token) {
-      // 生命周期/判定在等待期间变了 → 旧计划过期，延期后按新事实重来。
-      cache.counters.staleSkipped += 1
-      deferCandidate(deps, cache, sessionId, 'lifecycle-changed', now, baseBackoff, maxBackoff)
-      return
-    }
-    const authorityAfter = deps.index.verifyTargets([{ workspaceId, sessionIds: [sessionId] }]).get(sessionId)
-    if (authorityAfter === undefined || !authorityAfter.member || authorityAfter.archived) {
-      deferCandidate(deps, cache, sessionId, 'moved', now, baseBackoff, maxBackoff)
-      return
+      // (5) register 等待之后：**再核一次磁盘事实**，并在同一同步屏障里复查
+      // 判定 / 生命周期代际 / 目标工作区成员与归档（review I5/I6）。
+      // 只有**跨过了 await** 才需要复核：没有 register 等待时，第 (3) 步的
+      // 授权与投递之间没有任何 await，授权不会过期（同一同步屏障内）。
+      const factsAfter = await deps.index.verifyDiskFacts([sessionId])
+      const factAfter = factsAfter.get(sessionId)
+      if (factAfter === undefined || !factAfter.ok) {
+        cache.counters.verifyRejected += 1
+        deferCandidate(deps, cache, sessionId, candidate.generation, `disk-after:${factAfter?.kind ?? 'unknown'}`, now, baseBackoff, maxBackoff)
+        return
+      }
+      if (!isRouterNow(deps.index, sessionId)) {
+        cache.counters.staleSkipped += 1
+        cache.deferred.delete(sessionId)
+        return
+      }
+      if (deps.index.authorityToken(sessionId) !== token) {
+        // 生命周期/判定在等待期间变了 → 旧计划过期，延期后按新事实重来。
+        cache.counters.staleSkipped += 1
+        deferCandidate(deps, cache, sessionId, candidate.generation, 'lifecycle-changed', now, baseBackoff, maxBackoff)
+        return
+      }
+      const authorityAfter = deps.index.verifyTargets([{ workspaceId, sessionIds: [sessionId] }]).get(sessionId)
+      if (authorityAfter === undefined || !authorityAfter.member || authorityAfter.archived) {
+        deferCandidate(deps, cache, sessionId, candidate.generation, 'moved', now, baseBackoff, maxBackoff)
+        return
+      }
     }
 
     // (6) 投递身份卡：失败向上抛（不记账，等退避后重试）。
@@ -402,33 +501,38 @@ async function adoptCandidate(
   } catch (error) {
     cache.counters.errors += 1
     deps.logger?.warn(`Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`)
-    deferCandidate(deps, cache, sessionId, 'error', now, baseBackoff, maxBackoff)
+    deferCandidate(deps, cache, sessionId, candidate.generation, 'error', now, baseBackoff, maxBackoff)
   }
 }
 
 /**
  * 延期一个候选（**不丢**）：失败按指数退避改期（封顶），下一轮到期再试。
- * 资格已不在待消费面（不再成立）时直接移出——那不是丢弃，资格重新成立时
- * 索引会发新一代授予。
+ * 资格已撤销或已换代时直接移出——那不是丢弃：资格重新成立时索引会发新一代
+ * 授予（回到未领取面，由领取路径交付，不会被旧的延期项吞掉）。
  */
 function deferCandidate(
   deps: RouterAdoptionDeps,
   cache: RouterAdoptionCache,
   sessionId: string,
+  generation: number,
   reason: string,
   now: number,
   baseBackoff: number,
   maxBackoff: number,
 ): void {
-  const generation = deps.index.routerGrantGeneration(sessionId)
-  if (generation === undefined) {
+  const current = deps.index.routerGrantGeneration(sessionId)
+  if (current === undefined || current !== generation) {
+    // 资格已撤销（undefined）或已换代（新一代接管）→ 旧延期项作废。
     cache.deferred.delete(sessionId)
     return
   }
   const previous = cache.deferred.get(sessionId)
   const failures = (previous?.failures ?? 0) + 1
   const delay = Math.min(maxBackoff, baseBackoff * 2 ** Math.min(failures - 1, 16))
+  const nextAttemptAt = now + delay
   // 重新插入 = 轮转到队尾：失败的头部不反复占预算，后来者公平前进。
   cache.deferred.delete(sessionId)
-  cache.deferred.set(sessionId, { generation, failures, nextAttemptAt: now + delay, reason })
+  cache.deferred.set(sessionId, { generation, failures, nextAttemptAt, reason })
+  // 到期堆：新条目入堆；旧条目（不同 nextAttemptAt）惰性失效，弹出即丢。
+  heapPush(cache, { sessionId, nextAttemptAt })
 }
