@@ -484,10 +484,17 @@ describe('提示词编辑器开关（C5）', () => {
 })
 
 describe('isRouterSessionView：浮窗只在 Router 会话视图展示（v1.4）', () => {
+  // isRouterSessionView 只读 currentSessionId 与 routerState.routerSessions，
+  // 测试用最小形状直构（不启完整 store）。
+  const view = (current: string | undefined): Parameters<typeof isRouterSessionView>[0] =>
+    ({
+      currentSessionId: current,
+      routerState: { routerSessions: [{ sessionId: 'r-1', title: 'R' }], tasks: [], questions: [], tabs: [], templates: [] },
+    }) as Parameters<typeof isRouterSessionView>[0]
   it('当前会话在 routerSessions 里 → true；不在或无当前会话 → false', () => {
-    const base = emptyState({ routerSessions: [{ sessionId: 'r-1', title: 'R' }] })
-    expect(isRouterSessionView({ ...base, currentSessionId: 'r-1' })).toBe(true)
-    expect(isRouterSessionView({ ...base, currentSessionId: 'w-9' })).toBe(false)
-    expect(isRouterSessionView({ ...base })).toBe(false)
+    expect(isRouterSessionView(view('r-1'))).toBe(true)
+    expect(isRouterSessionView(view('w-9'))).toBe(false)
+    expect(isRouterSessionView(view(undefined))).toBe(false)
+    expect(isRouterSessionView({ ...view('r-1'), routerState: null })).toBe(false)
   })
 })
