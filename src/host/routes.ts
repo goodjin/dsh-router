@@ -6,7 +6,6 @@
  *   POST /router/router-session            → { sessionId }
  *   POST /router/answer                    → { ok: true }（已答 409）
  *   POST /router/tabs/close                → { ok: true }
- *   POST /router/redirect/ack              → { ok: true }（C4：消费去重指令）
  * 错误统一 { error: string } + 4xx/5xx。注册走 webServer.register({kind:'exact'})
  * + connection.admit 同一登录准入（r3 §3a，chat-power mermaid-asset 样例）；
  * 逻辑全部在注入的 deps（根服务组装的面），本文件只做 HTTP 折叠。
