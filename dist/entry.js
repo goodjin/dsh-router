@@ -36,7 +36,7 @@ import { Scheduler } from "./host/ledger/scheduler.js";
 import { SessionBridge, releaseObservation } from "./host/bridge/sessions.js";
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from "./host/bridge/questions.js";
 import { UiStateStore } from "./host/bridge/tabs.js";
-import { scanAndAdoptRouterSessions } from "./host/bridge/router-adoption.js";
+import { createRouterAdoptionCache, scanAndAdoptRouterSessions } from "./host/bridge/router-adoption.js";
 import { CompactionDriver } from "./host/context/compaction-driver.js";
 import { registerRouterRoutes } from "./host/routes.js";
 import { createRouterCore } from "./host/core.js";
@@ -196,6 +196,10 @@ export function apply(ctx, rawConfig) {
         return store;
     };
     const ui = new UiStateStore(jsonFilePersistence(join(config.dataDir, 'ui-state.json')));
+    // 收编扫描的跨轮护栏（2026-11-07 OOM 现场之后补回）：判定过的会话不再
+    // readSession——那一步对已落盘的会话会把整段日志读出来并深拷贝全部事件，
+    // 而 /router/state 每 2.5 秒轮询一次，本机近八千个会话。
+    const adoptionCache = createRouterAdoptionCache();
     // 全局派发熔断器（v1.2 规格 §2）：状态落 <dataDir>/guard-state.json，宿主重启
     // 恢复冻结态（启动 effect 里自报）；窗口/阈值可配（root-config）。
     const breaker = new CircuitBreaker({
@@ -706,7 +710,7 @@ export function apply(ctx, rawConfig) {
                         register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router'); },
                         deliver: async (sessionId) => { await deliverRouterCard(sessionId); },
                         logger: { warn: (message) => log.warn(message) },
-                    }, config.routerPreset);
+                    }, config.routerPreset, adoptionCache);
                 }
                 catch (error) {
                     log.warn(`Router 会话收编扫描失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`);
