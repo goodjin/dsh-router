@@ -383,13 +383,15 @@ function fakeRegistry(throwFor?: (def: PresetDefinition) => boolean) {
   return { face, registered, disposals, disposers }
 }
 
-/** 记录型假 ctx.effect（r4 条件①：注销器必须自接线）。 */
+/** 记录型假 ctx.effect（r4 条件①；v1.5 修正语义：工厂立即执行，返回值才是
+ * fiber 销毁时的清理函数——清理写在工厂体里 = 注册即卸载，正是现场根因）。 */
 function fakeEffect() {
   const factories: Array<{ label?: string; run(): unknown }> = []
   return {
     calls: factories,
     effect(factory: () => unknown, label?: string) {
-      factories.push({ label, run: factory })
+      const cleanup = (factory as () => (() => void) | undefined)() // 宿主语义：立即执行工厂
+      factories.push({ label, run: () => cleanup?.() }) // run = 销毁时执行清理
       return factory
     },
   }
@@ -416,7 +418,9 @@ describe('DynamicPresetEngine：类型注册生命周期', () => {
     expect(engine.registeredIds()).toContain('dsh-router-worker-docs-writer')
     expect(effect.calls).toHaveLength(1)
     expect(effect.calls[0]!.label).toContain('docs-writer')
-    // effect 工厂被宿主在行 fiber dispose 时调用 → 注销器执行
+    // 注册后预设仍在册（工厂体当场执行不得触发清理——v1.5 现场根因回归钉）
+    expect(registry.registered.has('dsh-router-worker-docs-writer')).toBe(true)
+    // fiber dispose → 清理函数执行 → 注销器生效
     effect.calls[0]!.run()
     expect(registry.disposals).toContain('dsh-router-worker-docs-writer')
     expect(engine.registeredIds()).not.toContain('dsh-router-worker-docs-writer')

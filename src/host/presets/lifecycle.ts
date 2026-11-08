@@ -106,11 +106,14 @@ export class DynamicPresetEngine {
     this.disposers.set(def.id, unregister)
     // r4 条件①：注销器必须自接线 ctx.effect——插件行 fiber dispose 时由宿主
     // 触发，保证热重载/进程回收不留幽灵预设（重复触发是 no-op，安全）。
+    // r4 条件①：注销器自接线。ctx.effect(factory) 语义 = factory 立即执行、
+    // 其返回值才是 fiber 销毁时的清理函数——清理必须作为返回值，绝不能写在
+    // 工厂体里（当场执行 = 注册即卸载，v1.5 现场的根因）。
     this.deps.effect(() => {
-      // 注销器自接线（r4 条件①）。先同步清引擎登记再异步注销：effect 可能在
-      // 注册表 promise 落定前后被触发，重复触发注销器是 no-op（r4 §1）。
-      if (this.disposers.get(def.id) === unregister) this.disposers.delete(def.id)
-      void unregister()
+      return () => {
+        if (this.disposers.get(def.id) === unregister) this.disposers.delete(def.id)
+        void unregister()
+      }
     }, `dsh-router: 预设 ${def.id} 注销器`)
     return def.id
   }

@@ -39,7 +39,7 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: dsh-router-supervisor
-        name: Router 主管
+        name: 主管执行者
         description: 可再拆分子任务的主管型执行者
         order: 20
         plugins:
@@ -125,7 +125,7 @@
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: dsh-router-worker
-        name: Router 工作者
+        name: 工作执行者
         description: 只执行单个任务的工作型执行者
         order: 30
         plugins:

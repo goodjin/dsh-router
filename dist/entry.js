@@ -7639,8 +7639,10 @@ var DynamicPresetEngine = class {
 		}
 		this.disposers.set(def.id, unregister);
 		this.deps.effect(() => {
-			if (this.disposers.get(def.id) === unregister) this.disposers.delete(def.id);
-			unregister();
+			return () => {
+				if (this.disposers.get(def.id) === unregister) this.disposers.delete(def.id);
+				unregister();
+			};
 		}, `dsh-router: 预设 ${def.id} 注销器`);
 		return def.id;
 	}
@@ -9694,12 +9696,12 @@ function apply(ctx, rawConfig) {
 					log.warn(`Router 会话收编扫描失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`);
 				}
 				const state = await assembled.workbench.state(workspaceId);
-				const registeredIds = engine.registeredIds();
+				const rosterIds = await ctx.agentPresets.list().then((rows) => rows.map((row) => row.id)).catch(() => []);
 				return {
 					...state,
 					presets: {
-						routerRegistered: registeredIds.includes("dsh-router"),
-						typePresetIds: registeredIds
+						routerRegistered: rosterIds.includes("dsh-router"),
+						typePresetIds: rosterIds.filter((id) => id.startsWith("dsh-router"))
 					}
 				};
 			},

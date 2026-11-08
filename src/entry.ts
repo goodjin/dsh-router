@@ -947,9 +947,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
           log.warn(`Router 会话收编扫描失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`)
         }
         const state = await assembled.workbench.state(workspaceId)
-        // v1.3.1 诊断：预设注册表可见性。
-        const registeredIds = engine.registeredIds()
-        return { ...state, presets: { routerRegistered: registeredIds.includes('dsh-router'), typePresetIds: registeredIds } }
+        // 诊断（v1.5 修正）：以注册表花名册为准（引擎 disposers 只是内部账）。
+        const rosterIds = await (ctx.agentPresets as unknown as { list: () => Promise<{ id: string }[]> }).list().then((rows) => rows.map((row) => row.id)).catch(() => [] as string[])
+        return { ...state, presets: { routerRegistered: rosterIds.includes('dsh-router'), typePresetIds: rosterIds.filter((id) => id.startsWith('dsh-router')) } }
       },
       createRouterSession: async (workspaceId, name) => {
         // v1.3.1 自愈：创建前确保 Router 预设在册（重应用窗口/注册失败遗留）。

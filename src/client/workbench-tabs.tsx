@@ -58,7 +58,8 @@ const ROW_STYLE: CSSProperties = {
   alignItems: 'center',
   gap: 4,
   minWidth: 0,
-  maxWidth: '40vw',
+  maxWidth: '25vw',
+  flexShrink: 1,
   overflowX: 'auto',
   scrollbarWidth: 'none',
 }
