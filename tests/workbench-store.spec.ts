@@ -490,7 +490,7 @@ describe('isRouterSessionView：浮窗只在 Router 会话视图展示（v1.4）
     ({
       currentSessionId: current,
       routerState: { routerSessions: [{ sessionId: 'r-1', title: 'R' }], tasks: [], questions: [], tabs: [], templates: [] },
-    }) as Parameters<typeof isRouterSessionView>[0]
+    }) as unknown as Parameters<typeof isRouterSessionView>[0]
   it('当前会话在 routerSessions 里 → true；不在或无当前会话 → false', () => {
     expect(isRouterSessionView(view('r-1'))).toBe(true)
     expect(isRouterSessionView(view('w-9'))).toBe(false)
