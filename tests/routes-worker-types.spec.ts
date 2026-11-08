@@ -233,7 +233,6 @@ function fakeDeps(factories?: {
     async closeTab() {
       return true
     },
-    async ackRedirect() {},
     async listWorkerTypes() {
       return { types: await usedStore.list() }
     },
@@ -292,7 +291,6 @@ describe('worker 类型路由（C3）', () => {
       '/router/router-session',
       '/router/answer',
       '/router/tabs/close',
-      '/router/redirect/ack',
       '/router/worker-types',
       '/router/worker-types/update',
       '/router/worker-types/enabled',

@@ -41,11 +41,11 @@ export const LIGHT_TOOLTIP_STYLE: CSSProperties = {
 }
 
 /** hover 反馈 = 颜色稍变深：亮度乘 0.94 的滤镜（不反色，规格 §9）。 */
-export const HOVER_DARKEN_FILTER = 'brightness(0.94)'
 
 /** hover 时的增量样式：未 hover 不加任何属性（保持元素样式同函数）。 */
 export function hoverDarkenStyle(hovered: boolean): CSSProperties {
-  return hovered ? { filter: HOVER_DARKEN_FILTER } : {}
+  // v1.4：浅色基线——hover = 底色稍变深（#fff → #f0f1f3），不再用反色滤镜。
+  return hovered ? { background: '#f0f1f3' } : {}
 }
 
 /** useHoverDarken 返回的事件绑定（直接展开到元素上）。 */

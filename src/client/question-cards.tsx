@@ -17,7 +17,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { ClientPrefsStore } from './client-prefs.ts'
 import { chipClickAction, chipSummary, visibleCards } from './question-state.ts'
 import type { QuestionCardView, QuestionDraftItem } from './question-state.ts'
-import type { WorkbenchStore } from './workbench-store.ts'
+import { isRouterSessionView, type WorkbenchStore } from './workbench-store.ts'
 import { QUESTION_OVERLAY_ID, QUESTION_OVERLAY_ORDER, QUESTION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
@@ -62,11 +62,11 @@ const STACK_STYLE: CSSProperties = {
 
 const CARD_STYLE: CSSProperties = {
   pointerEvents: 'auto',
-  background: 'var(--dsh-color-bg-elevated, #1f2126)',
-  color: 'inherit',
-  border: '1px solid var(--dsh-color-border, #3a3d45)',
+  background: '#ffffff',
+  color: '#1f2328',
+  border: '1px solid #d8dbe0',
   borderRadius: 10,
-  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
+  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.14)',
   padding: 10,
   fontSize: 13,
   lineHeight: 1.5,
@@ -93,7 +93,7 @@ function optionRowStyle(selected: boolean): CSSProperties {
     background: selected ? 'color-mix(in srgb, var(--dsh-color-primary, #4f6bed) 14%, transparent)' : 'transparent',
     cursor: 'pointer',
     margin: '2px 0',
-    color: 'inherit',
+    color: '#1f2328',
     textAlign: 'left',
     fontSize: 12,
   }
@@ -105,9 +105,9 @@ const INPUT_STYLE: CSSProperties = {
   marginTop: 4,
   padding: '4px 8px',
   borderRadius: 6,
-  border: '1px solid var(--dsh-color-border, #3a3d45)',
+  border: '1px solid #d8dbe0',
   background: 'transparent',
-  color: 'inherit',
+  color: '#1f2328',
   fontSize: 12,
 }
 
@@ -141,7 +141,7 @@ const COLLAPSE_STYLE: CSSProperties = {
   flex: 'none',
   border: 'none',
   background: 'transparent',
-  color: 'inherit',
+  color: '#1f2328',
   fontSize: 12,
   padding: '0 4px',
   cursor: 'pointer',
@@ -323,6 +323,8 @@ function QuestionCardEntry(props: {
 /** 浮窗组件：多卡垂直排队互不覆盖；展示量按偏好封顶（账本不删，审查 F4）；状态机在 question-state。 */
 export function QuestionCards(props: QuestionOverlayProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
+  // v1.4：浮窗只在 Router 会话视图展示（用户 2026-11-08 指示）。
+  if (!isRouterSessionView(props.store.get())) return null
   const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
   if (!prefs.overlayEnabled) return null
   const cards = visibleCards(state.board.cards, prefs.maxActiveCards)

@@ -15,7 +15,6 @@ import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
 import { Config as rootConfig, inject, name, resolveRootConfig } from '../src/entry.ts'
 import {
-  HOVER_DARKEN_FILTER,
   hoverDarkenStyle,
   LightTooltip,
   LIGHT_TOOLTIP_STYLE,
@@ -158,7 +157,6 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
     expect(typeof hoverDarkenStyle).toBe('function')
     expect(typeof LIGHT_TOOLTIP_STYLE).toBe('object')
     expect(LIGHT_TOOLTIP_STYLE).not.toBeNull()
-    expect(typeof HOVER_DARKEN_FILTER).toBe('string')
     expect(String(LIGHT_TOOLTIP_STYLE.background)).toMatch(/^#[0-9a-f]{6}$/i)
   })
 

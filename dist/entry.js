@@ -36,8 +36,7 @@ import { Scheduler } from "./host/ledger/scheduler.js";
 import { SessionBridge, releaseObservation } from "./host/bridge/sessions.js";
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from "./host/bridge/questions.js";
 import { UiStateStore } from "./host/bridge/tabs.js";
-import { RouterDedup, stateWithRedirect } from "./host/bridge/dedup.js";
-import { adoptCanonicalRouterSessions } from "./host/bridge/dedup-adopt.js";
+import { scanAndAdoptRouterSessions } from "./host/bridge/router-adoption.js";
 import { CompactionDriver } from "./host/context/compaction-driver.js";
 import { registerRouterRoutes } from "./host/routes.js";
 import { createRouterCore } from "./host/core.js";
@@ -250,49 +249,6 @@ export function apply(ctx, rawConfig) {
     // 正主（原生 pinSession 置顶），其余较新者归档并写 redirect 指令；客户端
     // 消费跳转后 POST /router/redirect/ack 清除。readSession/pinSession 缺席
     // （旧宿主）时去重整体降级为直通，不挡装载。
-    const dedup = ctx.sessionQuery.readSession !== undefined && ctx.workspaceRegistry.pinSession !== undefined
-        ? new RouterDedup({
-            workspaces: { list: () => ctx.workspaceRegistry.list() },
-            sessionQuery: {
-                readSession: async (sessionId) => {
-                    const snapshot = await ctx.sessionQuery.readSession(sessionId);
-                    if (snapshot === null || snapshot === undefined)
-                        return undefined;
-                    const events = snapshot.events ?? [];
-                    const mapped = {
-                        session: {
-                            agentPreset: typeof snapshot.session?.agentPreset === 'string' ? snapshot.session.agentPreset : undefined,
-                            createdAt: typeof snapshot.session?.createdAt === 'number' ? snapshot.session.createdAt : undefined,
-                            // 评审 F2：分叉/种子会话识别的第三证据（header.isSeeded）。
-                            isSeeded: snapshot.session?.isSeeded === true,
-                        },
-                        events: events.map((event) => ({
-                            type: typeof event.type === 'string' ? event.type : '',
-                            data: (typeof event.data === 'object' && event.data !== null ? event.data : {}),
-                        })),
-                    };
-                    return mapped;
-                },
-            },
-            registry: {
-                pinSession: (sessionId) => ctx.workspaceRegistry.pinSession(sessionId),
-                archiveSession: (sessionId, options) => ctx.workspaceRegistry.archiveSession(sessionId, options),
-                archivedSessionIds: () => {
-                    // 宿主为 getter 属性（数组）而非方法；兼容两形状。
-                    const raw = ctx.workspaceRegistry.archivedSessionIds;
-                    return typeof raw === 'function'
-                        ? (raw() ?? [])
-                        : Array.isArray(raw)
-                            ? raw
-                            : [];
-                },
-            },
-            routerPreset: config.routerPreset,
-            logger: { warn: (message) => log.warn(message) },
-        })
-        : undefined;
-    if (dedup === undefined)
-        log.warn('宿主缺 sessionQuery.readSession / workspaceRegistry.pinSession，入口去重降级为直通');
     const hosts = {
         sessionController: ctx.sessionController,
         agents: ctx.agents,
@@ -740,25 +696,25 @@ export function apply(ctx, rawConfig) {
     ctx.inject?.(['webServer', 'connection'], (child) => {
         registerRouterRoutes(child, {
             getState: async (workspaceId) => {
-                if (dedup !== undefined) {
-                    await dedup.resolve();
-                    // v1.3 A2 + 评审 F4：收编正主——picker 自建的 Router 预设会话先登记进
-                    // ui.routerSessions（否则 superset 角色解析查不到，编排工具全被拒），
-                    // 再按已发标记幂等补发身份卡。
-                    await adoptCanonicalRouterSessions({
-                        canonicals: dedup.canonicalSessions(),
+                // v1.4：Router 会话不再去重——每次新建独立。这里只做收编扫描：把
+                // picker 自建的 Router 预设会话登记进 routerSessions 并幂等补发身份卡。
+                try {
+                    await scanAndAdoptRouterSessions({
+                        workspaces: (workspaceRegistry.list() ?? []),
+                        readSession: (sessionId) => (ctx.sessionQuery.readSession === undefined ? Promise.resolve(undefined) : ctx.sessionQuery.readSession(sessionId)),
                         known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
-                        register: (sessionId, wsId) => ui.addRouterSession(sessionId, wsId, 'Router'),
-                        deliver: (sessionId) => deliverRouterCard(sessionId),
-                    });
+                        register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router'); },
+                        deliver: async (sessionId) => { await deliverRouterCard(sessionId); },
+                        logger: { warn: (message) => log.warn(message) },
+                    }, config.routerPreset);
+                }
+                catch (error) {
+                    log.warn(`Router 会话收编扫描失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`);
                 }
                 const state = await assembled.workbench.state(workspaceId);
-                const withRedirect = dedup !== undefined
-                    ? stateWithRedirect(state, dedup.pendingRedirectFor(workspaceId))
-                    : state;
-                // v1.3.1 诊断：预设注册表可见性（切模型报「未知 preset」时一眼定位缺位）。
+                // v1.3.1 诊断：预设注册表可见性。
                 const registeredIds = engine.registeredIds();
-                return { ...withRedirect, presets: { routerRegistered: registeredIds.includes('dsh-router'), typePresetIds: registeredIds } };
+                return { ...state, presets: { routerRegistered: registeredIds.includes('dsh-router'), typePresetIds: registeredIds } };
             },
             createRouterSession: async (workspaceId, name) => {
                 // v1.3.1 自愈：创建前确保 Router 预设在册（重应用窗口/注册失败遗留）。
@@ -773,10 +729,6 @@ export function apply(ctx, rawConfig) {
                 void assembled.refreshSnapshot();
             },
             closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
-            ackRedirect: (workspaceId, supersededSessionId) => {
-                dedup?.ackRedirect(workspaceId, supersededSessionId);
-                return Promise.resolve();
-            },
             listWorkerTypes: async () => ({ types: await typeStore.list() }),
             createWorkerType: async (input) => {
                 const type = await typeStore.create(input);

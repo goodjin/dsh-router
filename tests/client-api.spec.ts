@@ -142,28 +142,6 @@ describe('POST /router/tabs/close', () => {
   })
 })
 
-describe('POST /router/redirect/ack（C4）', () => {
-  it('POST {workspaceId, supersededSessionId}，成功返回', async () => {
-    const api = createRouterApi({
-      fetch: jsonFetch((input, init) => {
-        expect(input).toBe('/router/redirect/ack')
-        expect(JSON.parse(String(init?.body))).toEqual({ workspaceId: 'ws-1', supersededSessionId: 's-dup' })
-        return jsonResponse(200, { ok: true })
-      }),
-    })
-    await expect(api.ackRedirect('ws-1', 's-dup')).resolves.toBeUndefined()
-  })
-
-  it('失败带 {error} 透出为 RouterApiError', async () => {
-    const api = createRouterApi({
-      fetch: jsonFetch(() => jsonResponse(400, { error: 'workspaceId 与 supersededSessionId 必填' })),
-    })
-    const error = await api.ackRedirect('ws-1', '').catch((caught: unknown) => caught)
-    expect(error).toBeInstanceOf(RouterApiError)
-    expect((error as RouterApiError).message).toContain('必填')
-  })
-})
-
 describe('C3 worker 类型 / Router 默认值（api 只增函数）', () => {
   const createdType = {
     templateId: 't-1', name: '文档写手', description: '写文档', role: 'worker' as const,

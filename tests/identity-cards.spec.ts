@@ -294,130 +294,51 @@ describe('dispatchTask 投递内容（v1.3 规格 §2.3/§2.4）', () => {
   })
 })
 
-/* ────────────────────────── 收编正主：登记 + 补发（评审 F4） ────────────────────────── */
+/* ────────────────────────── 收编扫描（v1.4：不去重，独立多 Router） ────────────────────────── */
 
-describe('adoptCanonicalRouterSessions：收编正主先登记 Router 会话再补发身份卡', () => {
-  it('未登记的正主：先 register（带 workspace）再 deliver', async () => {
-    const { adoptCanonicalRouterSessions } = await import('../src/host/bridge/dedup-adopt.ts')
+describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡，不归档不跳转）', () => {
+  it('Router 预设会话：未登记先 register 再 deliver；已登记只 deliver', async () => {
+    const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
-    await adoptCanonicalRouterSessions({
-      canonicals: [{ workspaceId: 'ws-1', sessionId: 'picker-1' }],
-      known: () => false,
-      register: async (sessionId, workspaceId) => {
-        calls.push(`register:${sessionId}:${workspaceId}`)
-      },
-      deliver: async (sessionId) => {
-        calls.push(`deliver:${sessionId}`)
-      },
-    })
-    expect(calls).toEqual(['register:picker-1:ws-1', 'deliver:picker-1'])
+    await scanAndAdoptRouterSessions({
+      workspaces: [{ id: 'ws-1', sessionIds: ['picker-1', 'picker-2'] }],
+      readSession: async (id) => ({ header: { agentPreset: 'dsh-router' } }),
+      known: (id) => id === 'picker-2',
+      register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
+      deliver: async (id) => { calls.push(`deliver:${id}`) },
+    }, 'dsh-router')
+    expect(calls).toEqual(['register:picker-1:ws-1', 'deliver:picker-1', 'deliver:picker-2'])
   })
 
-  it('已登记的正主只补发身份卡（不重写登记名）；deliver 抛错不外泄（entry 有告警兜底）', async () => {
-    const { adoptCanonicalRouterSessions } = await import('../src/host/bridge/dedup-adopt.ts')
+  it('非 Router 预设会话：跳过（不读第二次、不登记不投递）', async () => {
+    const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
-    await expect(
-      adoptCanonicalRouterSessions({
-        canonicals: [{ workspaceId: 'ws-1', sessionId: 'ours-1' }],
-        known: (sessionId) => sessionId === 'ours-1',
-        register: async () => {
-          calls.push('register')
-        },
-        deliver: async () => {
-          throw new Error('投递失败')
-        },
-      }),
-    ).resolves.toBeUndefined()
+    await scanAndAdoptRouterSessions({
+      workspaces: [{ id: 'ws-1', sessionIds: ['worker-1'] }],
+      readSession: async (id) => ({ header: { agentPreset: 'dsh-router-worker-docs' } }),
+      known: () => false,
+      register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
+      deliver: async (id) => { calls.push(`deliver:${id}`) },
+    }, 'dsh-router')
     expect(calls).toEqual([])
   })
-})
 
-/* ────────────────────────── 观察租约释放（评审 F7） ────────────────────────── */
-
-describe('releaseObservation：.dispose 与 [Symbol.dispose] 双通道释放', () => {
-  it('两个通道都调（宿主观察租约用 Symbol.dispose，适配器此前只转发 .dispose）', async () => {
-    const { releaseObservation } = await import('../src/host/bridge/sessions.ts')
+  it('单个会话失败不拖垮其余（下轮重试）', async () => {
+    const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
-    const sym = (Symbol as unknown as { dispose?: symbol }).dispose
-    const observation: unknown = {
-      dispose: () => {
-        calls.push('prop')
+    const warns: string[] = []
+    await scanAndAdoptRouterSessions({
+      workspaces: [{ id: 'ws-1', sessionIds: ['bad-1', 'good-1'] }],
+      readSession: async (id) => {
+        if (id === 'bad-1') throw new Error('boom')
+        return { header: { agentPreset: 'dsh-router' } }
       },
-      ...(sym !== undefined ? { [sym]: () => void calls.push('symbol') } : {}),
-    }
-    releaseObservation(observation)
-    expect(calls).toContain('prop')
-    expect(sym === undefined || calls.includes('symbol')).toBe(true)
-  })
-
-  it('空观察/无任何释放面时不抛（冷会话 undefined）', async () => {
-    const { releaseObservation } = await import('../src/host/bridge/sessions.ts')
-    expect(() => releaseObservation(undefined)).not.toThrow()
-    expect(() => releaseObservation({})).not.toThrow()
-  })
-})
-
-
-/* ────────────────────────── dedup 正主清单（收编补发数据源） ────────────────────────── */
-
-describe('dedup 正主清单（收编补发数据源）', () => {
-  it('暴露已 pin 的正主会话清单（workspace 配对；无正主时为空）', async () => {
-    const { RouterDedup } = await import('../src/host/bridge/dedup.ts')
-    const pinned: string[] = []
-    const archived: string[] = []
-    const dedup = new RouterDedup({
-      workspaces: {
-        list: () => [{ id: 'ws-1', sessionIds: ['dup-1', 'canon-1'] }],
-      },
-      sessionQuery: {
-        readSession: async (sessionId) => ({
-          session: { agentPreset: 'dsh-router', createdAt: sessionId === 'canon-1' ? 1 : 2 },
-          events: [],
-        }),
-      },
-      registry: {
-        pinSession: async (sessionId) => {
-          pinned.push(sessionId)
-        },
-        archiveSession: async (sessionId) => {
-          archived.push(sessionId)
-        },
-        archivedSessionIds: [],
-      },
-      routerPreset: 'dsh-router',
-    })
-    await dedup.resolve()
-    expect(dedup.canonicalSessions()).toEqual([{ workspaceId: 'ws-1', sessionId: 'canon-1' }])
-    expect(pinned).toContain('canon-1')
-    expect(archived).toContain('dup-1')
-  })
-
-  it('分叉/种子会话不是 Router（评审 F2）：agentPreset=dsh-router 但 isSeeded=true 不进正主、不归档', async () => {
-    const { RouterDedup } = await import('../src/host/bridge/dedup.ts')
-    const archived: string[] = []
-    const dedup = new RouterDedup({
-      workspaces: {
-        // seeded-1（fork worker，继承 router 预设）比真 Router 更早：若误认会反客为主
-        list: () => [{ id: 'ws-1', sessionIds: ['seeded-1', 'real-1'] }],
-      },
-      sessionQuery: {
-        readSession: async (sessionId) =>
-          sessionId === 'seeded-1'
-            ? { session: { agentPreset: 'dsh-router', createdAt: 1, isSeeded: true }, events: [] }
-            : { session: { agentPreset: 'dsh-router', createdAt: 2 }, events: [] },
-      },
-      registry: {
-        pinSession: async () => ({}),
-        archiveSession: async (sessionId) => {
-          archived.push(sessionId)
-        },
-        archivedSessionIds: [],
-      },
-      routerPreset: 'dsh-router',
-    })
-    await dedup.resolve()
-    expect(dedup.canonicalSessions()).toEqual([{ workspaceId: 'ws-1', sessionId: 'real-1' }])
-    // seeded（fork worker）既不是正主候选、也不进归档收编
-    expect(archived).toEqual([])
+      known: () => false,
+      register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
+      deliver: async (id) => { calls.push(`deliver:${id}`) },
+      logger: { warn: (m: string) => { warns.push(m) } },
+    }, 'dsh-router')
+    expect(calls).toEqual(['register:good-1:ws-1', 'deliver:good-1'])
+    expect(warns.some((m) => m.includes('bad-1'))).toBe(true)
   })
 })

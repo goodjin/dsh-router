@@ -66,7 +66,6 @@ export interface RouterApi {
   postAnswer(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
   /** 消费去重指令的回执（v1.1 Task C4）：幂等，失败抛 RouterApiError。 */
-  ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
   /* ── v1.1 Task C3：worker 类型 / Router 默认值管理（api 只增函数） ── */
   /** 全量类型记录（含禁用与 builtin），设置管理栏目消费。 */
   listWorkerTypes(): Promise<WorkerTypeRecord[]>
@@ -95,7 +94,6 @@ export const ROUTER_STATE_PATH = '/router/state'
 export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
-export const ROUTER_REDIRECT_ACK_PATH = '/router/redirect/ack'
 /** v1.1 Task C3：worker 类型 / Router 默认值（与宿主 routes 一侧逐字对齐）。 */
 export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
@@ -219,9 +217,6 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       await postJson(ROUTER_TABS_CLOSE_PATH, { workspaceId, sessionId })
     },
 
-    async ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void> {
-      await postJson(ROUTER_REDIRECT_ACK_PATH, { workspaceId, supersededSessionId })
-    },
 
     /* ── v1.1 Task C3：worker 类型 / Router 默认值 ── */
 

@@ -38,7 +38,6 @@ export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
 /** 入口去重指令的消费回执（v1.1 Task C4）。 */
-export const ROUTER_REDIRECT_ACK_PATH = '/router/redirect/ack'
 /** Worker 类型管理（v1.1 Task C3，规格 §5/§6）：同路径 GET 列表 / POST 新建 / DELETE 删。 */
 export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
@@ -87,9 +86,7 @@ export interface RouterRoutesDeps {
   createRouterSession(workspaceId: string | undefined, name?: string): Promise<{ sessionId: string }>
   answerQuestion(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeTab(workspaceId: string, sessionId: string): Promise<boolean>
-  /** 消费回执：清掉该 workspace 上指向被归档会话的 redirect 指令（幂等）。 */
-  ackRedirect(workspaceId: string, supersededSessionId: string): Promise<void>
-  /** Worker 类型管理（v1.1 C3）：读全量记录（含禁用与 builtin）。 */
+    /** Worker 类型管理（v1.1 C3）：读全量记录（含禁用与 builtin）。 */
   listWorkerTypes(): Promise<TypesListResponse>
   createWorkerType(input: TypesCreateRequest): Promise<TypesItemResponse>
   updateWorkerType(request: TypesUpdateRequest): Promise<TypesItemResponse>
@@ -261,15 +258,6 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
       throw new LedgerError('bad-request', 'workspaceId 与 sessionId 必填')
     }
     await deps.closeTab(body.workspaceId, body.sessionId)
-    return { status: 200, body: JSON.stringify({ ok: true }) }
-  })
-
-  handle(ROUTER_REDIRECT_ACK_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; supersededSessionId?: unknown }
-    if (typeof body.workspaceId !== 'string' || typeof body.supersededSessionId !== 'string') {
-      throw new LedgerError('bad-request', 'workspaceId 与 supersededSessionId 必填')
-    }
-    await deps.ackRedirect(body.workspaceId, body.supersededSessionId)
     return { status: 200, body: JSON.stringify({ ok: true }) }
   })
 

@@ -15,7 +15,6 @@ import {
 } from '../src/client/tabs-model.ts'
 import { backButtonVisible, backTargetSessionId } from '../src/client/back-button.tsx'
 import {
-  HOVER_DARKEN_FILTER,
   hoverDarkenStyle,
   LIGHT_TOOLTIP_STYLE,
 } from '../src/client/ui-kit.tsx'
@@ -199,15 +198,8 @@ describe('ui-kit 样式基线（规格 §9：悬浮提示浅色浮层、hover �
   })
 
   it('hover 反馈是「稍变深」的亮度滤镜（brightness < 1），不是反色、不是换底色', () => {
-    expect(HOVER_DARKEN_FILTER).toMatch(/^brightness\(0?\.\d+\)$/)
-    const factor = Number.parseFloat(HOVER_DARKEN_FILTER.replace('brightness(', '').replace(')', ''))
-    expect(factor, '滤镜应明显但不突兀（0.8–1 之间）').toBeGreaterThan(0.8)
-    expect(factor, 'brightness < 1 才是变深').toBeLessThan(1)
-    expect(HOVER_DARKEN_FILTER).not.toMatch(/invert/i)
-  })
-
-  it('hoverDarkenStyle：未 hover 不带滤镜，hover 带上统一滤镜', () => {
-    expect(hoverDarkenStyle(false).filter).toBeUndefined()
-    expect(hoverDarkenStyle(true).filter).toBe(HOVER_DARKEN_FILTER)
+    // v1.4：浅色基线——hover 为底色稍深（不再用滤镜反色）。
+    expect(hoverDarkenStyle(true)).toMatchObject({ background: '#f0f1f3' })
+    expect(hoverDarkenStyle(false)).toEqual({})
   })
 })

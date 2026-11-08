@@ -612,9 +612,6 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
       calls.push(`close:${workspaceId}:${sessionId}`)
       return true
     },
-    async ackRedirect(workspaceId, supersededSessionId) {
-      calls.push(`ack:${workspaceId}:${supersededSessionId}`)
-    },
     // v1.2 B3 通知确认桩：本文件用例不触达，仅为满足 deps 形状。
     async ackNotification() {
       return false
@@ -672,7 +669,6 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/router-session',
       '/router/answer',
       '/router/tabs/close',
-      '/router/redirect/ack',
       '/router/worker-types',
       '/router/worker-types/update',
       '/router/worker-types/enabled',
@@ -776,28 +772,9 @@ describe('HTTP 路由（exact + admit）', () => {
     expect(JSON.parse(captured.body)).toEqual({ ok: true })
     expect(deps.calls[0]).toBe('close:ws-1:session-3')
   })
-
-  it('POST /router/redirect/ack 调 ackRedirect 并回 ok（C4）', async () => {
-    const { ctx, routes } = fakeHttpContext()
-    const deps = fakeDeps()
-    registerRouterRoutes(ctx, deps)
-    const { req, res, captured } = fakeExchange('POST', '/router/redirect/ack', JSON.stringify({ workspaceId: 'ws-1', supersededSessionId: 's-dup' }))
-    await routes[4]!.handler(req, res)
-    expect(captured.status).toBe(200)
-    expect(JSON.parse(captured.body)).toEqual({ ok: true })
-    expect(deps.calls[0]).toBe('ack:ws-1:s-dup')
-  })
 })
 
 describe('HTTP 路由：请求校验', () => {
-  it('redirect/ack 缺键回 400（不是 500）（C4）', async () => {
-    const { ctx, routes } = fakeHttpContext()
-    registerRouterRoutes(ctx, fakeDeps())
-    const { req, res, captured } = fakeExchange('POST', '/router/redirect/ack', JSON.stringify({ workspaceId: 'ws-1' }))
-    await routes[4]!.handler(req, res)
-    expect(captured.status).toBe(400)
-    expect(JSON.parse(captured.body)).toMatchObject({ error: expect.any(String) })
-  })
 
   it('router-session 缺 workspaceId 回 400（不是 500）', async () => {
     const { ctx, routes } = fakeHttpContext()

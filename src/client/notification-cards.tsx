@@ -33,7 +33,7 @@ import {
 } from './notification-model.ts'
 import type { NotificationBoard } from './notification-model.ts'
 import type { NotificationActionKind } from '../shared/view-contract.ts'
-import type { WorkbenchStore } from './workbench-store.ts'
+import { isRouterSessionView, type WorkbenchStore } from './workbench-store.ts'
 import { NOTIFICATION_OVERLAY_ID, NOTIFICATION_OVERLAY_ORDER, NOTIFICATION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
@@ -74,11 +74,11 @@ const STACK_STYLE: CSSProperties = {
 
 const CARD_STYLE: CSSProperties = {
   pointerEvents: 'auto',
-  background: 'var(--dsh-color-bg-elevated, #1f2126)',
-  color: 'inherit',
-  border: '1px solid var(--dsh-color-border, #3a3d45)',
+  background: '#ffffff',
+  color: '#1f2328',
+  border: '1px solid #d8dbe0',
   borderRadius: 10,
-  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.25)',
+  boxShadow: '0 8px 24px rgba(0, 0, 0, 0.14)',
   padding: 10,
   fontSize: 13,
   lineHeight: 1.5,
@@ -97,10 +97,10 @@ const ANOMALY_BORDER: CSSProperties = {
 }
 
 const ACTION_BUTTON_STYLE: CSSProperties = {
-  border: '1px solid var(--dsh-color-border, #3a3d45)',
+  border: '1px solid #d8dbe0',
   borderRadius: 6,
   background: 'transparent',
-  color: 'inherit',
+  color: '#1f2328',
   padding: '3px 8px',
   fontSize: 12,
   cursor: 'pointer',
@@ -114,6 +114,8 @@ function kindLabel(kind: 'completion' | 'anomaly'): string {
 
 function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
   const workbench = useSyncExternalStore(props.store.subscribe, props.store.get)
+  // v1.4：浮窗只在 Router 会话视图展示（用户 2026-11-08 指示）。
+  if (!isRouterSessionView(props.store.get())) return null
   const state = workbench.routerState
   const [emergencyDarken, emergencyBind] = useHoverDarken()
   const [actionDarken, actionBind] = useHoverDarken()

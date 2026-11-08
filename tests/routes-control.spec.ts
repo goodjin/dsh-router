@@ -135,7 +135,6 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
     async closeTab() {
       return true
     },
-    async ackRedirect() {},
     async listWorkerTypes() {
       return { types: [] }
     },
@@ -244,7 +243,6 @@ describe('POST /router/tasks/control（B4）', () => {
       async closeTab() {
         return true
       },
-      async ackRedirect() {},
       async listWorkerTypes() {
         return { types: [] }
       },
