@@ -31,7 +31,7 @@ import { Scheduler } from './host/ledger/scheduler.ts'
 import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace, releaseObservation } from './host/bridge/sessions.ts'
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
-import { scanAndAdoptRouterSessions } from './host/bridge/router-adoption.ts'
+import { createRouterAdoptionCache, scanAndAdoptRouterSessions } from './host/bridge/router-adoption.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
@@ -274,6 +274,11 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     return store
   }
   const ui = new UiStateStore(jsonFilePersistence<UiStateFile>(join(config.dataDir, 'ui-state.json')))
+
+  // 收编扫描的跨轮护栏（2026-11-07 OOM 现场之后补回）：判定过的会话不再
+  // readSession——那一步对已落盘的会话会把整段日志读出来并深拷贝全部事件，
+  // 而 /router/state 每 2.5 秒轮询一次，本机近八千个会话。
+  const adoptionCache = createRouterAdoptionCache()
 
   // 全局派发熔断器（v1.2 规格 §2）：状态落 <dataDir>/guard-state.json，宿主重启
   // 恢复冻结态（启动 effect 里自报）；窗口/阈值可配（root-config）。
@@ -812,7 +817,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
             register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router') },
             deliver: async (sessionId) => { await deliverRouterCard(sessionId) },
             logger: { warn: (message: string) => log.warn(message) },
-          }, config.routerPreset)
+          }, config.routerPreset, adoptionCache)
         } catch (error) {
           log.warn(`Router 会话收编扫描失败（下轮重试）: ${error instanceof Error ? error.message : String(error)}`)
         }
