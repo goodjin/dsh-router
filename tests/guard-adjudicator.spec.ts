@@ -918,6 +918,10 @@ describe('POST /router/notifications/ack（C1 只消费）', () => {
     const card = await store.push({ kind: 'completion', taskId: 'T-001', title: 't', summary: 's', actions: completionActions() })
     const { ctx, routes } = fakeHttpContext()
     const deps: RouterRoutesDeps = {
+      // v1.4 诊断路由桩：本用例不触达。
+      async getHealth() {
+        return {}
+      },
       getState: async () => {
         throw new Error('not used')
       },

@@ -31,7 +31,8 @@ import { Scheduler } from './host/ledger/scheduler.ts'
 import { SessionBridge, type WorkspaceInfo, type AgentInterruptFace, releaseObservation } from './host/bridge/sessions.ts'
 import { AnswerRelay, DEFAULT_QUESTION_BUDGET } from './host/bridge/questions.ts'
 import { UiStateStore, type UiStateFile, type UiStatePersistence } from './host/bridge/tabs.ts'
-import { createRouterAdoptionCache, scanAndAdoptRouterSessions } from './host/bridge/router-adoption.ts'
+import { createRouterAdoptionCache, routerAdoptionDiagnostics, scanAndAdoptRouterSessions } from './host/bridge/router-adoption.ts'
+import { SessionHeaderIndex, type IndexFileState } from './host/session/session-index.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
@@ -275,9 +276,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   }
   const ui = new UiStateStore(jsonFilePersistence<UiStateFile>(join(config.dataDir, 'ui-state.json')))
 
-  // 收编扫描的跨轮护栏（2026-11-07 OOM 现场之后补回）：判定过的会话不再
-  // readSession——那一步对已落盘的会话会把整段日志读出来并深拷贝全部事件，
-  // 而 /router/state 每 2.5 秒轮询一次，本机近八千个会话。
+  // 收编扫描的跨轮护栏（2026-11-07 OOM 现场之后补回）：判定源换成受限索引
+  //（冷盘有界扫描 + live 投影直达 + 指纹持久复用），稳态轮询零副作用；
+  // 收编只做定点核验与幂等登记/补发，绝不整日志 readSession。
   const adoptionCache = createRouterAdoptionCache()
 
   // 全局派发熔断器（v1.2 规格 §2）：状态落 <dataDir>/guard-state.json，宿主重启
@@ -334,11 +335,69 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     get: (id: string) => ctx.workspaceRegistry.get(id) as WorkspaceInfo | undefined,
   }
 
-  // 入口去重（v1.1 Task C4 / 规格 §4）：宿主没有创建前拦截钩子，事后收敛——
-  // /router/state 构建前扫描各 workspace，每项目最早的 dsh-router 预设会话为
-  // 正主（原生 pinSession 置顶），其余较新者归档并写 redirect 指令；客户端
-  // 消费跳转后 POST /router/redirect/ack 清除。readSession/pinSession 缺席
-  // （旧宿主）时去重整体降级为直通，不挡装载。
+  // 会话候选索引（v1.4 性能修复：router-header-index 已评审版本的接线）：
+  // 判定改走有界会话头读取 + 持久化增量索引（SessionHeaderIndex），不再
+  // sessionQuery.readSession 整日志重放（2026-11-07 现场：全量重放把宿主读爆）。
+  // 索引根 = <DSH_HOME>/sessions（不猜 dataDir）；背景推进/低频对账经 ctx.effect
+  // 挂生命周期（UI 不开着也收敛）；live 会话经 session/created 与
+  // agent-preset/selected 事件直达判定（零盘读）。收编（v1.4：Router 会话
+  // 全部独立，不去重）只消费索引增量候选与定点核验，见 router-adoption.ts。
+  const home = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  // live 会话直达：权威事实 = 宿主 sessionProjections 的 agentPreset 投影
+  //（init 自 creation header、apply 前进于 agent-preset/selected）。只对
+  // create/resume 事件携带的已 live Session 调用，绝不触发冷重放；读不到
+  // 权威值 → unknown（保守）。
+  const resolveLivePreset = (session: unknown): string | null | undefined => {
+    try {
+      const projections = ctx.get?.('sessionProjections') as
+        | { stateOf?(session: unknown, key: string): unknown }
+        | undefined
+      const value = projections?.stateOf?.(session, 'agentPreset')
+      if (typeof value === 'string') return value
+      if (value === null) return null
+      return undefined
+    } catch {
+      return undefined
+    }
+  }
+  const sessionHeaderIndex = new SessionHeaderIndex({
+    root: join(home, 'sessions'),
+    routerPreset: config.routerPreset,
+    resolveLivePreset,
+    // 宿主成员/归档集快照源（低频刷新 + live 事件失效；轮询零宿主调用）。
+    membership: {
+      list: () => (ctx.workspaceRegistry.list() as WorkspaceInfo[]),
+      get: (workspaceId: string) => ctx.workspaceRegistry.get(workspaceId) as WorkspaceInfo | undefined,
+      archivedIds: () => {
+        // 宿主为 getter 属性（数组）而非方法；兼容两形状。
+        const raw: unknown = (ctx.workspaceRegistry as { archivedSessionIds?: unknown }).archivedSessionIds
+        return typeof raw === 'function'
+          ? ((raw as () => readonly string[])() ?? [])
+          : Array.isArray(raw)
+            ? (raw as readonly string[])
+            : []
+      },
+    },
+    // 新文件名（session-index.json）：不复用旧去重器的 dedup-index.json 语义。
+    persistence: jsonFilePersistence<IndexFileState>(join(config.dataDir, 'session-index.json')),
+    logger: { warn: (message: string) => log.warn(message) },
+  })
+  // hydrate 先于一切工作；索引背景推进 + 低频对账挂在 effect（dispose 安全：
+  // 在途读取收尾、状态冲刷完成后旧实例才真正消停）。
+  void sessionHeaderIndex.hydrate()
+  ctx.effect(() => {
+    const stop = sessionHeaderIndex.start()
+    return () => {
+      stop()
+      return sessionHeaderIndex.dispose()
+    }
+  }, 'dsh-router: 会话头候选索引（收编判定源）')
+  ctx.on('session/created', ((session: unknown) => {
+    sessionHeaderIndex.onLiveSession(session)
+  }) as unknown as (...args: unknown[]) => unknown)
+  ctx.on('session/event', ((session: unknown, event: unknown) => {
+    sessionHeaderIndex.onLiveSessionEvent(session, event)
+  }) as unknown as (...args: unknown[]) => unknown)
 
   const hosts: RouterCoreHosts = {
     sessionController: ctx.sessionController,
@@ -799,23 +858,31 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   }, 'dsh-router: 启动恢复与动态预设同步')
 
   // HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
-  // C4：GET /router/state 前 先跑去重扫描（判定按会话缓存，稳态零读取），
-  // 返回前把该 workspace 未消费的 redirect 指令并进 state。
+  // C4：GET /router/state 前先收编扫描（判定走受限索引，稳态零副作用）。
   // C3：worker 类型 / Router 默认值七条路由——写操作走 WorkerTypeStore /
   // RouterDefaultsStore，成功后触发动态预设引擎增量同步（重注册即重载工具行，
   // 该类型的 dispatch 描述随之刷新；Router 预设的描述刷新钩子归 C2，见任务报告）。
+  // v1.4：GET /router/health 轻量诊断（索引 + 收编计数，无私有内容）。
   ctx.inject?.(['webServer', 'connection'], (child) => {
     registerRouterRoutes(child as RouterRoutesContext, {
+      getHealth: async () => ({
+        ...sessionHeaderIndex.diagnostics(),
+        adoption: routerAdoptionDiagnostics(adoptionCache),
+      }),
       getState: async (workspaceId) => {
         // v1.4：Router 会话不再去重——每次新建独立。这里只做收编扫描：把
         // picker 自建的 Router 预设会话登记进 routerSessions 并幂等补发身份卡。
+        // 判定源是受限索引（增量候选 + 定点核验），稳态轮询零副作用。
         try {
           await scanAndAdoptRouterSessions({
-            workspaces: (workspaceRegistry.list() ?? []) as unknown as { id: string; sessionIds?: readonly string[] }[],
-            readSession: (sessionId) => (ctx.sessionQuery.readSession === undefined ? Promise.resolve(undefined) : ctx.sessionQuery.readSession(sessionId)) as Promise<{ events?: readonly unknown[]; header?: { agentPreset?: string } } | undefined>,
+            get workspaces() {
+              return (ctx.workspaceRegistry.list() ?? []) as unknown as { id: string; sessionIds?: readonly string[] }[]
+            },
+            index: sessionHeaderIndex,
             known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
             register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router') },
             deliver: async (sessionId) => { await deliverRouterCard(sessionId) },
+            changedCandidates: () => sessionHeaderIndex.changedRouterCandidates(),
             logger: { warn: (message: string) => log.warn(message) },
           }, config.routerPreset, adoptionCache)
         } catch (error) {

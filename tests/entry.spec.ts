@@ -50,6 +50,27 @@ describe('宿主侧入口 src/entry.ts', () => {
   })
 })
 
+describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修复接线）', () => {
+  const source = readFileSync(fileURLToPath(new URL('../src/entry.ts', import.meta.url)), 'utf8')
+
+  it('构造 SessionHeaderIndex（root/preset/持久化/成员面）并挂生命周期与 live 事件', () => {
+    expect(source).toMatch(/new SessionHeaderIndex\(\{/)
+    expect(source).toMatch(/routerPreset: config\.routerPreset/)
+    expect(source).toMatch(/sessionHeaderIndex\.dispose\(\)/)
+    expect(source).toMatch(/ctx\.on\('session\/created'/)
+    expect(source).toMatch(/ctx\.on\('session\/event'/)
+  })
+
+  it('收编扫描只接索引面：增量候选 + 定点核验，不再接整日志 readSession', () => {
+    const at = source.indexOf('scanAndAdoptRouterSessions(')
+    expect(at).toBeGreaterThan(0)
+    const block = source.slice(at, at + 1200)
+    expect(block).toContain('changedCandidates')
+    expect(block).toContain('index:')
+    expect(block, '收编不得回落到整日志读取').not.toContain('readSession')
+  })
+})
+
 /** 记录型假 ctx：captured 记 inject/register 调用，services 全部可空转。 */
 function recordingCtx() {
   const captured = {

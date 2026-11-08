@@ -54,6 +54,8 @@ export const ROUTER_TASKS_CONTROL_PATH = '/router/tasks/control'
 export const ROUTER_BREAKER_UNFREEZE_PATH = '/router/breaker/unfreeze'
 /** 紧急暂停（v1.2 Task B4）：冻结 + 逐会话中断 + 异常通知。 */
 export const ROUTER_EMERGENCY_PAUSE_PATH = '/router/emergency-pause'
+/** 轻量诊断（v1.4）：索引 + 收编计数口径，无私有内容。 */
+export const ROUTER_HEALTH_PATH = '/router/health'
 
 /** 用户侧任务控制动作（前三个镜像 control_task 工具；redispatch 仅用户通道）。 */
 export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'redispatch'
@@ -113,6 +115,11 @@ export interface RouterRoutesDeps {
   unfreezeBreaker(): Promise<BreakerUnfreezeReport>
   /** 紧急暂停（v1.2 B4）：冻结 + 逐会话中断 + 异常通知；逐项结果失败项如实列出。 */
   emergencyPause(): Promise<EmergencyPauseReport>
+  /**
+   * 轻量诊断报告（v1.4 GET /router/health）：SessionHeaderIndex 计数 + 收编
+   * 计数。只报计数与状态名，不含会话 id/路径等私有内容。
+   */
+  getHealth(): Promise<Record<string, unknown>>
 }
 
 /** 域错误码 → HTTP 状态。 */
@@ -380,6 +387,13 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
 
   handle(ROUTER_EMERGENCY_PAUSE_PATH, ['POST'], async () => {
     const report = await deps.emergencyPause()
+    return { status: 200, body: JSON.stringify(report) }
+  })
+
+  /* ── 轻量诊断（v1.4）：索引 + 收编计数口径，无私有内容 ── */
+
+  handle(ROUTER_HEALTH_PATH, ['GET'], async () => {
+    const report = await deps.getHealth()
     return { status: 200, body: JSON.stringify(report) }
   })
 }

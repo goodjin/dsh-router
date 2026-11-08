@@ -324,12 +324,14 @@ export class OutcomeAdjudicator {
       // 点读（r7 §5.2：一次性 projectionMode:'none'）取末轮
       const observation = await this.deps.observeSession(sessionId, { projectionMode: 'none' })
       const events = observation.events
-      const window = lastTurnWindow(events)
-      if (window === undefined) return // 挂死（无完整轮）：留给兜底定时器
+      // turnWindow（非 window）：宿主 bundle 里不能出现裸 window 标识符
+      //（bundle.spec 断言宿主产物不混浏览器全局名，防误引浏览器侧代码）。
+      const turnWindow = lastTurnWindow(events)
+      if (turnWindow === undefined) return // 挂死（无完整轮）：留给兜底定时器
       // 豁免 2：末轮非 completed（aborted/error/interrupted ≠ 完成输出）
-      if (window.end.reason?.kind !== 'completed') return
+      if (turnWindow.end.reason?.kind !== 'completed') return
       // 豁免 3：零步空轮（末轮无 assistant/message）
-      if (!turnHasAssistantOutput(events, window.startIdx)) return
+      if (!turnHasAssistantOutput(events, turnWindow.startIdx)) return
       // 豁免 4：桌面 session/state 的 pendingInput 含 question/approval；CLI 老宿主 agentsGet 兜底
       if (this.deps.sessionState !== undefined) {
         const state = await this.deps.sessionState(sessionId)

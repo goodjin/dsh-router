@@ -125,6 +125,10 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
   const deps: RouterRoutesDeps = {
     // v1.2 B3 通知确认：经统一 NotificationStore。
     ackNotification: (cardId: string) => notifications.ack(cardId),
+    // v1.4 诊断路由桩：本文件用例不触达。
+    async getHealth() {
+      return {}
+    },
     async getState() {
       return { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }
     },
@@ -232,6 +236,10 @@ describe('POST /router/tasks/control（B4）', () => {
       // v1.2 B3 通知确认桩：本用例只看挂载。
       async ackNotification() {
         return false
+      },
+      // v1.4 诊断路由桩：本用例只看挂载。
+      async getHealth() {
+        return {}
       },
       async getState() {
         return { routerSessions: [], tasks: [], questions: [], tabs: [], templates: [] }

@@ -77,3 +77,13 @@ tests/entry.spec.ts   sanity 测试（两个入口源文件可加载、空跑不
 ```
 
 规则：结论带来源引用；三类分别标记；冲突保留不合成；增量位记录摘要已处理到的事件 seq（`summarizeIncremental` 只喂其后的事件，空增量跳过，llm 失败不推进）；正文去空白后不足 20 字符的条目拒绝写入（低信息门）。检索 `search(query, scope)`：关键词扫描（大小写不敏感、中文包含匹配、多词 AND），按条目写入时间倒序最多 20 条，`memoryRef` = `memory://<文档>#<锚>`。摘要用注入式 `llm.stream(messages, signal)`（宿主集成接 `ctx.llm.stream`，样板见 `docs/research/r2-sessions.md` §7.3），记忆模块不 import 任何宿主包。
+
+## 运维：Router 收编的读取成本与诊断（v1.4）
+
+v1.4 语义：Router 会话全部独立——不去重、不归档、不跳转；收编扫描只把 picker
+自建的 Router 预设会话登记进工作台并幂等补发身份卡。判定源是受限会话头读取器
++ 持久化增量索引（`src/host/session/`），`/router/state` 轮询只消费增量候选，
+稳态零副作用——2026-11-07 的「每轮全量重扫导致 OOM」现场已按此修复。运行边界、
+扫描上限、失败冷却与 `GET /router/health` 诊断口径见
+[`docs/router-adoption-operations.md`](docs/router-adoption-operations.md)
+（核对日期 2026-11-08）。

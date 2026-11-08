@@ -296,13 +296,21 @@ describe('dispatchTask 投递内容（v1.3 规格 §2.3/§2.4）', () => {
 
 /* ────────────────────────── 收编扫描（v1.4：不去重，独立多 Router） ────────────────────────── */
 
+/** 索引替身：判定面 + 定点核验全 ok（收编语义见 router-adoption-index.spec）。 */
+function adoptionIndex(verdicts: Record<string, 'router' | 'nonrouter'>) {
+  return {
+    verdictOf: (id: string) => (verdicts[id] === undefined ? { status: 'pending' as const } : { status: 'classified' as const, verdict: verdicts[id] }),
+    verifyDiskFacts: async (ids: readonly string[]) => new Map(ids.map((id) => [id, { ok: verdicts[id] === 'router' }])),
+  } as never
+}
+
 describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡，不归档不跳转）', () => {
   it('Router 预设会话：未登记先 register 再 deliver；已登记只 deliver', async () => {
     const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
     await scanAndAdoptRouterSessions({
       workspaces: [{ id: 'ws-1', sessionIds: ['picker-1', 'picker-2'] }],
-      readSession: async (id) => ({ header: { agentPreset: 'dsh-router' } }),
+      index: adoptionIndex({ 'picker-1': 'router', 'picker-2': 'router' }),
       known: (id) => id === 'picker-2',
       register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
       deliver: async (id) => { calls.push(`deliver:${id}`) },
@@ -310,12 +318,12 @@ describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡�
     expect(calls).toEqual(['register:picker-1:ws-1', 'deliver:picker-1', 'deliver:picker-2'])
   })
 
-  it('非 Router 预设会话：跳过（不读第二次、不登记不投递）', async () => {
+  it('非 Router 预设会话：跳过（不登记不投递）', async () => {
     const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
     await scanAndAdoptRouterSessions({
       workspaces: [{ id: 'ws-1', sessionIds: ['worker-1'] }],
-      readSession: async (id) => ({ header: { agentPreset: 'dsh-router-worker-docs' } }),
+      index: adoptionIndex({ 'worker-1': 'nonrouter' }),
       known: () => false,
       register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
       deliver: async (id) => { calls.push(`deliver:${id}`) },
@@ -324,21 +332,29 @@ describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡�
   })
 
   it('单个会话失败不拖垮其余（下轮重试）', async () => {
-    const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
+    const { scanAndAdoptRouterSessions, createRouterAdoptionCache } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
     const warns: string[] = []
-    await scanAndAdoptRouterSessions({
+    let badFailing = true
+    const deps = {
       workspaces: [{ id: 'ws-1', sessionIds: ['bad-1', 'good-1'] }],
-      readSession: async (id) => {
-        if (id === 'bad-1') throw new Error('boom')
-        return { header: { agentPreset: 'dsh-router' } }
-      },
+      index: adoptionIndex({ 'bad-1': 'router', 'good-1': 'router' }),
       known: () => false,
-      register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
-      deliver: async (id) => { calls.push(`deliver:${id}`) },
+      register: async (id: string, ws: string) => {
+        if (id === 'bad-1' && badFailing) throw new Error('boom')
+        calls.push(`register:${id}:${ws}`)
+      },
+      deliver: async (id: string) => { calls.push(`deliver:${id}`) },
       logger: { warn: (m: string) => { warns.push(m) } },
-    }, 'dsh-router')
+    }
+    const cache = createRouterAdoptionCache()
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache)
     expect(calls).toEqual(['register:good-1:ws-1', 'deliver:good-1'])
     expect(warns.some((m) => m.includes('bad-1'))).toBe(true)
+
+    // 下一轮：失败候选重试成功，收编补齐。
+    badFailing = false
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache)
+    expect(calls).toEqual(['register:good-1:ws-1', 'deliver:good-1', 'register:bad-1:ws-1', 'deliver:bad-1'])
   })
 })

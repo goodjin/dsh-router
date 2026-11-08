@@ -616,6 +616,10 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async ackNotification() {
       return false
     },
+    // v1.4 诊断路由桩：本文件用例不触达，仅为满足 deps 形状。
+    async getHealth() {
+      return {}
+    },
     // C3 类型/默认值路由的桩：本文件用例只打工作台五条，桩只为满足 deps 形状。
     async listWorkerTypes() {
       return { types: [] }
@@ -661,7 +665,7 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
 }
 
 describe('HTTP 路由（exact + admit）', () => {
-  it('十三条 exact 路由全部挂上（C3 worker 类型/默认值 + C5 会话提示词 + B4 控制三条 + v1.3 C2 spawn-mode；v1.4 已删 redirect/ack）', () => {
+  it('十四条 exact 路由全部挂上（C3 worker 类型/默认值 + C5 会话提示词 + B4 控制三条 + v1.3 C2 spawn-mode + v1.4 health；v1.4 已删 redirect/ack）', () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, fakeDeps())
     expect(routes.map((r) => r.path)).toEqual([
@@ -679,6 +683,7 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/tasks/control',
       '/router/breaker/unfreeze',
       '/router/emergency-pause',
+      '/router/health',
     ])
   })
 

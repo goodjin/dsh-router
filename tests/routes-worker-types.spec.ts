@@ -207,6 +207,10 @@ function fakeDeps(factories?: {
     async ackNotification() {
       return false
     },
+    // v1.4 诊断路由桩：本文件用例不触达。
+    async getHealth() {
+      return {}
+    },
     // B4 控制路由桩：本文件用例只打类型/默认值/提示词路由，桩只为满足 deps 形状。
     async controlTask(taskId: string, action: string) {
       calls.push(`control:${taskId}:${action}`)
@@ -301,6 +305,7 @@ describe('worker 类型路由（C3）', () => {
       '/router/tasks/control',
       '/router/breaker/unfreeze',
       '/router/emergency-pause',
+      '/router/health',
     ])
   })
 
