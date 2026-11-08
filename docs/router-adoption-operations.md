@@ -12,20 +12,34 @@
   小日志只按有界 stable-EOF 扫描取「最终预设组合」；live 会话经宿主
   `sessionProjections` 的 `agentPreset` 投影与 `agent-preset/selected` 事件直达
   判定（零盘读）。
-- `/router/state` 每 2.5 秒轮询一次：收编每轮只消费索引的**增量候选**
-  （`changedRouterCandidates`：状态 revision 未前进 → 空清单）与**定点**磁盘
-  事实核验（`verifyDiskFacts`：一次只点一个候选名）。稳态轮次零副作用——
-  不再出现旧现场「每轮全量重扫 = 200%+ CPU、几十分钟堆满 4 GB JS 堆」。
+- `/router/state` 每 2.5 秒轮询一次：收编每轮只消费索引的**资格授予**
+  （`pendingRouterGrants`：当前确实成立的 router 资格，**未被消费方 ack 前
+  不会消失**）与**定点**磁盘事实核验（`verifyDiskFacts`：一次只点一个候选名）。
+  稳态轮次零副作用——不再出现旧现场「每轮全量重扫 = 200%+ CPU、几十分钟堆满
+  4 GB JS 堆」；稳态轮次也**不再遍历宿主工作区/会话成员**（成员定位走索引的
+  增量定位表，成员/归档的权威核验只在副作用边界定点进行）。
 - 索引自带护栏（沿用已评审机制）：首次 bootstrap 有界分批（全局每批最多 10
   次尝试，失败也占预算）、瞬态失败冷却 10 分钟、后台推进约每 250ms 一批、
   低频目录对账默认 60 秒、判定按 root+preset+版本持久化（指纹未变直接复用）、
   单飞 + 安全 dispose（在途读取收尾、状态冲刷完成后才真正消停）。
-- 收编侧护栏：每轮预算（默认 10 次异步副作用）、单飞、失败候选进重试队列
-  （连续失败达上限默认 5 次后出队，等索引重新发放）、身份卡投递幂等（进程内
-  delivered 集合 + 桥侧已发标记 + requestId 去重）。
-- 异步安全：每个候选在定点核验之后、登记等待之后都重新核对「当前仍是 router
-  判定 + 仍在工作区成员里」；等待期间翻面/离开的候选只跳自身，不按 stale 计划
-  登记或投递。单个候选失败（IO 超时/拒绝/异常）不阻断同工作区邻居。
+- 收编侧护栏：每轮预算（默认 10 次异步副作用）、单飞、失败候选进**可恢复的
+  延期队列**（指数退避，默认基数 2 秒、封顶 60 秒；**不再有"连续失败 N 次就
+  永久放弃"**——短暂故障恢复后候选仍会被收编）、延期与新授予轮转交错（失败的
+  头部不反复占用预算，后来者公平前进）、身份卡投递幂等（进程内 delivered 集合
+  + 桥侧已发标记 + requestId 去重）。
+- 资格记账（可靠消费）：资格"当前确实成立"才有授予；载入缓存未核指纹
+  （`verdictOf` = pending）、判定为 unknown/nonrouter 的会话**不在**待消费面，
+  不会被提前消费掉；判定翻到别的值再翻回来会发**新一代**授予（资格代数 +1），
+  不会被旧基线永久漏掉。消费方**成功才 ack**。
+- 异步安全：每个副作用启动前都重新核对「当前仍是 router 判定 + 仍在**目标**
+  工作区成员里 + 未被宿主归档 + 磁盘事实仍新鲜 + 生命周期代际未变」；登记等待
+  之后**再核一次磁盘事实**并复查同一组条件。等待期间翻面/离开/归档/撤销的候选
+  只延期自身，不按 stale 计划登记或投递。单个候选失败（IO 超时/拒绝/异常）不
+  阻断同工作区邻居。
+- live 生命周期：宿主 `session/created` / `session/event` / `session/disposed`
+  三个事件共用同一生命周期 token。会话**离开 live store**（含发布回滚）时撤销
+  它的 live 权威代际 → 进入受控冷重判/unknown（离开 live 后不再有投影事件维护
+  的旧事实不得继续授权）；**旧实例的 disposed 不清新实例**。
 
 ### 默认扫描上限（冷日志 stable-EOF）
 
@@ -51,6 +65,11 @@
 没有事务级原子性保证。live 会话读不到权威投影值时保守判 `unknown`，等
 `agent-preset/selected` 事件到达再前进。
 
+会话**先创建、后挂进工作区**（picker 自建后延迟 attach）时，候选会留在延期
+队列里等成员定位表刷新（低频对账，默认 60 秒）或成员失效刷新；这期间它
+**不会被丢弃**，条件成立后仍会被收编。宿主归档的会话不会被登记或投卡（归档
+事实由定点权威核验给出）；本实现不做任何自动归档/撤销动作。
+
 ## 自报状态（GET /router/health）
 
 使用现有宿主准入方式访问（需插件已启用）。接口不触发任何盘 IO，返回索引计数
@@ -64,7 +83,9 @@
 | `header.attempts` / `cacheReused` / 字节计数 | 实际头读取与复用成本（含失败消耗） |
 | `scan.attempts` / `finals` / `caps` / `unstable` | 小日志扫描结果 |
 | `adoption.rounds` / `registered` / `delivered` | 收编轮次与成功登记/投递计数 |
-| `adoption.retryQueue` / `verifyRejected` / `staleSkipped` / `retriesDropped` / `errors` | 重试队列长度与各类跳过/失败计数 |
+| `adoption.deferred` / `nextRetryAt` / `deferredReasons` | **可恢复**的延期候选数、下次可试时刻与延期原因分布（失败不再被永久丢弃） |
+| `adoption.retryQueue` / `verifyRejected` / `staleSkipped` / `retriesDropped` / `errors` | 队列长度（= deferred）与各类跳过/失败计数（`retriesDropped` 自 v1.4 起恒为 0） |
+| `grant.pending` / `grant.eligible` | 索引侧待消费的资格授予数与当前成立的资格数 |
 | `adoption.inflight` | 是否有进行中的收编轮（单飞可见） |
 
 诊断不返回会话正文、标题或路径。`entries.unknown` 不为零不是故障；把

@@ -2083,8 +2083,8 @@ describe('SessionHeaderIndex：扫描证据必须与索引位置同一实体（I
   })
 })
 
-describe('SessionHeaderIndex：changedRouterCandidates（收编增量候选面）', () => {
-  it('盘扫描与 live 判定的 router 都发放一次；revision 未前进的重复消费返回空', async () => {
+describe('SessionHeaderIndex：资格授予面（收编消费面，review I1）', () => {
+  it('盘扫描与 live 判定的 router 都发一次授予；未 ack 不消失', async () => {
     const root = await tmpRoot()
     await writeSession(root, 's-router', { agentPreset: 'dsh-router' })
     await writeSession(root, 's-other', {})
@@ -2094,30 +2094,69 @@ describe('SessionHeaderIndex：changedRouterCandidates（收编增量候选面�
     })
     await index.reconcile()
     await index.advance()
-    // 盘扫描路径分类出的 router 必须出现在首帧候选里（不能被游标吞掉）。
-    expect(index.changedRouterCandidates()).toEqual(['s-router'])
-    expect(index.changedRouterCandidates(), '同 revision 重复消费不该重发').toEqual([])
-    // live 事件直达判定同样发放一次。
+    // 盘扫描路径分类出的 router 必须出现在待消费面（不能被吞掉）。
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-router'])
+    // 未 ack → 授予仍在（可靠记账：消费方可以安全跳过/延期）。
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-router'])
+    // live 事件直达判定同样发一次授予。
     index.onLiveSession(liveSession({ id: 's-live', agentPreset: 'dsh-router' }))
-    expect(index.changedRouterCandidates()).toEqual(['s-live'])
-    expect(index.changedRouterCandidates(), '无新事实不重发').toEqual([])
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-router', 's-live'])
   })
 
-  it('变为 nonrouter 不发放；再变回 router 重新发放（判定翻转才是新事实）', async () => {
+  it('ack 后授予移出待消费面；代数不符的 ack 不消费新一代', async () => {
+    const root = await tmpRoot()
+    const projections = new Map<string, string | null>([['s-live', 'dsh-router']])
+    const { index } = makeIndex(root, {
+      resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
+    })
+    index.onLiveSession(liveSession({ id: 's-live', agentPreset: 'dsh-router' }))
+    const [grant] = index.pendingRouterGrants(10)
+    expect(grant?.sessionId).toBe('s-live')
+    index.ackRouterGrant('s-live', (grant?.generation ?? 0) + 1)
+    expect(index.pendingRouterGrants(10), '代数不符的 ack 不能消费授予').toHaveLength(1)
+    index.ackRouterGrant('s-live', grant!.generation)
+    expect(index.pendingRouterGrants(10)).toHaveLength(0)
+  })
+
+  it('变为 nonrouter 撤下授予；再变回 router 发新一代（判定翻转才是新事实）', async () => {
     const root = await tmpRoot()
     const projections = new Map<string, string | null>([['s-flip', 'dsh-router']])
     const { index } = makeIndex(root, {
       resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
     })
     index.onLiveSession(liveSession({ id: 's-flip', agentPreset: 'dsh-router' }))
-    expect(index.changedRouterCandidates()).toEqual(['s-flip'])
+    const first = index.pendingRouterGrants(10)
+    expect(first.map((grant) => grant.sessionId)).toEqual(['s-flip'])
     index.onLiveSessionEvent(liveSession({ id: 's-flip' }), { type: 'agent-preset/selected', data: { agentPreset: 'other' } })
-    expect(index.changedRouterCandidates(), 'nonrouter 不是新增 router').toEqual([])
+    expect(index.pendingRouterGrants(10), 'nonrouter 不是新增 router').toEqual([])
     index.onLiveSessionEvent(liveSession({ id: 's-flip' }), { type: 'agent-preset/selected', data: { agentPreset: 'dsh-router' } })
-    expect(index.changedRouterCandidates(), '翻转回来的 router 是新事实').toEqual(['s-flip'])
+    const flipped = index.pendingRouterGrants(10)
+    expect(flipped.map((grant) => grant.sessionId)).toEqual(['s-flip'])
+    expect(flipped[0]!.generation, '翻回来的 router 是新一代资格').toBeGreaterThan(first[0]!.generation)
   })
 
-  it('发放与消费互不干扰判定面：发放不改变 verdictOf/revision 语义', async () => {
+  it('载入缓存未核指纹（unverified）时不发授予；同指纹对账后才发', async () => {
+    const root = await tmpRoot()
+    await writeSession(root, 's-cold', { agentPreset: 'dsh-router' })
+    const { persistence } = memoryPersistence()
+    const first = makeIndex(root, { persistence: persistence })
+    await first.index.reconcile()
+    await first.index.advance()
+    expect(first.index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-cold'])
+    await first.index.dispose()
+
+    // 第二个实例：hydrate 后是未核验缓存 → 不发授予。
+    const second = makeIndex(root, { persistence: persistence })
+    await second.index.hydrate()
+    expect(second.index.verdictOf('s-cold').status).toBe('pending')
+    expect(second.index.pendingRouterGrants(10), '未核验的候选不该被提前消费').toEqual([])
+    // 同指纹对账 → 资格成立 → 发授予。
+    await second.index.reconcile()
+    expect(second.index.verdictOf('s-cold')).toMatchObject({ status: 'classified', verdict: 'router' })
+    expect(second.index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-cold'])
+  })
+
+  it('授予面不改变 verdictOf/revision 语义', async () => {
     const root = await tmpRoot()
     const projections = new Map<string, string | null>([['s-live', 'dsh-router']])
     const { index } = makeIndex(root, {
@@ -2125,8 +2164,78 @@ describe('SessionHeaderIndex：changedRouterCandidates（收编增量候选面�
     })
     index.onLiveSession(liveSession({ id: 's-live', agentPreset: 'dsh-router' }))
     const before = index.revision()
-    expect(index.changedRouterCandidates()).toEqual(['s-live'])
-    expect(index.revision(), '发放候选本身不算状态变化').toBe(before)
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-live'])
+    expect(index.revision(), '发授予本身不算状态变化').toBe(before)
     expectVerdict(index, 's-live', 'router')
+  })
+})
+
+describe('SessionHeaderIndex：live 生命周期（session/disposed，review I6）', () => {
+  it('会话离开 live store：撤销 live 权威 → 不再授权（受控冷重判）', async () => {
+    const root = await tmpRoot()
+    await writeSession(root, 's-gone', { agentPreset: 'dsh-router' })
+    const projections = new Map<string, string | null>([['s-gone', 'dsh-router']])
+    const { index } = makeIndex(root, {
+      resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
+    })
+    const session = liveSession({ id: 's-gone', agentPreset: 'dsh-router' })
+    index.onLiveSession(session)
+    expectVerdict(index, 's-gone', 'router')
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-gone'])
+
+    // 会话离开 live store：live 权威撤销 → 判定不再是 router（不再授权）。
+    index.onLiveSessionDisposed(session)
+    expect(index.verdictOf('s-gone').status, '离开 live 后不得继续按 live 权威授权').not.toBe('classified')
+    expect(index.pendingRouterGrants(10), '资格撤销后待消费面清空').toEqual([])
+  })
+
+  it('旧实例的 disposed 不清新实例的权威', async () => {
+    const root = await tmpRoot()
+    const projections = new Map<string, string | null>([['s-rep', 'dsh-router']])
+    const { index } = makeIndex(root, {
+      resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
+    })
+    const oldInstance = liveSession({ id: 's-rep', agentPreset: 'dsh-router' })
+    index.onLiveSession(oldInstance)
+    // 新实例接管同一 id。
+    const newInstance = liveSession({ id: 's-rep', agentPreset: 'dsh-router' })
+    index.onLiveSession(newInstance)
+    // 旧实例卸载：不得清掉新实例的权威。
+    index.onLiveSessionDisposed(oldInstance)
+    expectVerdict(index, 's-rep', 'router')
+    expect(index.pendingRouterGrants(10).map((grant) => grant.sessionId)).toEqual(['s-rep'])
+    // 新实例卸载：权威才被撤销。
+    index.onLiveSessionDisposed(newInstance)
+    expect(index.verdictOf('s-rep').status).not.toBe('classified')
+  })
+
+  it('旧实例的迟到事件不改新实例的事实', async () => {
+    const root = await tmpRoot()
+    const projections = new Map<string, string | null>([['s-rep', 'dsh-router']])
+    const { index } = makeIndex(root, {
+      resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
+    })
+    const oldInstance = liveSession({ id: 's-rep', agentPreset: 'dsh-router' })
+    index.onLiveSession(oldInstance)
+    const newInstance = liveSession({ id: 's-rep', agentPreset: 'dsh-router' })
+    index.onLiveSession(newInstance)
+    // 旧实例的迟到事件：忽略（不能把新实例的组合改成别的预设）。
+    index.onLiveSessionEvent(oldInstance, { type: 'agent-preset/selected', data: { agentPreset: 'other' } })
+    expectVerdict(index, 's-rep', 'router')
+  })
+
+  it('生命周期代际随权威变化推进（消费方的 await 屏障）', async () => {
+    const root = await tmpRoot()
+    const projections = new Map<string, string | null>([['s-life', 'dsh-router']])
+    const { index } = makeIndex(root, {
+      resolveLivePreset: (session) => projections.get((session as { id?: string }).id ?? ''),
+    })
+    const session = liveSession({ id: 's-life', agentPreset: 'dsh-router' })
+    const before = index.authorityToken('s-life')
+    index.onLiveSession(session)
+    expect(index.authorityToken('s-life')).toBeGreaterThan(before)
+    const afterCreate = index.authorityToken('s-life')
+    index.onLiveSessionDisposed(session)
+    expect(index.authorityToken('s-life')).toBeGreaterThan(afterCreate)
   })
 })

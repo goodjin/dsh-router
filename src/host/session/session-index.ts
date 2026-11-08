@@ -84,6 +84,25 @@ export type VerdictLookup =
   | { status: 'failed'; retryAt: number }
 
 /**
+ * 一次 **router 资格授予**（收编消费方与索引之间的记账点）。
+ *
+ * 语义（v1.4 review I1）：判定「当前确实是 router」是一份**可重新成立的
+ * 资格**——资格代数（generation）每次「不再成立 → 又成立」就 +1。消费方
+ * 按 (sessionId, generation) 记账：处理成功才 ack；未 ack 的授予**永远留在
+ * 待消费面**（不被"看一眼"就吞掉），因此
+ * - 载入缓存尚未核指纹（unverified/pending）时**不授予**——不会把未核验
+ *   的候选提前消费掉、丢掉未来资格；
+ * - 判定翻到别的值再翻回来（router→other→router）会拿到**新一代**授予，
+ *   不会因为旧基线里出现过 id 就永久漏掉；
+ * - 消费方 ack 后该授予从待消费面移除（稳态待消费面为空 → 每轮 O(1)）。
+ */
+export interface RouterGrant {
+  sessionId: string
+  /** 资格代数：每次重新成立 +1；ack 时代数不符即忽略（新一代未被消费）。 */
+  generation: number
+}
+
+/**
  * 落盘形状（version/root/preset 作用域校验）。
  *
  * version 2：cold verdict v2——disk 判定可携带 evidence 'stable-eof'（小日志
@@ -256,6 +275,20 @@ export function liveHeaderOf(session: unknown): {
   }
 }
 
+/** live Session 载荷的会话 id（头优先，载荷 id 兜底）。 */
+function liveSessionId(session: unknown): string | undefined {
+  if (session === null || typeof session !== 'object') return undefined
+  const carrier = session as { id?: unknown; header?: unknown }
+  const header = carrier.header
+  const record = (header !== null && typeof header === 'object' ? header : session) as Record<string, unknown>
+  const id = typeof record['id'] === 'string' && record['id'].length > 0
+    ? record['id']
+    : typeof carrier.id === 'string' && carrier.id.length > 0
+      ? carrier.id
+      : undefined
+  return id
+}
+
 interface SessionLocation {
   projectDir: string
   file: string
@@ -375,6 +408,34 @@ export class SessionHeaderIndex {
    * 名单，分批收敛时累计成平方。
    */
   private membershipRevisionCounter = 1
+  /**
+   * 成员定位表（sessionId → workspaceId）：**增量缓存**，只在成员快照刷新
+   * 时重建（低频对账 / 成员失效刷新）。收编侧据此 O(1) 定位目标工作区，
+   * 稳态轮次不再遍历宿主全部工作区/会话（review I7）。
+   */
+  private membershipIndex = new Map<string, string>()
+  /**
+   * router 资格授予（review I1）：`grantState` 是每个 id 的资格记录
+   * （代数 + 当前是否成立），`pendingGrants` 只装**未被消费方 ack** 的授予
+   * （插入序；稳态为空 → 每轮 O(1)）。资格"不再成立"时撤下待消费授予；
+   * "又成立"时发**新一代**授予（代数 +1）——旧基线不会把 id 永久吞掉。
+   */
+  private readonly grantState = new Map<string, { generation: number; eligible: boolean }>()
+  private readonly pendingGrants = new Map<string, number>()
+  private eligibilitySeq = 0
+  /**
+   * live 实例身份（生命周期 token）：`session/created` 认领当前实例；被替换
+   * 的旧实例进 `retiredInstances`（弱引用集）——旧实例的迟到事件与 disposed
+   * 都不再影响新实例（review I6）。事件面**不夺走**已认领的实例（宿主可能
+   * 用包装对象投递事件），只在还没有实例时认领。
+   */
+  private readonly liveInstances = new Map<string, object>()
+  private readonly retiredInstances = new WeakSet<object>()
+  /**
+   * 生命周期代际（授权屏障）：判定/权威事实每变一次 +1。消费方在 await
+   * 前后比对同一代数，识别"计划已过期"的异步间隙（review I5/I6）。
+   */
+  private readonly authorityTokens = new Map<string, number>()
 
   private dirty = false
 /** 判定状态版本号：任一判定/队列/失败变化时前进（dedup 稳态缓存键，I8）。 */
@@ -401,9 +462,6 @@ export class SessionHeaderIndex {
     scanCaps: 0,
     scanUnstable: 0,
   }
-  /** 收编消费的「新增 router 判定」游标（基线快照；只随状态 revision 前进）。 */
-  private lastAdoptionRevision = -1
-  private lastAdoptionBaseline = new Set<string>()
 
   constructor(deps: SessionIndexDeps) {
     this.ioBudget = new IoBudget(deps.ioCapacity ?? 8)
@@ -455,8 +513,10 @@ export class SessionHeaderIndex {
               // 按 cold v2 语义重扫（evidence 语义 v1 不存在）。
               continue
             }
-            this.entries.set(entry.sessionId, { ...entry })
+            // 先标 unverified 再落条目：资格同步据此**不授予**（载入缓存
+            // 未核指纹前不授权副作用，review I1）。
             this.unverified.add(entry.sessionId)
+            this.putEntry(entry.sessionId, { ...entry })
           }
           for (const failure of loaded!.failures) {
             if (!isValidFailure(failure)) continue
@@ -522,8 +582,7 @@ export class SessionHeaderIndex {
       for (const [id, entry] of this.entries) {
         if (entry.origin === 'live') continue
         if (!discovered.has(id)) {
-          this.entries.delete(id)
-          this.unverified.delete(id)
+          this.dropEntry(id)
           this.dequeue(id)
           this.failures.delete(id)
           this.recomputeNextRetryAt()
@@ -555,10 +614,15 @@ export class SessionHeaderIndex {
           this.counters.cacheReused += 1
           // 成功核对位置指纹 → 缓存可信。状态迁移（pending→classified）必须
           // 推进 revision，否则 dedup 的稳态缓存永远命中 blocked 结果（R2-C）。
-          if (this.unverified.delete(id)) this.markDirty()
+          // 核指纹后资格才成立 → 此时才发 router 授予（review I1：冷重启
+          // 同指纹核对通过前不得把候选消费掉）。
+          if (this.unverified.delete(id)) {
+            this.markDirty()
+            this.syncRouterGrant(id)
+          }
           continue
         }
-        this.entries.delete(id)
+        this.dropEntry(id)
         this.enqueueForClassification(id, loc)
         continue
       }
@@ -803,8 +867,7 @@ export class SessionHeaderIndex {
         }
         if (fingerprint.kind === 'gone') {
           // 会话已消失 → 终态：清条目与失败，不再重试。
-          this.entries.delete(id)
-          this.unverified.delete(id)
+          this.dropEntry(id)
           if (this.failures.delete(id)) this.recomputeNextRetryAt()
           this.markDirty()
           continue
@@ -842,7 +905,8 @@ export class SessionHeaderIndex {
               : scan.finalPreset === null
                 ? 'stable-eof: preset-free composition'
                 : `stable-eof: runs under ${scan.finalPreset}`
-          this.entries.set(id, {
+          this.unverified.delete(id)
+          this.putEntry(id, {
             sessionId: id,
             projectDir: loc.projectDir,
             file: loc.file,
@@ -856,7 +920,6 @@ export class SessionHeaderIndex {
             evidence: 'stable-eof',
           })
           if (this.failures.delete(id)) this.recomputeNextRetryAt()
-          this.unverified.delete(id)
           this.dequeue(id)
           this.markDirty()
           continue
@@ -878,7 +941,8 @@ export class SessionHeaderIndex {
           this.markDirty()
           continue
         }
-        this.entries.set(id, {
+        this.unverified.delete(id)
+        this.putEntry(id, {
           sessionId: id,
           projectDir: loc.projectDir,
           file: loc.file,
@@ -891,7 +955,6 @@ export class SessionHeaderIndex {
           reason: `stable-eof scan ${scan.reason}: ${scan.message}`,
         })
         if (this.failures.delete(id)) this.recomputeNextRetryAt()
-        this.unverified.delete(id)
         this.dequeue(id)
         this.markDirty()
         continue
@@ -908,7 +971,8 @@ export class SessionHeaderIndex {
             finalReason = 'stable-EOF scan unavailable on reader face (conservative unknown)'
           }
         }
-        this.entries.set(id, {
+        this.unverified.delete(id)
+        this.putEntry(id, {
           sessionId: id,
           projectDir: loc.projectDir,
           file: loc.file,
@@ -921,7 +985,6 @@ export class SessionHeaderIndex {
           reason: finalReason,
         })
         if (this.failures.delete(id)) this.recomputeNextRetryAt()
-        this.unverified.delete(id)
         this.dequeue(id)
         this.markDirty()
         continue
@@ -943,7 +1006,8 @@ export class SessionHeaderIndex {
       }
       // 最终失败（corrupt / future-format / ambiguous / unsupported）：
       // fail closed 为显式 unknown；不进重试队列。
-      this.entries.set(id, {
+      this.unverified.delete(id)
+      this.putEntry(id, {
         sessionId: id,
         projectDir: loc.projectDir,
         file: loc.file,
@@ -956,7 +1020,6 @@ export class SessionHeaderIndex {
         reason: `${outcome.reason}: ${outcome.message}`,
       })
       if (this.failures.delete(id)) this.recomputeNextRetryAt()
-      this.unverified.delete(id)
       this.dequeue(id)
       this.markDirty()
     }
@@ -1233,6 +1296,14 @@ export class SessionHeaderIndex {
   /** live 会话创建/恢复（session/created 载荷）：投影权威判定（零盘读）。 */
   onLiveSession(session: unknown): void {
     this.membershipStale = true // 新会话 → 成员快照失效（R2-A：仅 created 置位）
+    // 生命周期 token：认领这个 id 的**当前实例**（对象身份）。后续 disposed
+    // 只撤同一实例——旧实例卸载不清新实例（review I6）。
+    const createdId = liveSessionId(session)
+    if (createdId !== undefined) {
+      const previous = this.liveInstances.get(createdId)
+      if (previous !== undefined && previous !== (session as object)) this.retiredInstances.add(previous)
+      this.liveInstances.set(createdId, session as object)
+    }
     this.dispatchLive(() => {
       const facts = liveHeaderOf(session)
       if (facts === undefined) return
@@ -1248,6 +1319,53 @@ export class SessionHeaderIndex {
   }
 
   /**
+   * live 会话离开 live store（`session/disposed`；官方契约：会话离开 store
+   * 时发出一次，含发布回滚）。
+   *
+   * 处置（review I6）：撤销该 id 的 **live 权威代际** → 进入**受控冷重判**
+   * （交回盘面重扫）或显式 unknown；离开 live 后不再有投影事件维护的旧事实
+   * 不能继续授权（`verifyDiskFacts` 对 origin=live 无条件 fresh 的漏洞因此
+   * 关闭）。**旧实例的 disposed 不清新实例**：只有与当前认领实例同一对象
+   * 的 disposed 才撤销。
+   */
+  onLiveSessionDisposed(session: unknown): void {
+    const id = liveSessionId(session)
+    if (id === undefined) return
+    const current = this.liveInstances.get(id)
+    if (current !== (session as object)) return // 不是当前实例：不动新实例的权威
+    this.liveInstances.delete(id)
+    this.dispatchLive(() => {
+      this.revokeLiveAuthority(id)
+    })
+  }
+
+  /**
+   * 撤销 live 权威（id 离开 live store）：live 条目作废 → 交回受控冷重判
+   * （有位置就重新入队重扫），否则显式 unknown。资格随之失效（待消费授予
+   * 撤下；将来重新成立会发新一代）。
+   */
+  private revokeLiveAuthority(sessionId: string): void {
+    const entry = this.entries.get(sessionId)
+    this.bumpRevision(sessionId)
+    if (entry !== undefined && entry.origin === 'live') {
+      this.dropEntry(sessionId) // 条目作废 → 资格失效（待消费授予撤下）
+      this.dequeue(sessionId)
+      if (this.failures.delete(sessionId)) this.recomputeNextRetryAt()
+      if (entry.projectDir !== '' && entry.file !== '') {
+        // 受控冷重判：按已知位置重新入队（指纹复核不通过时转由对账重排）。
+        this.enqueueForClassification(sessionId, {
+          projectDir: entry.projectDir,
+          file: entry.file,
+          fingerprint: entry.fingerprint,
+        })
+      }
+      this.markDirty()
+    }
+    this.syncRouterGrant(sessionId)
+    this.scheduleSave()
+  }
+
+  /**
    * live 会话事件（session/event 载荷）：`agent-preset/selected` 是权威提交
    * 信号——事件值即最终组合（再选会再发事件），无需投影兜底。
    */
@@ -1256,13 +1374,18 @@ export class SessionHeaderIndex {
     // 也不使成员快照失效；只有权威选择事件才走到 dispatchLive。
     const record = event as { type?: unknown; data?: unknown } | null | undefined
     if (record?.type !== 'agent-preset/selected') return
+    const eventId = liveSessionId(session)
+    if (eventId === undefined) return
+    // 生命周期 token：**被替换的旧实例**的迟到事件不改新实例的事实
+    // （review I6）；已认领的实例不被事件夺走（宿主可能用包装对象投递）。
+    if (this.retiredInstances.has(session as object)) return
+    if (!this.liveInstances.has(eventId)) this.liveInstances.set(eventId, session as object)
     this.membershipStale = true
     this.dispatchLive(() => {
       const data = record.data as { agentPreset?: unknown } | null | undefined
       if (data === null || typeof data !== 'object' || typeof data.agentPreset !== 'string') return
       const facts = liveHeaderOf(session)
-      const id = facts?.id ?? (typeof (session as { id?: unknown })?.id === 'string' ? (session as { id: string }).id : undefined)
-      if (id === undefined) return
+      const id = facts?.id ?? eventId
       const existing = this.entries.get(id)
       const isSeeded = existing?.isSeeded ?? facts?.isSeeded ?? false
       this.applyLiveVerdict(id, { ...(facts ?? { id, version: 4, createdAt: existing?.createdAt ?? 0, isSeeded, agentPreset: undefined }), isSeeded }, data.agentPreset)
@@ -1277,7 +1400,8 @@ export class SessionHeaderIndex {
   ): void {
     const { verdict, reason } = classifyLiveComposition(finalPreset, facts.isSeeded, this.routerPreset)
     const existing = this.entries.get(sessionId)
-    this.entries.set(sessionId, {
+    this.unverified.delete(sessionId)
+    this.putEntry(sessionId, {
       sessionId,
       projectDir: existing?.projectDir ?? '',
       file: existing?.file ?? '',
@@ -1290,7 +1414,6 @@ export class SessionHeaderIndex {
       reason,
     })
     if (this.failures.delete(sessionId)) this.recomputeNextRetryAt()
-    this.unverified.delete(sessionId)
     this.dequeue(sessionId)
     this.bumpRevision(sessionId)
     this.markDirty()
@@ -1298,24 +1421,94 @@ export class SessionHeaderIndex {
   }
 
   /**
-   * 收编消费的新增 router 候选（v1.4：稳定轮询不逐轮全库重核）。
+   * 待消费的 router 资格授予（review I1：可靠记账，不是"看一眼就吞"）。
    *
-   * 基线 = 上次消费时的全部 router 快照：状态 revision 未前进 → 返回空（稳态
-   * 轮询零工作）；前进后返回相对基线新出现的 router 项。判定翻转为 nonrouter
-   * 不发放；翻回 router 会重新发放——那是一条新的 router 事实，收编侧幂等
-   * （known/delivered 标记）会把它变成零副作用确认。纯内存 O(entries)，
-   * 不做任何盘 IO，也不改变 verdictOf/revision 语义。
+   * - 只有**当前确实成立**的资格才在待消费面：载入缓存未核指纹
+   *   （unverified → verdictOf=pending）、判定为 unknown/nonrouter 的会话
+   *   **不在**待消费面——不会因为"曾经是 router"就被提前消费掉、丢掉未来
+   *   资格。
+   * - 授予**不被读取即消费**：只有消费方 ack（`ackRouterGrant`）才移除。
+   *   消费方因此可以安全地"没处理完就跳过"（延期/退避），候选不会永久漏。
+   * - 资格"不再成立 → 又成立"发**新一代**授予（代数 +1）：两个轮询之间
+   *   router→other→router 的翻面不会被旧基线吞掉。
+   * - 稳态：待消费面为空 → 本方法 O(1)，不做全库重建。
+   *
+   * @param limit - 本次最多取几条（消费方的单轮预算）。
+   * @param skip - 消费方正在**自行排期重试**的 id（跳过它们，避免同一候选
+   *   反复占用预算；它们仍在待消费面，恢复后仍会被取到）。
    */
-  changedRouterCandidates(): readonly string[] {
-    const currentRevision = this.stateRevision
-    if (currentRevision === this.lastAdoptionRevision) return []
-    const currentRouterIds = [...this.entries.entries()]
-      .filter(([, entry]) => entry.verdict === 'router')
-      .map(([sessionId]) => sessionId)
-    const fresh = currentRouterIds.filter((sessionId) => !this.lastAdoptionBaseline.has(sessionId))
-    this.lastAdoptionRevision = currentRevision
-    this.lastAdoptionBaseline = new Set(currentRouterIds)
-    return fresh
+  pendingRouterGrants(limit: number, skip?: ReadonlySet<string>): readonly RouterGrant[] {
+    const out: RouterGrant[] = []
+    if (limit <= 0) return out
+    for (const [sessionId, generation] of this.pendingGrants) {
+      if (out.length >= limit) break
+      if (skip?.has(sessionId)) continue
+      out.push({ sessionId, generation })
+    }
+    return out
+  }
+
+  /** 待消费面上某 id 当前的资格代数（没有待消费授予则 undefined）。 */
+  routerGrantGeneration(sessionId: string): number | undefined {
+    return this.pendingGrants.get(sessionId)
+  }
+
+  /**
+   * 消费方 ack（记账点）：代数不符即忽略——新一代资格未被消费，旧的一代
+   * 不能把新一代标记成已消费。
+   */
+  ackRouterGrant(sessionId: string, generation: number): void {
+    if (this.pendingGrants.get(sessionId) === generation) this.pendingGrants.delete(sessionId)
+  }
+
+  /**
+   * 资格同步（唯一入口）：某 id 的资格当前是否成立 = 条目判定为 router
+   * **且**已核验（不在 unverified 集里——载入缓存未核指纹前不授权）。
+   * 成立且此前不成立 → 发新一代授予；此前成立现在不成立 → 撤下待消费授予。
+   */
+  private syncRouterGrant(sessionId: string): void {
+    const entry = this.entries.get(sessionId)
+    const eligible = entry !== undefined && entry.verdict === 'router' && !this.unverified.has(sessionId)
+    const state = this.grantState.get(sessionId)
+    if (eligible) {
+      if (state === undefined || !state.eligible) {
+        const generation = ++this.eligibilitySeq
+        this.grantState.set(sessionId, { generation, eligible: true })
+        this.pendingGrants.set(sessionId, generation)
+      }
+      return
+    }
+    if (state !== undefined && state.eligible) {
+      state.eligible = false
+      this.pendingGrants.delete(sessionId)
+    }
+  }
+
+  /**
+   * 落一条判定（唯一写入口）：判定/来源变化时推进生命周期代际（授权屏障），
+   * 并同步 router 资格。
+   */
+  private putEntry(sessionId: string, entry: VerdictEntry): void {
+    const previous = this.entries.get(sessionId)
+    this.entries.set(sessionId, entry)
+    if (previous === undefined || previous.verdict !== entry.verdict || previous.origin !== entry.origin) {
+      this.bumpAuthority(sessionId)
+    }
+    this.syncRouterGrant(sessionId)
+  }
+
+  /** 移除一条判定（同步资格：资格不再成立 → 撤下待消费授予）。 */
+  private dropEntry(sessionId: string): void {
+    const previous = this.entries.get(sessionId)
+    this.entries.delete(sessionId)
+    this.unverified.delete(sessionId)
+    if (previous !== undefined) this.bumpAuthority(sessionId)
+    this.syncRouterGrant(sessionId)
+  }
+
+  /** 生命周期代际 +1（任何影响授权的事实变化）。 */
+  private bumpAuthority(sessionId: string): void {
+    this.authorityTokens.set(sessionId, (this.authorityTokens.get(sessionId) ?? 0) + 1)
   }
 
   /** 判定状态版本号（稳态缓存键；每次判定/队列/失败变化 +1）。 */
@@ -1364,6 +1557,22 @@ export class SessionHeaderIndex {
   /** 宿主成员快照（轮询只读快照，不打宿主面；I8 r2）。 */
   workspaces(): readonly WorkspaceInfo[] {
     return this.membershipSnapshot
+  }
+
+  /**
+   * 成员定位（增量缓存）：某会话当前在哪个工作区、是否已被宿主归档。
+   * O(1)——收编侧据此定位目标工作区，不必每轮遍历宿主全部工作区/会话
+   * （review I7）。缓存随成员快照刷新（低频对账 / 事件失效）。
+   */
+  locateMember(sessionId: string): { workspaceId: string; archived: boolean } | undefined {
+    const workspaceId = this.membershipIndex.get(sessionId)
+    if (workspaceId === undefined) return undefined
+    return { workspaceId, archived: this.archivedSnapshot.has(sessionId) }
+  }
+
+  /** 生命周期代际（授权屏障）：await 前后比对同一代数识别过期计划。 */
+  authorityToken(sessionId: string): number {
+    return this.authorityTokens.get(sessionId) ?? 0
   }
 
   /** 宿主归档集快照（同上）。 */
@@ -1442,6 +1651,15 @@ export class SessionHeaderIndex {
       || archived.some((id) => !this.archivedSnapshot.has(id))
     this.membershipSnapshot = listed
     this.archivedSnapshot = new Set(archived)
+    // 成员定位表（增量缓存）：随快照一起重建——收编侧 O(1) 定位目标工作区，
+    // 稳态轮次不再遍历宿主全部工作区/会话（review I7）。
+    const locations = new Map<string, string>()
+    for (const workspace of listed) {
+      for (const sessionId of workspace.sessionIds ?? []) {
+        if (!locations.has(sessionId)) locations.set(sessionId, workspace.id)
+      }
+    }
+    this.membershipIndex = locations
     this.membershipStale = false
     if (membershipChanged || archivedChanged) {
       this.membershipRevisionCounter += 1
@@ -1511,8 +1729,7 @@ export class SessionHeaderIndex {
         }
         if ('error' in statRun) {
           if (isENOENT(statRun.error)) {
-            this.entries.delete(id)
-            this.unverified.delete(id)
+            this.dropEntry(id)
             this.dequeue(id)
             if (this.failures.delete(id)) this.recomputeNextRetryAt()
             this.markDirty()
@@ -1539,8 +1756,7 @@ export class SessionHeaderIndex {
             : undefined
         if (currentFingerprint === undefined || currentFingerprint !== entry.fingerprint) {
           // 文件/代际/指纹变了：作废旧判定，按新位置重新入队（受控重扫）。
-          this.entries.delete(id)
-          this.unverified.delete(id)
+          this.dropEntry(id)
           if (chosen !== undefined) {
             this.enqueueForClassification(id, {
               projectDir: entry.projectDir,
@@ -1611,6 +1827,8 @@ export class SessionHeaderIndex {
     scan: { attempts: number; finals: number; caps: number; unstable: number }
     concurrency: { inflightAdvance: boolean; inflightReconcile: boolean; reconcileRuns: number; advanceRuns: number }
     degraded: { unsupportedCodec: boolean }
+    /** 资格授予面（review I1）：待消费授予数 + 当前成立资格数。 */
+    grant: { pending: number; eligible: number }
   } {
     const breakdown = { total: this.entries.size, router: 0, nonrouter: 0, unknown: 0, live: 0 }
     const byEvidence = { 'stable-eof': 0, 'header-seeded': 0, live: 0, none: 0 }
@@ -1660,6 +1878,10 @@ export class SessionHeaderIndex {
       // M1 r2：降级标记只从条目事实派生（条目重判即恢复，不粘性）。
       degraded: {
         unsupportedCodec: [...this.entries.values()].some((entry) => entry.reason?.startsWith('unsupported') === true || entry.reason?.includes('scan unsupported') === true),
+      },
+      grant: {
+        pending: this.pendingGrants.size,
+        eligible: [...this.grantState.values()].filter((state) => state.eligible).length,
       },
     }
   }

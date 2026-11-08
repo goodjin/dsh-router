@@ -68,6 +68,64 @@ export { Config } from './host/root-config.ts'
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router'
 
+/** 事件订阅面（窄接口：只要求 on）。 */
+export interface EventBinder {
+  on(event: string, listener: (...args: unknown[]) => unknown): unknown
+}
+
+/** 索引的 live 生命周期面（SessionHeaderIndex 的这三个入口）。 */
+export interface LiveLifecycleFace {
+  onLiveSession(session: unknown): void
+  onLiveSessionEvent(session: unknown, event: unknown): void
+  onLiveSessionDisposed(session: unknown): void
+}
+
+/**
+ * live 生命周期接线（宿主契约）：
+ * - `session/created`：会话进入 live store → 权威组合投影直达判定；
+ * - `session/event`：`agent-preset/selected` 是权威提交信号；
+ * - `session/disposed`：会话离开 live store（含发布回滚）→ **撤销 live 权威
+ *   代际**，进入受控冷重判/unknown（review I6：离开 live 后不再有投影事件
+ *   维护的旧事实不得继续授权）。
+ *
+ * 三个事件共用同一生命周期 token（索引侧按实例身份判定），旧实例的
+ * disposed 不清新实例。
+ */
+export function bindSessionLifecycle(ctx: EventBinder, index: LiveLifecycleFace): void {
+  ctx.on('session/created', ((session: unknown) => { index.onLiveSession(session) }) as (...args: unknown[]) => unknown)
+  ctx.on('session/event', ((session: unknown, event: unknown) => { index.onLiveSessionEvent(session, event) }) as (...args: unknown[]) => unknown)
+  ctx.on('session/disposed', ((session: unknown) => { index.onLiveSessionDisposed(session) }) as (...args: unknown[]) => unknown)
+}
+
+/** 身份卡投递面（桥的幂等投递）。 */
+export interface IdentityCardDeliverer {
+  /** 投递（失败向上抛）。 */
+  (sessionId: string): Promise<void>
+}
+
+/**
+ * 身份卡投递包装（review I2）：
+ * - `strict`：**失败向上抛**——收编面据此判定"投递真的成功了吗"，只有真成功
+ *   才记账（否则失败被吞掉后收编器会把候选记成已投递，永久不再补发）。
+ * - `lenient`：失败只告警——保留给"创建成功后补发"这类不该被投递失败打断
+ *   主流程的路径。
+ */
+export function makeIdentityCardDeliverer(
+  deliver: (sessionId: string) => Promise<void>,
+  log: { warn(message: string): void },
+): { strict: IdentityCardDeliverer; lenient: IdentityCardDeliverer } {
+  return {
+    strict: async (sessionId: string) => { await deliver(sessionId) },
+    lenient: async (sessionId: string) => {
+      try {
+        await deliver(sessionId)
+      } catch (error) {
+        log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    },
+  }
+}
+
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
  *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets']
@@ -392,12 +450,10 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       return sessionHeaderIndex.dispose()
     }
   }, 'dsh-router: 会话头候选索引（收编判定源）')
-  ctx.on('session/created', ((session: unknown) => {
-    sessionHeaderIndex.onLiveSession(session)
-  }) as unknown as (...args: unknown[]) => unknown)
-  ctx.on('session/event', ((session: unknown, event: unknown) => {
-    sessionHeaderIndex.onLiveSessionEvent(session, event)
-  }) as unknown as (...args: unknown[]) => unknown)
+  // live 生命周期接线（session/created / session/event / session/disposed）：
+  // 会话离开 live store 时撤销 live 权威代际 → 受控冷重判/unknown
+  // （review I6）；旧实例的 disposed 不清新实例（索引侧按生命周期 token 判定）。
+  bindSessionLifecycle(ctx as unknown as EventBinder, sessionHeaderIndex)
 
   const hosts: RouterCoreHosts = {
     sessionController: ctx.sessionController,
@@ -502,17 +558,20 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
 
   /**
    * Router 身份卡投递（v1.3 A2 规格 §2.2）：两个入口共用——①我们创建的 Router
-   * 会话（POST /router/sessions 成功后）②picker 自建、被去重收编为正主的 Router
-   * 会话（GET /router/state 去重扫描后）。桥内按已发标记幂等，requestId=
-   * identity-<sessionId> 宿主侧再去重；失败只告警不挡主流程（下次 state 再试）。
+   * 会话（POST /router/sessions 成功后）②picker 自建、被收编的 Router 会话
+   * （GET /router/state 收编扫描后）。桥内按已发标记幂等，requestId=
+   * identity-<sessionId> 宿主侧再去重。
+   *
+   * 两条路径的失败语义不同（review I2）：创建路径失败只告警（不打断主流程）；
+   * **收编路径失败必须向上抛**——只有真成功才记账，否则失败被吞掉后收编器会
+   * 把候选记成"已投递"，永久不再补发。
    */
-  const deliverRouterCard = async (sessionId: string): Promise<void> => {
-    try {
-      await bridge.deliverRouterIdentityCard(sessionId)
-    } catch (error) {
-      log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`)
-    }
-  }
+  const identityCardDeliverer = makeIdentityCardDeliverer(
+    (sessionId: string) => bridge.deliverRouterIdentityCard(sessionId),
+    { warn: (message: string) => log.warn(message) },
+  )
+  const deliverRouterCard = identityCardDeliverer.lenient
+  const deliverRouterCardStrict = identityCardDeliverer.strict
 
   // 动态预设引擎：类型/默认值变更 → unregister+register 增量同步；每次注册的
   // 注销器自接线 ctx.effect（r4 条件①）；Router 动态注册失败回退静态定义。
@@ -872,17 +931,16 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       getState: async (workspaceId) => {
         // v1.4：Router 会话不再去重——每次新建独立。这里只做收编扫描：把
         // picker 自建的 Router 预设会话登记进 routerSessions 并幂等补发身份卡。
-        // 判定源是受限索引（增量候选 + 定点核验），稳态轮询零副作用。
+        // 判定源是受限索引（资格授予 + 定点核验），稳态轮询零副作用。
         try {
           await scanAndAdoptRouterSessions({
-            get workspaces() {
-              return (ctx.workspaceRegistry.list() ?? []) as unknown as { id: string; sessionIds?: readonly string[] }[]
-            },
+            // 判定 + 成员定位 + 资格授予都走索引面：收编侧不再遍历宿主全部
+            // 工作区/会话（稳态零成员枚举，review I7）。
             index: sessionHeaderIndex,
             known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
             register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router') },
-            deliver: async (sessionId) => { await deliverRouterCard(sessionId) },
-            changedCandidates: () => sessionHeaderIndex.changedRouterCandidates(),
+            // 收编面的投递**传播失败**：只有真成功才记账（review I2）。
+            deliver: async (sessionId) => { await deliverRouterCardStrict(sessionId) },
             logger: { warn: (message: string) => log.warn(message) },
           }, config.routerPreset, adoptionCache)
         } catch (error) {

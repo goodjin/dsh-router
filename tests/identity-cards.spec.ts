@@ -18,6 +18,7 @@ import { SessionBridge, type SessionBridgeDeps, type SessionBridgeHost } from '.
 import { TaskLedger, type LedgerFile, type LedgerPersistence } from '../src/host/ledger/store.ts'
 import { TaskDocStore } from '../src/host/docs/task-docs.ts'
 import { guardCoreWith } from './helpers/guard-core.ts'
+import { createFakeIndex } from './helpers/adoption-index.ts'
 
 /* ────────────────────────── 纯函数 ────────────────────────── */
 
@@ -296,21 +297,26 @@ describe('dispatchTask 投递内容（v1.3 规格 §2.3/§2.4）', () => {
 
 /* ────────────────────────── 收编扫描（v1.4：不去重，独立多 Router） ────────────────────────── */
 
-/** 索引替身：判定面 + 定点核验全 ok（收编语义见 router-adoption-index.spec）。 */
+/**
+ * 索引替身：判定面 + 定点核验全 ok（收编语义见 router-adoption-index.spec）。
+ * 收编面现在只认「资格授予」——替身把给定 id 都当作已授予的 router 候选。
+ */
 function adoptionIndex(verdicts: Record<string, 'router' | 'nonrouter'>) {
-  return {
-    verdictOf: (id: string) => (verdicts[id] === undefined ? { status: 'pending' as const } : { status: 'classified' as const, verdict: verdicts[id] }),
-    verifyDiskFacts: async (ids: readonly string[]) => new Map(ids.map((id) => [id, { ok: verdicts[id] === 'router' }])),
-  } as never
+  const ids = Object.keys(verdicts)
+  return createFakeIndex({
+    verdicts,
+    members: Object.fromEntries(ids.map((id) => [id, 'ws-1'])),
+    grants: ids,
+  })
 }
 
 describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡，不归档不跳转）', () => {
   it('Router 预设会话：未登记先 register 再 deliver；已登记只 deliver', async () => {
     const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
+    const fake = adoptionIndex({ 'picker-1': 'router', 'picker-2': 'router' })
     await scanAndAdoptRouterSessions({
-      workspaces: [{ id: 'ws-1', sessionIds: ['picker-1', 'picker-2'] }],
-      index: adoptionIndex({ 'picker-1': 'router', 'picker-2': 'router' }),
+      index: fake.index,
       known: (id) => id === 'picker-2',
       register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
       deliver: async (id) => { calls.push(`deliver:${id}`) },
@@ -321,9 +327,9 @@ describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡�
   it('非 Router 预设会话：跳过（不登记不投递）', async () => {
     const { scanAndAdoptRouterSessions } = await import('../src/host/bridge/router-adoption.ts')
     const calls: string[] = []
+    const fake = adoptionIndex({ 'worker-1': 'nonrouter' })
     await scanAndAdoptRouterSessions({
-      workspaces: [{ id: 'ws-1', sessionIds: ['worker-1'] }],
-      index: adoptionIndex({ 'worker-1': 'nonrouter' }),
+      index: fake.index,
       known: () => false,
       register: async (id, ws) => { calls.push(`register:${id}:${ws}`) },
       deliver: async (id) => { calls.push(`deliver:${id}`) },
@@ -336,9 +342,9 @@ describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡�
     const calls: string[] = []
     const warns: string[] = []
     let badFailing = true
+    const fake = adoptionIndex({ 'bad-1': 'router', 'good-1': 'router' })
     const deps = {
-      workspaces: [{ id: 'ws-1', sessionIds: ['bad-1', 'good-1'] }],
-      index: adoptionIndex({ 'bad-1': 'router', 'good-1': 'router' }),
+      index: fake.index,
       known: () => false,
       register: async (id: string, ws: string) => {
         if (id === 'bad-1' && badFailing) throw new Error('boom')
@@ -348,13 +354,13 @@ describe('scanAndAdoptRouterSessions：扫描收编（登记 + 补发身份卡�
       logger: { warn: (m: string) => { warns.push(m) } },
     }
     const cache = createRouterAdoptionCache()
-    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache)
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { baseBackoffMs: 0, maxBackoffMs: 0 })
     expect(calls).toEqual(['register:good-1:ws-1', 'deliver:good-1'])
     expect(warns.some((m) => m.includes('bad-1'))).toBe(true)
 
-    // 下一轮：失败候选重试成功，收编补齐。
+    // 下一轮：失败候选退避后重试成功，收编补齐（不退避就还在冷却里）。
     badFailing = false
-    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache)
+    await scanAndAdoptRouterSessions(deps, 'dsh-router', cache, { baseBackoffMs: 0, maxBackoffMs: 0 })
     expect(calls).toEqual(['register:good-1:ws-1', 'deliver:good-1', 'register:bad-1:ws-1', 'deliver:bad-1'])
   })
 })

@@ -1994,13 +1994,15 @@ var UiStateStore = class {
 //#region src/host/bridge/router-adoption.ts
 /** 默认每轮预算：够慢，不够快。 */
 const DEFAULT_BUDGET_PER_ROUND = 10;
-/** 默认单候选连续失败上限：到顶出队，等索引重新发放。 */
-const DEFAULT_RETRY_LIMIT = 5;
+/** 默认退避基数：一次失败后等这么久再试。 */
+const DEFAULT_BASE_BACKOFF_MS = 2e3;
+/** 默认退避上限：指数退避封顶（不热循环，也不无限拉长）。 */
+const DEFAULT_MAX_BACKOFF_MS = 6e4;
 /** 造一份空的护栏状态。 */
 function createRouterAdoptionCache() {
 	return {
 		delivered: /* @__PURE__ */ new Set(),
-		retry: /* @__PURE__ */ new Map(),
+		deferred: /* @__PURE__ */ new Map(),
 		pending: void 0,
 		counters: {
 			rounds: 0,
@@ -2015,11 +2017,20 @@ function createRouterAdoptionCache() {
 }
 /** 收编诊断快照（entry 的 getHealth 用）。 */
 function routerAdoptionDiagnostics(cache) {
+	const reasons = {};
+	let nextRetryAt;
+	for (const record of cache.deferred.values()) {
+		reasons[record.reason] = (reasons[record.reason] ?? 0) + 1;
+		if (nextRetryAt === void 0 || record.nextAttemptAt < nextRetryAt) nextRetryAt = record.nextAttemptAt;
+	}
 	return {
 		rounds: cache.counters.rounds,
 		registered: cache.counters.registered,
 		delivered: cache.counters.delivered,
-		retryQueue: cache.retry.size,
+		retryQueue: cache.deferred.size,
+		deferred: cache.deferred.size,
+		...nextRetryAt === void 0 ? {} : { nextRetryAt },
+		deferredReasons: reasons,
 		verifyRejected: cache.counters.verifyRejected,
 		staleSkipped: cache.counters.staleSkipped,
 		retriesDropped: cache.counters.retriesDropped,
@@ -2032,18 +2043,14 @@ function isRouterNow(index, sessionId) {
 	const lookup = index.verdictOf(sessionId);
 	return lookup.status === "classified" && lookup.verdict === "router";
 }
-/** 会话当前仍在任一工作区成员里（异步间隙的定点成员复核）。 */
-function isMemberNow(workspaces, sessionId) {
-	return workspaces.some((workspace) => (workspace.sessionIds ?? []).includes(sessionId));
-}
 /**
 * 扫描所有工作区的会话：只消费已验证索引中当前为 router 的候选；逐个定点
 * 核验当前磁盘事实，未登记先登记，再幂等补发身份卡。unknown/damaged/large/old
 * 会话只跳过自身，单个核验或副作用失败不拖垮同工作区邻居。
 * @param deps - 宿主面与索引的包装。
 * @param routerPresetId - Router 预设的 id（只用于诊断/日志口径；判定在索引内）。
-* @param cache - 跨轮幂等标记与单飞状态（缺省现造一份，只活这一轮）。
-* @param options - 每轮预算与重试上限。
+* @param cache - 跨轮幂等标记、延期队列与单飞状态（缺省现造一份，只活这一轮）。
+* @param options - 每轮预算与退避参数。
 */
 async function scanAndAdoptRouterSessions(deps, routerPresetId, cache = createRouterAdoptionCache(), options = {}) {
 	if (cache.pending !== void 0) {
@@ -2060,83 +2067,168 @@ async function scanAndAdoptRouterSessions(deps, routerPresetId, cache = createRo
 }
 /** 一轮实际扫描。 */
 async function adoptPass(deps, cache, options) {
-	const budget = options.budgetPerRound ?? DEFAULT_BUDGET_PER_ROUND;
-	const retryLimit = options.retryLimitPerCandidate ?? DEFAULT_RETRY_LIMIT;
+	const budget = Math.max(0, options.budgetPerRound ?? DEFAULT_BUDGET_PER_ROUND);
+	const baseBackoff = Math.max(0, options.baseBackoffMs ?? DEFAULT_BASE_BACKOFF_MS);
+	const maxBackoff = Math.max(baseBackoff, options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS);
+	const now = (options.now ?? Date.now)();
 	cache.counters.rounds += 1;
-	const membership = /* @__PURE__ */ new Map();
-	for (const workspace of deps.workspaces) for (const sessionId of workspace.sessionIds ?? []) if (!membership.has(sessionId)) membership.set(sessionId, workspace.id);
+	const dueDeferred = [];
+	for (const [sessionId, record] of [...cache.deferred]) {
+		if (!isRouterNow(deps.index, sessionId)) {
+			cache.deferred.delete(sessionId);
+			continue;
+		}
+		const generation = deps.index.routerGrantGeneration(sessionId);
+		if (generation === void 0) {
+			cache.deferred.delete(sessionId);
+			continue;
+		}
+		if (generation !== record.generation) {
+			cache.deferred.delete(sessionId);
+			continue;
+		}
+		if (record.nextAttemptAt <= now) dueDeferred.push({
+			sessionId,
+			generation
+		});
+	}
+	const skip = new Set(cache.deferred.keys());
+	const grants = budget > 0 ? deps.index.pendingRouterGrants(budget, skip) : [];
 	const candidates = [];
-	const seen = /* @__PURE__ */ new Set();
-	for (const sessionId of cache.retry.keys()) {
-		if (seen.has(sessionId)) continue;
-		if (!isRouterNow(deps.index, sessionId) || !membership.has(sessionId)) {
-			cache.retry.delete(sessionId);
-			continue;
+	let deferredIndex = 0;
+	let grantIndex = 0;
+	while (candidates.length < budget && (deferredIndex < dueDeferred.length || grantIndex < grants.length)) {
+		if (deferredIndex < dueDeferred.length) {
+			candidates.push(dueDeferred[deferredIndex]);
+			deferredIndex += 1;
 		}
-		seen.add(sessionId);
-		candidates.push(sessionId);
-	}
-	const delta = deps.changedCandidates?.();
-	if (delta !== void 0) for (const sessionId of delta) {
-		if (seen.has(sessionId) || !membership.has(sessionId)) continue;
-		if (!isRouterNow(deps.index, sessionId)) continue;
-		seen.add(sessionId);
-		candidates.push(sessionId);
-	}
-	else for (const sessionId of membership.keys()) {
-		if (seen.has(sessionId) || cache.delivered.has(sessionId)) continue;
-		if (!isRouterNow(deps.index, sessionId)) continue;
-		seen.add(sessionId);
-		candidates.push(sessionId);
-	}
-	const batch = candidates.slice(0, Math.max(budget, 0));
-	for (const sessionId of candidates.slice(batch.length)) if (!cache.retry.has(sessionId)) cache.retry.set(sessionId, { failures: 0 });
-	const requeue = (sessionId) => {
-		const failures = (cache.retry.get(sessionId)?.failures ?? 0) + 1;
-		if (failures >= retryLimit) {
-			cache.retry.delete(sessionId);
-			cache.counters.retriesDropped += 1;
-		} else cache.retry.set(sessionId, { failures });
-	};
-	for (const sessionId of batch) {
-		const workspaceId = membership.get(sessionId);
-		if (workspaceId === void 0) {
-			cache.retry.delete(sessionId);
-			continue;
-		}
-		try {
-			const fact = (await deps.index.verifyDiskFacts([sessionId])).get(sessionId);
-			if (fact === void 0 || !fact.ok) {
-				cache.counters.verifyRejected += 1;
-				requeue(sessionId);
-				continue;
-			}
-			if (!isRouterNow(deps.index, sessionId) || !isMemberNow(deps.workspaces, sessionId)) {
-				cache.counters.staleSkipped += 1;
-				cache.retry.delete(sessionId);
-				continue;
-			}
-			if (!deps.known(sessionId)) {
-				await deps.register(sessionId, workspaceId);
-				cache.counters.registered += 1;
-			}
-			if (!isRouterNow(deps.index, sessionId) || !isMemberNow(deps.workspaces, sessionId)) {
-				cache.counters.staleSkipped += 1;
-				cache.retry.delete(sessionId);
-				continue;
-			}
-			if (!cache.delivered.has(sessionId)) {
-				await deps.deliver(sessionId);
-				cache.delivered.add(sessionId);
-				cache.counters.delivered += 1;
-			}
-			cache.retry.delete(sessionId);
-		} catch (error) {
-			cache.counters.errors += 1;
-			deps.logger?.warn(`Router 会话收编失败（${sessionId}，下轮重试）: ${error instanceof Error ? error.message : String(error)}`);
-			requeue(sessionId);
+		if (candidates.length < budget && grantIndex < grants.length) {
+			candidates.push(grants[grantIndex]);
+			grantIndex += 1;
 		}
 	}
+	for (const candidate of candidates) await adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff);
+}
+/** 处理一个候选：定点核验 → 登记 → 复核 → 投递 → 记账。 */
+async function adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBackoff) {
+	const sessionId = candidate.sessionId;
+	try {
+		if (!isRouterNow(deps.index, sessionId)) {
+			cache.deferred.delete(sessionId);
+			return;
+		}
+		let location = deps.index.locateMember(sessionId);
+		if (location === void 0) {
+			deps.index.refreshMembershipIfStale?.();
+			location = deps.index.locateMember(sessionId);
+			if (location === void 0) {
+				deferCandidate(deps, cache, sessionId, "not-member", now, baseBackoff, maxBackoff);
+				return;
+			}
+		}
+		if (location.archived) {
+			deferCandidate(deps, cache, sessionId, "archived", now, baseBackoff, maxBackoff);
+			return;
+		}
+		let workspaceId = location.workspaceId;
+		const fact = (await deps.index.verifyDiskFacts([sessionId])).get(sessionId);
+		if (fact === void 0 || !fact.ok) {
+			cache.counters.verifyRejected += 1;
+			deferCandidate(deps, cache, sessionId, `disk:${fact?.kind ?? "unknown"}`, now, baseBackoff, maxBackoff);
+			return;
+		}
+		if (!isRouterNow(deps.index, sessionId)) {
+			cache.counters.staleSkipped += 1;
+			cache.deferred.delete(sessionId);
+			return;
+		}
+		let authority = deps.index.verifyTargets([{
+			workspaceId,
+			sessionIds: [sessionId]
+		}]).get(sessionId);
+		if (authority === void 0 || !authority.member) {
+			deps.index.refreshMembershipIfStale?.();
+			const relocated = deps.index.locateMember(sessionId);
+			if (relocated === void 0 || relocated.archived) {
+				deferCandidate(deps, cache, sessionId, "moved", now, baseBackoff, maxBackoff);
+				return;
+			}
+			workspaceId = relocated.workspaceId;
+			authority = deps.index.verifyTargets([{
+				workspaceId,
+				sessionIds: [sessionId]
+			}]).get(sessionId);
+			if (authority === void 0 || !authority.member || authority.archived) {
+				deferCandidate(deps, cache, sessionId, "moved", now, baseBackoff, maxBackoff);
+				return;
+			}
+		}
+		if (authority.archived) {
+			deferCandidate(deps, cache, sessionId, "archived", now, baseBackoff, maxBackoff);
+			return;
+		}
+		const token = deps.index.authorityToken(sessionId);
+		if (!deps.known(sessionId)) {
+			await deps.register(sessionId, workspaceId);
+			cache.counters.registered += 1;
+		}
+		const factAfter = (await deps.index.verifyDiskFacts([sessionId])).get(sessionId);
+		if (factAfter === void 0 || !factAfter.ok) {
+			cache.counters.verifyRejected += 1;
+			deferCandidate(deps, cache, sessionId, `disk-after:${factAfter?.kind ?? "unknown"}`, now, baseBackoff, maxBackoff);
+			return;
+		}
+		if (!isRouterNow(deps.index, sessionId)) {
+			cache.counters.staleSkipped += 1;
+			cache.deferred.delete(sessionId);
+			return;
+		}
+		if (deps.index.authorityToken(sessionId) !== token) {
+			cache.counters.staleSkipped += 1;
+			deferCandidate(deps, cache, sessionId, "lifecycle-changed", now, baseBackoff, maxBackoff);
+			return;
+		}
+		const authorityAfter = deps.index.verifyTargets([{
+			workspaceId,
+			sessionIds: [sessionId]
+		}]).get(sessionId);
+		if (authorityAfter === void 0 || !authorityAfter.member || authorityAfter.archived) {
+			deferCandidate(deps, cache, sessionId, "moved", now, baseBackoff, maxBackoff);
+			return;
+		}
+		if (!cache.delivered.has(sessionId)) {
+			await deps.deliver(sessionId);
+			cache.delivered.add(sessionId);
+			cache.counters.delivered += 1;
+		}
+		deps.index.ackRouterGrant(sessionId, candidate.generation);
+		cache.deferred.delete(sessionId);
+	} catch (error) {
+		cache.counters.errors += 1;
+		deps.logger?.warn(`Router 会话收编失败（${sessionId}，退避后重试）: ${error instanceof Error ? error.message : String(error)}`);
+		deferCandidate(deps, cache, sessionId, "error", now, baseBackoff, maxBackoff);
+	}
+}
+/**
+* 延期一个候选（**不丢**）：失败按指数退避改期（封顶），下一轮到期再试。
+* 资格已不在待消费面（不再成立）时直接移出——那不是丢弃，资格重新成立时
+* 索引会发新一代授予。
+*/
+function deferCandidate(deps, cache, sessionId, reason, now, baseBackoff, maxBackoff) {
+	const generation = deps.index.routerGrantGeneration(sessionId);
+	if (generation === void 0) {
+		cache.deferred.delete(sessionId);
+		return;
+	}
+	const failures = (cache.deferred.get(sessionId)?.failures ?? 0) + 1;
+	const delay = Math.min(maxBackoff, baseBackoff * 2 ** Math.min(failures - 1, 16));
+	cache.deferred.delete(sessionId);
+	cache.deferred.set(sessionId, {
+		generation,
+		failures,
+		nextAttemptAt: now + delay,
+		reason
+	});
 }
 
 //#endregion
@@ -3615,6 +3707,14 @@ function liveHeaderOf(session) {
 		agentPreset: record["agentPreset"]
 	};
 }
+/** live Session 载荷的会话 id（头优先，载荷 id 兜底）。 */
+function liveSessionId(session) {
+	if (session === null || typeof session !== "object") return void 0;
+	const carrier = session;
+	const header = carrier.header;
+	const record = header !== null && typeof header === "object" ? header : session;
+	return typeof record["id"] === "string" && record["id"].length > 0 ? record["id"] : typeof carrier.id === "string" && carrier.id.length > 0 ? carrier.id : void 0;
+}
 /** 目录名清单 →（追踪用最高 generation，全部规范 generation 名的有序集合键）。 */
 function pickGenerationForTracking(names) {
 	const canonical = [];
@@ -3702,6 +3802,34 @@ var SessionHeaderIndex = class {
 	* 名单，分批收敛时累计成平方。
 	*/
 	membershipRevisionCounter = 1;
+	/**
+	* 成员定位表（sessionId → workspaceId）：**增量缓存**，只在成员快照刷新
+	* 时重建（低频对账 / 成员失效刷新）。收编侧据此 O(1) 定位目标工作区，
+	* 稳态轮次不再遍历宿主全部工作区/会话（review I7）。
+	*/
+	membershipIndex = /* @__PURE__ */ new Map();
+	/**
+	* router 资格授予（review I1）：`grantState` 是每个 id 的资格记录
+	* （代数 + 当前是否成立），`pendingGrants` 只装**未被消费方 ack** 的授予
+	* （插入序；稳态为空 → 每轮 O(1)）。资格"不再成立"时撤下待消费授予；
+	* "又成立"时发**新一代**授予（代数 +1）——旧基线不会把 id 永久吞掉。
+	*/
+	grantState = /* @__PURE__ */ new Map();
+	pendingGrants = /* @__PURE__ */ new Map();
+	eligibilitySeq = 0;
+	/**
+	* live 实例身份（生命周期 token）：`session/created` 认领当前实例；被替换
+	* 的旧实例进 `retiredInstances`（弱引用集）——旧实例的迟到事件与 disposed
+	* 都不再影响新实例（review I6）。事件面**不夺走**已认领的实例（宿主可能
+	* 用包装对象投递事件），只在还没有实例时认领。
+	*/
+	liveInstances = /* @__PURE__ */ new Map();
+	retiredInstances = /* @__PURE__ */ new WeakSet();
+	/**
+	* 生命周期代际（授权屏障）：判定/权威事实每变一次 +1。消费方在 await
+	* 前后比对同一代数，识别"计划已过期"的异步间隙（review I5/I6）。
+	*/
+	authorityTokens = /* @__PURE__ */ new Map();
 	dirty = false;
 	/** 判定状态版本号：任一判定/队列/失败变化时前进（dedup 稳态缓存键，I8）。 */
 	stateRevision = 1;
@@ -3725,9 +3853,6 @@ var SessionHeaderIndex = class {
 		scanCaps: 0,
 		scanUnstable: 0
 	};
-	/** 收编消费的「新增 router 判定」游标（基线快照；只随状态 revision 前进）。 */
-	lastAdoptionRevision = -1;
-	lastAdoptionBaseline = /* @__PURE__ */ new Set();
 	constructor(deps) {
 		this.ioBudget = new IoBudget(deps.ioCapacity ?? 8);
 		this.root = deps.root;
@@ -3771,8 +3896,8 @@ var SessionHeaderIndex = class {
 					for (const entry of loaded.entries) {
 						if (!isValidEntry(entry, this.routerPreset) || entry.origin !== "disk") continue;
 						if (legacyFile && !(entry.verdict === "nonrouter" && entry.isSeeded === true)) continue;
-						this.entries.set(entry.sessionId, { ...entry });
 						this.unverified.add(entry.sessionId);
+						this.putEntry(entry.sessionId, { ...entry });
 					}
 					for (const failure of loaded.failures) {
 						if (!isValidFailure(failure)) continue;
@@ -3826,8 +3951,7 @@ var SessionHeaderIndex = class {
 			for (const [id, entry] of this.entries) {
 				if (entry.origin === "live") continue;
 				if (!discovered.has(id)) {
-					this.entries.delete(id);
-					this.unverified.delete(id);
+					this.dropEntry(id);
 					this.dequeue(id);
 					this.failures.delete(id);
 					this.recomputeNextRetryAt();
@@ -3854,10 +3978,13 @@ var SessionHeaderIndex = class {
 				}
 				if (existing.fingerprint === loc.fingerprint && existing.file === loc.file && existing.projectDir === loc.projectDir) {
 					this.counters.cacheReused += 1;
-					if (this.unverified.delete(id)) this.markDirty();
+					if (this.unverified.delete(id)) {
+						this.markDirty();
+						this.syncRouterGrant(id);
+					}
 					continue;
 				}
-				this.entries.delete(id);
+				this.dropEntry(id);
 				this.enqueueForClassification(id, loc);
 				continue;
 			}
@@ -4105,8 +4232,7 @@ var SessionHeaderIndex = class {
 					continue;
 				}
 				if (fingerprint.kind === "gone") {
-					this.entries.delete(id);
-					this.unverified.delete(id);
+					this.dropEntry(id);
 					if (this.failures.delete(id)) this.recomputeNextRetryAt();
 					this.markDirty();
 					continue;
@@ -4129,7 +4255,8 @@ var SessionHeaderIndex = class {
 					this.counters.scanFinals += 1;
 					const isRouter = scan.finalPreset === this.routerPreset;
 					const reason = scan.stats.lines === 0 ? "stable-eof snapshot from creation header (header-only log; current state, rescan on change)" : isRouter ? void 0 : scan.finalPreset === null ? "stable-eof: preset-free composition" : `stable-eof: runs under ${scan.finalPreset}`;
-					this.entries.set(id, {
+					this.unverified.delete(id);
+					this.putEntry(id, {
 						sessionId: id,
 						projectDir: loc.projectDir,
 						file: loc.file,
@@ -4143,7 +4270,6 @@ var SessionHeaderIndex = class {
 						evidence: "stable-eof"
 					});
 					if (this.failures.delete(id)) this.recomputeNextRetryAt();
-					this.unverified.delete(id);
 					this.dequeue(id);
 					this.markDirty();
 					continue;
@@ -4163,7 +4289,8 @@ var SessionHeaderIndex = class {
 					this.markDirty();
 					continue;
 				}
-				this.entries.set(id, {
+				this.unverified.delete(id);
+				this.putEntry(id, {
 					sessionId: id,
 					projectDir: loc.projectDir,
 					file: loc.file,
@@ -4176,7 +4303,6 @@ var SessionHeaderIndex = class {
 					reason: `stable-eof scan ${scan.reason}: ${scan.message}`
 				});
 				if (this.failures.delete(id)) this.recomputeNextRetryAt();
-				this.unverified.delete(id);
 				this.dequeue(id);
 				this.markDirty();
 				continue;
@@ -4188,7 +4314,8 @@ var SessionHeaderIndex = class {
 					if (outcome.header.version !== MAX_KNOWN_SESSION_VERSION) finalReason = `legacy format v${outcome.header.version}: stable-EOF scan covers current v${MAX_KNOWN_SESSION_VERSION} only`;
 					else if (this.reader.scanSessionLog === void 0) finalReason = "stable-EOF scan unavailable on reader face (conservative unknown)";
 				}
-				this.entries.set(id, {
+				this.unverified.delete(id);
+				this.putEntry(id, {
 					sessionId: id,
 					projectDir: loc.projectDir,
 					file: loc.file,
@@ -4201,7 +4328,6 @@ var SessionHeaderIndex = class {
 					reason: finalReason
 				});
 				if (this.failures.delete(id)) this.recomputeNextRetryAt();
-				this.unverified.delete(id);
 				this.dequeue(id);
 				this.markDirty();
 				continue;
@@ -4220,7 +4346,8 @@ var SessionHeaderIndex = class {
 				this.markDirty();
 				continue;
 			}
-			this.entries.set(id, {
+			this.unverified.delete(id);
+			this.putEntry(id, {
 				sessionId: id,
 				projectDir: loc.projectDir,
 				file: loc.file,
@@ -4233,7 +4360,6 @@ var SessionHeaderIndex = class {
 				reason: `${outcome.reason}: ${outcome.message}`
 			});
 			if (this.failures.delete(id)) this.recomputeNextRetryAt();
-			this.unverified.delete(id);
 			this.dequeue(id);
 			this.markDirty();
 		}
@@ -4511,6 +4637,12 @@ var SessionHeaderIndex = class {
 	/** live 会话创建/恢复（session/created 载荷）：投影权威判定（零盘读）。 */
 	onLiveSession(session) {
 		this.membershipStale = true;
+		const createdId = liveSessionId(session);
+		if (createdId !== void 0) {
+			const previous = this.liveInstances.get(createdId);
+			if (previous !== void 0 && previous !== session) this.retiredInstances.add(previous);
+			this.liveInstances.set(createdId, session);
+		}
 		this.dispatchLive(() => {
 			const facts = liveHeaderOf(session);
 			if (facts === void 0) return;
@@ -4525,19 +4657,63 @@ var SessionHeaderIndex = class {
 		});
 	}
 	/**
+	* live 会话离开 live store（`session/disposed`；官方契约：会话离开 store
+	* 时发出一次，含发布回滚）。
+	*
+	* 处置（review I6）：撤销该 id 的 **live 权威代际** → 进入**受控冷重判**
+	* （交回盘面重扫）或显式 unknown；离开 live 后不再有投影事件维护的旧事实
+	* 不能继续授权（`verifyDiskFacts` 对 origin=live 无条件 fresh 的漏洞因此
+	* 关闭）。**旧实例的 disposed 不清新实例**：只有与当前认领实例同一对象
+	* 的 disposed 才撤销。
+	*/
+	onLiveSessionDisposed(session) {
+		const id = liveSessionId(session);
+		if (id === void 0) return;
+		if (this.liveInstances.get(id) !== session) return;
+		this.liveInstances.delete(id);
+		this.dispatchLive(() => {
+			this.revokeLiveAuthority(id);
+		});
+	}
+	/**
+	* 撤销 live 权威（id 离开 live store）：live 条目作废 → 交回受控冷重判
+	* （有位置就重新入队重扫），否则显式 unknown。资格随之失效（待消费授予
+	* 撤下；将来重新成立会发新一代）。
+	*/
+	revokeLiveAuthority(sessionId) {
+		const entry = this.entries.get(sessionId);
+		this.bumpRevision(sessionId);
+		if (entry !== void 0 && entry.origin === "live") {
+			this.dropEntry(sessionId);
+			this.dequeue(sessionId);
+			if (this.failures.delete(sessionId)) this.recomputeNextRetryAt();
+			if (entry.projectDir !== "" && entry.file !== "") this.enqueueForClassification(sessionId, {
+				projectDir: entry.projectDir,
+				file: entry.file,
+				fingerprint: entry.fingerprint
+			});
+			this.markDirty();
+		}
+		this.syncRouterGrant(sessionId);
+		this.scheduleSave();
+	}
+	/**
 	* live 会话事件（session/event 载荷）：`agent-preset/selected` 是权威提交
 	* 信号——事件值即最终组合（再选会再发事件），无需投影兜底。
 	*/
 	onLiveSessionEvent(session, event) {
 		const record = event;
 		if (record?.type !== "agent-preset/selected") return;
+		const eventId = liveSessionId(session);
+		if (eventId === void 0) return;
+		if (this.retiredInstances.has(session)) return;
+		if (!this.liveInstances.has(eventId)) this.liveInstances.set(eventId, session);
 		this.membershipStale = true;
 		this.dispatchLive(() => {
 			const data = record.data;
 			if (data === null || typeof data !== "object" || typeof data.agentPreset !== "string") return;
 			const facts = liveHeaderOf(session);
-			const id = facts?.id ?? (typeof session?.id === "string" ? session.id : void 0);
-			if (id === void 0) return;
+			const id = facts?.id ?? eventId;
 			const existing = this.entries.get(id);
 			const isSeeded = existing?.isSeeded ?? facts?.isSeeded ?? false;
 			this.applyLiveVerdict(id, {
@@ -4556,7 +4732,8 @@ var SessionHeaderIndex = class {
 	applyLiveVerdict(sessionId, facts, finalPreset) {
 		const { verdict, reason } = classifyLiveComposition(finalPreset, facts.isSeeded, this.routerPreset);
 		const existing = this.entries.get(sessionId);
-		this.entries.set(sessionId, {
+		this.unverified.delete(sessionId);
+		this.putEntry(sessionId, {
 			sessionId,
 			projectDir: existing?.projectDir ?? "",
 			file: existing?.file ?? "",
@@ -4569,29 +4746,98 @@ var SessionHeaderIndex = class {
 			reason
 		});
 		if (this.failures.delete(sessionId)) this.recomputeNextRetryAt();
-		this.unverified.delete(sessionId);
 		this.dequeue(sessionId);
 		this.bumpRevision(sessionId);
 		this.markDirty();
 		this.scheduleSave();
 	}
 	/**
-	* 收编消费的新增 router 候选（v1.4：稳定轮询不逐轮全库重核）。
+	* 待消费的 router 资格授予（review I1：可靠记账，不是"看一眼就吞"）。
 	*
-	* 基线 = 上次消费时的全部 router 快照：状态 revision 未前进 → 返回空（稳态
-	* 轮询零工作）；前进后返回相对基线新出现的 router 项。判定翻转为 nonrouter
-	* 不发放；翻回 router 会重新发放——那是一条新的 router 事实，收编侧幂等
-	* （known/delivered 标记）会把它变成零副作用确认。纯内存 O(entries)，
-	* 不做任何盘 IO，也不改变 verdictOf/revision 语义。
+	* - 只有**当前确实成立**的资格才在待消费面：载入缓存未核指纹
+	*   （unverified → verdictOf=pending）、判定为 unknown/nonrouter 的会话
+	*   **不在**待消费面——不会因为"曾经是 router"就被提前消费掉、丢掉未来
+	*   资格。
+	* - 授予**不被读取即消费**：只有消费方 ack（`ackRouterGrant`）才移除。
+	*   消费方因此可以安全地"没处理完就跳过"（延期/退避），候选不会永久漏。
+	* - 资格"不再成立 → 又成立"发**新一代**授予（代数 +1）：两个轮询之间
+	*   router→other→router 的翻面不会被旧基线吞掉。
+	* - 稳态：待消费面为空 → 本方法 O(1)，不做全库重建。
+	*
+	* @param limit - 本次最多取几条（消费方的单轮预算）。
+	* @param skip - 消费方正在**自行排期重试**的 id（跳过它们，避免同一候选
+	*   反复占用预算；它们仍在待消费面，恢复后仍会被取到）。
 	*/
-	changedRouterCandidates() {
-		const currentRevision = this.stateRevision;
-		if (currentRevision === this.lastAdoptionRevision) return [];
-		const currentRouterIds = [...this.entries.entries()].filter(([, entry]) => entry.verdict === "router").map(([sessionId]) => sessionId);
-		const fresh = currentRouterIds.filter((sessionId) => !this.lastAdoptionBaseline.has(sessionId));
-		this.lastAdoptionRevision = currentRevision;
-		this.lastAdoptionBaseline = new Set(currentRouterIds);
-		return fresh;
+	pendingRouterGrants(limit, skip) {
+		const out = [];
+		if (limit <= 0) return out;
+		for (const [sessionId, generation] of this.pendingGrants) {
+			if (out.length >= limit) break;
+			if (skip?.has(sessionId)) continue;
+			out.push({
+				sessionId,
+				generation
+			});
+		}
+		return out;
+	}
+	/** 待消费面上某 id 当前的资格代数（没有待消费授予则 undefined）。 */
+	routerGrantGeneration(sessionId) {
+		return this.pendingGrants.get(sessionId);
+	}
+	/**
+	* 消费方 ack（记账点）：代数不符即忽略——新一代资格未被消费，旧的一代
+	* 不能把新一代标记成已消费。
+	*/
+	ackRouterGrant(sessionId, generation) {
+		if (this.pendingGrants.get(sessionId) === generation) this.pendingGrants.delete(sessionId);
+	}
+	/**
+	* 资格同步（唯一入口）：某 id 的资格当前是否成立 = 条目判定为 router
+	* **且**已核验（不在 unverified 集里——载入缓存未核指纹前不授权）。
+	* 成立且此前不成立 → 发新一代授予；此前成立现在不成立 → 撤下待消费授予。
+	*/
+	syncRouterGrant(sessionId) {
+		const entry = this.entries.get(sessionId);
+		const eligible = entry !== void 0 && entry.verdict === "router" && !this.unverified.has(sessionId);
+		const state = this.grantState.get(sessionId);
+		if (eligible) {
+			if (state === void 0 || !state.eligible) {
+				const generation = ++this.eligibilitySeq;
+				this.grantState.set(sessionId, {
+					generation,
+					eligible: true
+				});
+				this.pendingGrants.set(sessionId, generation);
+			}
+			return;
+		}
+		if (state !== void 0 && state.eligible) {
+			state.eligible = false;
+			this.pendingGrants.delete(sessionId);
+		}
+	}
+	/**
+	* 落一条判定（唯一写入口）：判定/来源变化时推进生命周期代际（授权屏障），
+	* 并同步 router 资格。
+	*/
+	putEntry(sessionId, entry) {
+		const previous = this.entries.get(sessionId);
+		this.entries.set(sessionId, entry);
+		if (previous === void 0 || previous.verdict !== entry.verdict || previous.origin !== entry.origin) this.bumpAuthority(sessionId);
+		this.syncRouterGrant(sessionId);
+	}
+	/** 移除一条判定（同步资格：资格不再成立 → 撤下待消费授予）。 */
+	dropEntry(sessionId) {
+		const previous = this.entries.get(sessionId);
+		this.entries.delete(sessionId);
+		this.unverified.delete(sessionId);
+		if (previous !== void 0) this.bumpAuthority(sessionId);
+		this.syncRouterGrant(sessionId);
+	}
+	/** 生命周期代际 +1（任何影响授权的事实变化）。 */
+	bumpAuthority(sessionId) {
+		this.authorityTokens.set(sessionId, (this.authorityTokens.get(sessionId) ?? 0) + 1);
 	}
 	/** 判定状态版本号（稳态缓存键；每次判定/队列/失败变化 +1）。 */
 	revision() {
@@ -4631,6 +4877,23 @@ var SessionHeaderIndex = class {
 	/** 宿主成员快照（轮询只读快照，不打宿主面；I8 r2）。 */
 	workspaces() {
 		return this.membershipSnapshot;
+	}
+	/**
+	* 成员定位（增量缓存）：某会话当前在哪个工作区、是否已被宿主归档。
+	* O(1)——收编侧据此定位目标工作区，不必每轮遍历宿主全部工作区/会话
+	* （review I7）。缓存随成员快照刷新（低频对账 / 事件失效）。
+	*/
+	locateMember(sessionId) {
+		const workspaceId = this.membershipIndex.get(sessionId);
+		if (workspaceId === void 0) return void 0;
+		return {
+			workspaceId,
+			archived: this.archivedSnapshot.has(sessionId)
+		};
+	}
+	/** 生命周期代际（授权屏障）：await 前后比对同一代数识别过期计划。 */
+	authorityToken(sessionId) {
+		return this.authorityTokens.get(sessionId) ?? 0;
 	}
 	/** 宿主归档集快照（同上）。 */
 	archivedSnapshotIds() {
@@ -4699,6 +4962,9 @@ var SessionHeaderIndex = class {
 		const archivedChanged = this.archivedSnapshot.size !== archived.length || archived.some((id) => !this.archivedSnapshot.has(id));
 		this.membershipSnapshot = listed;
 		this.archivedSnapshot = new Set(archived);
+		const locations = /* @__PURE__ */ new Map();
+		for (const workspace of listed) for (const sessionId of workspace.sessionIds ?? []) if (!locations.has(sessionId)) locations.set(sessionId, workspace.id);
+		this.membershipIndex = locations;
 		this.membershipStale = false;
 		if (membershipChanged || archivedChanged) {
 			this.membershipRevisionCounter += 1;
@@ -4780,8 +5046,7 @@ var SessionHeaderIndex = class {
 				}
 				if ("error" in statRun) {
 					if (isENOENT(statRun.error)) {
-						this.entries.delete(id);
-						this.unverified.delete(id);
+						this.dropEntry(id);
 						this.dequeue(id);
 						if (this.failures.delete(id)) this.recomputeNextRetryAt();
 						this.markDirty();
@@ -4815,8 +5080,7 @@ var SessionHeaderIndex = class {
 				const chosen = pickGenerationForTracking(namesRun.value.map((listed) => listed.name));
 				const currentFingerprint = chosen === void 0 ? void 0 : chosen.name === entry.file ? fingerprintOf(statRun.value, chosen.namesKey) : void 0;
 				if (currentFingerprint === void 0 || currentFingerprint !== entry.fingerprint) {
-					this.entries.delete(id);
-					this.unverified.delete(id);
+					this.dropEntry(id);
 					if (chosen !== void 0) this.enqueueForClassification(id, {
 						projectDir: entry.projectDir,
 						file: chosen.name,
@@ -4928,7 +5192,11 @@ var SessionHeaderIndex = class {
 				reconcileRuns: this.counters.reconcileRuns,
 				advanceRuns: this.counters.advanceRuns
 			},
-			degraded: { unsupportedCodec: [...this.entries.values()].some((entry) => entry.reason?.startsWith("unsupported") === true || entry.reason?.includes("scan unsupported") === true) }
+			degraded: { unsupportedCodec: [...this.entries.values()].some((entry) => entry.reason?.startsWith("unsupported") === true || entry.reason?.includes("scan unsupported") === true) },
+			grant: {
+				pending: this.pendingGrants.size,
+				eligible: [...this.grantState.values()].filter((state) => state.eligible).length
+			}
 		};
 	}
 	/** 安全处置：停定时、中断在途读取、等在途工作（含独立 hydrate）落定、冲刷保存。 */
@@ -8597,6 +8865,49 @@ const Config = Schema.object({
 //#region src/entry.ts
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 const name = "@goodjin2/dsh-router";
+/**
+* live 生命周期接线（宿主契约）：
+* - `session/created`：会话进入 live store → 权威组合投影直达判定；
+* - `session/event`：`agent-preset/selected` 是权威提交信号；
+* - `session/disposed`：会话离开 live store（含发布回滚）→ **撤销 live 权威
+*   代际**，进入受控冷重判/unknown（review I6：离开 live 后不再有投影事件
+*   维护的旧事实不得继续授权）。
+*
+* 三个事件共用同一生命周期 token（索引侧按实例身份判定），旧实例的
+* disposed 不清新实例。
+*/
+function bindSessionLifecycle(ctx, index) {
+	ctx.on("session/created", ((session) => {
+		index.onLiveSession(session);
+	}));
+	ctx.on("session/event", ((session, event) => {
+		index.onLiveSessionEvent(session, event);
+	}));
+	ctx.on("session/disposed", ((session) => {
+		index.onLiveSessionDisposed(session);
+	}));
+}
+/**
+* 身份卡投递包装（review I2）：
+* - `strict`：**失败向上抛**——收编面据此判定"投递真的成功了吗"，只有真成功
+*   才记账（否则失败被吞掉后收编器会把候选记成已投递，永久不再补发）。
+* - `lenient`：失败只告警——保留给"创建成功后补发"这类不该被投递失败打断
+*   主流程的路径。
+*/
+function makeIdentityCardDeliverer(deliver, log) {
+	return {
+		strict: async (sessionId) => {
+			await deliver(sessionId);
+		},
+		lenient: async (sessionId) => {
+			try {
+				await deliver(sessionId);
+			} catch (error) {
+				log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	};
+}
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
 *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 const inject = [
@@ -8793,12 +9104,7 @@ function apply(ctx, rawConfig) {
 			return sessionHeaderIndex.dispose();
 		};
 	}, "dsh-router: 会话头候选索引（收编判定源）");
-	ctx.on("session/created", ((session) => {
-		sessionHeaderIndex.onLiveSession(session);
-	}));
-	ctx.on("session/event", ((session, event) => {
-		sessionHeaderIndex.onLiveSessionEvent(session, event);
-	}));
+	bindSessionLifecycle(ctx, sessionHeaderIndex);
 	const hosts = {
 		sessionController: ctx.sessionController,
 		agents: ctx.agents,
@@ -8879,17 +9185,17 @@ function apply(ctx, rawConfig) {
 	});
 	/**
 	* Router 身份卡投递（v1.3 A2 规格 §2.2）：两个入口共用——①我们创建的 Router
-	* 会话（POST /router/sessions 成功后）②picker 自建、被去重收编为正主的 Router
-	* 会话（GET /router/state 去重扫描后）。桥内按已发标记幂等，requestId=
-	* identity-<sessionId> 宿主侧再去重；失败只告警不挡主流程（下次 state 再试）。
+	* 会话（POST /router/sessions 成功后）②picker 自建、被收编的 Router 会话
+	* （GET /router/state 收编扫描后）。桥内按已发标记幂等，requestId=
+	* identity-<sessionId> 宿主侧再去重。
+	*
+	* 两条路径的失败语义不同（review I2）：创建路径失败只告警（不打断主流程）；
+	* **收编路径失败必须向上抛**——只有真成功才记账，否则失败被吞掉后收编器会
+	* 把候选记成"已投递"，永久不再补发。
 	*/
-	const deliverRouterCard = async (sessionId) => {
-		try {
-			await bridge.deliverRouterIdentityCard(sessionId);
-		} catch (error) {
-			log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	};
+	const identityCardDeliverer = makeIdentityCardDeliverer((sessionId) => bridge.deliverRouterIdentityCard(sessionId), { warn: (message) => log.warn(message) });
+	const deliverRouterCard = identityCardDeliverer.lenient;
+	const deliverRouterCardStrict = identityCardDeliverer.strict;
 	const engine = new DynamicPresetEngine({
 		presets: ctx.agentPresets,
 		effect: (factory, label) => ctx.effect(factory, label),
@@ -9182,18 +9488,14 @@ function apply(ctx, rawConfig) {
 			getState: async (workspaceId) => {
 				try {
 					await scanAndAdoptRouterSessions({
-						get workspaces() {
-							return ctx.workspaceRegistry.list() ?? [];
-						},
 						index: sessionHeaderIndex,
 						known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
 						register: async (sessionId, wsId) => {
 							await ui.addRouterSession(sessionId, wsId, "Router");
 						},
 						deliver: async (sessionId) => {
-							await deliverRouterCard(sessionId);
+							await deliverRouterCardStrict(sessionId);
 						},
-						changedCandidates: () => sessionHeaderIndex.changedRouterCandidates(),
 						logger: { warn: (message) => log.warn(message) }
 					}, config.routerPreset, adoptionCache);
 				} catch (error) {
@@ -9315,5 +9617,5 @@ function apply(ctx, rawConfig) {
 }
 
 //#endregion
-export { Config, apply, inject, name, resolveRootConfig, spawnModeOr };
+export { Config, apply, bindSessionLifecycle, inject, makeIdentityCardDeliverer, name, resolveRootConfig, spawnModeOr };
 //# sourceMappingURL=entry.js.map

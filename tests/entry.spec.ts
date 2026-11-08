@@ -13,7 +13,8 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
-import { Config as rootConfig, inject, name, resolveRootConfig } from '../src/entry.ts'
+import { Config as rootConfig, bindSessionLifecycle, inject, makeIdentityCardDeliverer, name, resolveRootConfig } from '../src/entry.ts'
+import { SessionHeaderIndex } from '../src/host/session/session-index.ts'
 import {
   hoverDarkenStyle,
   LightTooltip,
@@ -57,17 +58,66 @@ describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修�
     expect(source).toMatch(/new SessionHeaderIndex\(\{/)
     expect(source).toMatch(/routerPreset: config\.routerPreset/)
     expect(source).toMatch(/sessionHeaderIndex\.dispose\(\)/)
-    expect(source).toMatch(/ctx\.on\('session\/created'/)
-    expect(source).toMatch(/ctx\.on\('session\/event'/)
+    expect(source).toMatch(/bindSessionLifecycle\(/)
   })
 
-  it('收编扫描只接索引面：增量候选 + 定点核验，不再接整日志 readSession', () => {
+  it('收编扫描只接索引面：资格授予 + 定点核验，不再接整日志 readSession', () => {
     const at = source.indexOf('scanAndAdoptRouterSessions(')
     expect(at).toBeGreaterThan(0)
     const block = source.slice(at, at + 1200)
-    expect(block).toContain('changedCandidates')
     expect(block).toContain('index:')
     expect(block, '收编不得回落到整日志读取').not.toContain('readSession')
+    expect(block, '收编不得再自己枚举宿主成员面').not.toContain('workspaceRegistry.list')
+  })
+})
+
+describe('宿主侧入口 src/entry.ts：live 生命周期接线（真实事件绑定）', () => {
+  it('session/created / session/event / session/disposed 三个事件都接到索引', () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>()
+    const ctx = {
+      on: (event: string, listener: (...args: unknown[]) => unknown) => { listeners.set(event, listener) },
+    }
+    const calls: string[] = []
+    bindSessionLifecycle(ctx, {
+      onLiveSession: () => { calls.push('created') },
+      onLiveSessionEvent: () => { calls.push('event') },
+      onLiveSessionDisposed: () => { calls.push('disposed') },
+    })
+    expect([...listeners.keys()].sort()).toEqual(['session/created', 'session/disposed', 'session/event'])
+    listeners.get('session/created')?.({ id: 's1' })
+    listeners.get('session/event')?.({ id: 's1' }, { type: 'agent-preset/selected' })
+    listeners.get('session/disposed')?.({ id: 's1' })
+    expect(calls).toEqual(['created', 'event', 'disposed'])
+  })
+
+  it('disposed 事件真的撤销 live 权威（真实索引 + 真实事件通道）', async () => {
+    const listeners = new Map<string, (...args: unknown[]) => unknown>()
+    const ctx = { on: (event: string, listener: (...args: unknown[]) => unknown) => { listeners.set(event, listener) } }
+    const index = new SessionHeaderIndex({
+      root: '/nonexistent-router-entry-root',
+      routerPreset: 'dsh-router',
+      resolveLivePreset: () => 'dsh-router',
+    })
+    bindSessionLifecycle(ctx, index)
+    const session = { id: 's-live', header: { id: 's-live', version: 4, createdAt: 1, isSeeded: false } }
+    listeners.get('session/created')?.(session)
+    expect(index.verdictOf('s-live')).toMatchObject({ status: 'classified', verdict: 'router' })
+    // 会话离开 live store → live 权威撤销 → 不再授权。
+    listeners.get('session/disposed')?.(session)
+    expect(index.verdictOf('s-live').status).not.toBe('classified')
+    await index.dispose()
+  })
+})
+
+describe('宿主侧入口 src/entry.ts：身份卡投递的失败语义（review I2）', () => {
+  it('strict 包装传播失败；lenient 包装只告警', async () => {
+    const warns: string[] = []
+    const deliverer = makeIdentityCardDeliverer(async () => { throw new Error('prompt failed') }, {
+      warn: (message) => { warns.push(message) },
+    })
+    await expect(deliverer.strict('s1')).rejects.toThrow('prompt failed')
+    await expect(deliverer.lenient('s1')).resolves.toBeUndefined()
+    expect(warns.join(' ')).toContain('prompt failed')
   })
 })
 
