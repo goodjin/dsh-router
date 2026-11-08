@@ -125,7 +125,7 @@ export interface RouterAdoptionCache {
    */
   readonly deferredHeap: DeferredHeapEntry[]
   /**
-   * 来源轮转位（review I7 round 3）：0 = 下一���先试到期重试，1 = 先试新
+   * 来源轮转位（review I7 round 3）：0 = 下一次先试到期重试，1 = 先试新
    * 授予。每完成一步翻转，**跨轮保留** → 即使 budget=1 也是交替的，新授予
    * 不会被到期的失败积压长期饿死。
    */

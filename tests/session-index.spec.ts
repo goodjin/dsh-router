@@ -1098,7 +1098,11 @@ describe('SessionHeaderIndex：指纹复核在途的 live 覆盖窗口（I2 r2�
     const { index } = makeIndex(root, { fs: gatedFs as never, resolveLivePreset: () => 'dsh-router' })
     await index.reconcile()
     const advancing = index.advance()
-    await new Promise((resolve) => setTimeout(resolve, 5))
+    // 等到指纹复核的 stat **真正挂起**再断言（不用固定睡眠：机器负载下固定
+    // 5ms 可能不够，会让本用例偶发失败——测试同步问题，不涉及生产语义）。
+    for (let attempt = 0; attempt < 400 && releaseStat === undefined; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
     expect(releaseStat).toBeDefined()
     // 指纹复核 stat 挂起中：权威 selected 事件到达（router）。
     index.onLiveSessionEvent(liveSession({ id: 's-recheck' }), { type: 'agent-preset/selected', data: { agentPreset: 'dsh-router' } })
