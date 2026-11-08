@@ -15,7 +15,9 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   // draft/queued → blocked：派发失败达上限的自动封顶（v1.1 规格 §2-4）。
   draft: ['queued', 'blocked', 'cancelled'],
   queued: ['dispatched', 'blocked', 'cancelled'],
-  dispatched: ['running', 'blocked', 'failed', 'cancelled'],
+  // dispatched → paused：作用域紧急暂停（v1.4）。活着的任务是 dispatched（不是 running），
+  // 没有这条边就暂停落不下去。
+  dispatched: ['running', 'paused', 'blocked', 'failed', 'cancelled'],
   running: ['waiting-user', 'blocked', 'paused', 'review-pending', 'completed', 'failed', 'cancelled'],
   'waiting-user': ['running', 'blocked', 'failed', 'cancelled'],
   blocked: ['running', 'failed', 'cancelled'],

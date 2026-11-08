@@ -16,6 +16,7 @@ import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
   RouterState,
+  ScopedPauseReport,
   SessionPromptResponse,
   SpawnModeResponse,
   TypesCreateRequest,
@@ -55,7 +56,11 @@ export interface RouterApi {
   /** 熔断解除（v1.2 C2）。 */
   unfreezeBreaker(): Promise<{ before: { frozen: boolean }; after: { frozen: boolean } }>
   /** 紧急暂停（v1.2 C2）：冻结 + 逐会话中断 + 逐项结果。 */
-  emergencyPause(): Promise<{ frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }>
+  /**
+   * 作用域紧急暂停（v1.4）：只停该 Router 会话派出的任务 + 其下游子任务。
+   * 不碰全局熔断、不留全局标记、之后的新派发不受影响。
+   */
+  emergencyPause(routerSessionId: string): Promise<ScopedPauseReport>
   getState(workspaceId?: string): Promise<RouterState>
   /**
    * 契约体是 { workspaceId, name? }；templateId 是可选扩展键（模板偏好，
@@ -309,10 +314,14 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       return body as { before: { frozen: boolean }; after: { frozen: boolean } }
     },
 
-    async emergencyPause(): Promise<{ frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }> {
-      const body = await postJson(ROUTER_EMERGENCY_PAUSE_PATH, {})
+    /**
+     * 作用域紧急暂停（v1.4）：只停该 Router 会话派出的任务 + 其下游子任务。
+     * routerSessionId = 当前 Router 会话视图的会话 id（宿主据此圈范围）。
+     */
+    async emergencyPause(routerSessionId: string): Promise<ScopedPauseReport> {
+      const body = await postJson(ROUTER_EMERGENCY_PAUSE_PATH, { routerSessionId })
       if (body === null || typeof body !== 'object') throw new RouterApiError('router: emergency-pause response missing body')
-      return body as { frozen: boolean; interrupted: { sessionId: string; outcome: string }[]; failedCount: number }
+      return body as ScopedPauseReport
     },
   }
 }

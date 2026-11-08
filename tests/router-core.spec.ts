@@ -294,6 +294,18 @@ describe('createRouterCore：dispatchTask', () => {
     void workbench
   })
 
+  it('v1.4：派发时宿主记下派发者会话（作用域紧急暂停的归属依据）', async () => {
+    const { core, ledger } = await coreWith()
+    const result = await core.dispatchTask('router-s-1', {
+      title: '修登录',
+      goal: '登录不再 500',
+      acceptance: ['回归通过'],
+      role: 'worker',
+      templateId: 'coder',
+    })
+    expect(ledger.get(result.taskId)?.dispatchedBySessionId).toBe('router-s-1')
+  })
+
   it('未知模板拒绝', async () => {
     const { core } = await coreWith()
     await expect(

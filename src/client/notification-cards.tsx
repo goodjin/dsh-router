@@ -16,9 +16,9 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { RouterApi } from './api.ts'
 import {
   actionAvailable,
+  breakerFrozen,
   cardActionPlan,
   cardSessionTarget,
-  emergencyButtonState,
   emptyNotifications,
   notificationAckFailed,
   notificationAckStarted,
@@ -169,43 +169,73 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
     })
   }, [props, workbench.routerState])
 
-  if (state === null || (board.cards.length === 0 && pauseResult === undefined)) return null
+  // v1.4：按钮恒驻在通知列顶部（不再是「有卡才出现」）——历史上浮窗在没卡时
+  // 整个不渲染，于是「解除冻结」按钮永远看不见：用户被冻结锁死时，恰恰是
+  // 最需要那个按钮的时候，而它不出现。
+  if (state === null) return null
 
-  const { tasks: stateTasks, tabs: stateTabs, notifications: stateNotifications } = state
-  const emergency = emergencyButtonState(stateNotifications ?? [])
+  const { tasks: stateTasks, tabs: stateTabs } = state
+  // v1.4：冻结态读宿主的真实熔断投影（不再从通知卡推断——那种推断恒为 false，
+  // 于是「解除冻结」按钮永远不出现，用户被冻结锁死）。
+  const frozen = breakerFrozen(state)
+  // 作用域暂停的锚点 = 当前 Router 会话（浮窗只在 Router 会话视图展示，
+  // 那里 currentSessionId 就是那个 Router 会话 id）。
+  const routerSessionId = props.store.get().currentSessionId
 
   return (
     <div style={STACK_STYLE}>
       {pauseResult !== undefined ? (
         <div style={{ ...CARD_STYLE, ...ANOMALY_BORDER }} data-notification-pause-result>{pauseResult}</div>
       ) : null}
-      <LightTooltip label={emergency.frozen ? '解除派发冻结（熔断）' : '冻结一切派发并中断全部运行中任务会话'}>
+      <LightTooltip label="只暂停当前 Router 派出的任务及其下游子任务；不影响别的 Router，也不冻结派发">
         <button
           type="button"
           style={{ ...ACTION_BUTTON_STYLE, ...emergencyDarken, fontWeight: 600 }}
           {...emergencyBind}
-          data-notification-emergency={emergency.frozen ? 'unfreeze' : 'pause'}
+          data-notification-emergency="pause"
+          disabled={routerSessionId === undefined}
           onClick={() => {
+            if (routerSessionId === undefined) {
+              setPauseResult('暂停失败：当前不在 Router 会话视图，无法确定要暂停哪个 Router 的任务')
+              return
+            }
             void (async () => {
               try {
-                if (emergency.frozen) {
-                  await props.api.unfreezeBreaker()
-                  setPauseResult('已解除冻结')
-                } else {
-                  const report = await props.api.emergencyPause()
-                  setPauseResult(report.failedCount > 0
-                    ? `紧急暂停已执行：中断 ${report.interrupted.length} 个会话，${report.failedCount} 个失败（见明细）`
-                    : `紧急暂停已执行：中断 ${report.interrupted.length} 个会话`)
-                }
+                const report = await props.api.emergencyPause(routerSessionId)
+                setPauseResult(report.failedCount > 0
+                  ? `已暂停 ${report.pausedCount} 个任务，${report.failedCount} 个未完全停下（见任务卡）`
+                  : `已暂停 ${report.pausedCount} 个任务`)
               } catch (error) {
-                setPauseResult(`紧急暂停失败：${error instanceof Error ? error.message : String(error)}`)
+                setPauseResult(`暂停失败：${error instanceof Error ? error.message : String(error)}`)
               }
             })()
           }}
         >
-          {emergency.frozen ? '解除冻结' : '紧急暂停'}
+          暂停本 Router 任务
         </button>
       </LightTooltip>
+      {frozen ? (
+        <LightTooltip label="解除全局派发冻结（熔断；自动冻结时需手动解除）">
+          <button
+            type="button"
+            style={{ ...ACTION_BUTTON_STYLE, ...emergencyDarken, fontWeight: 600 }}
+            {...emergencyBind}
+            data-notification-emergency="unfreeze"
+            onClick={() => {
+              void (async () => {
+                try {
+                  await props.api.unfreezeBreaker()
+                  setPauseResult('已解除冻结')
+                } catch (error) {
+                  setPauseResult(`解除冻结失败：${error instanceof Error ? error.message : String(error)}`)
+                }
+              })()
+            }}
+          >
+            解除冻结
+          </button>
+        </LightTooltip>
+      ) : null}
       {board.cards.map((entry) => {
         const sessionTarget = cardSessionTarget(entry.card.taskId, stateTasks, stateTabs)
         return (

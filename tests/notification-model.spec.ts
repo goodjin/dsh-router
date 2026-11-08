@@ -27,7 +27,7 @@ import {
   notificationChipSummary,
   syncedNotifications,
   toggleNotificationCollapsed,
-  emergencyButtonState,
+  breakerFrozen,
 } from '../src/client/notification-model.ts'
 import type {
   NotificationCard,
@@ -285,14 +285,21 @@ describe('notificationChipSummary：收起 chip 一行摘要', () => {
   })
 })
 
-describe('emergencyButtonState：紧急按钮态（v1.2 C2 裁定：常驻通知列顶部）', () => {
-  it('无冻结异常卡 → 未冻结（显示「紧急暂停」）', () => {
-    expect(emergencyButtonState([card('K-1')]).frozen).toBe(false)
-    expect(emergencyButtonState([]).frozen).toBe(false)
+describe('breakerFrozen：冻结态读宿主真实熔断投影（v1.4）', () => {
+  it('没有 breaker 投影 → 未冻结（不显示「解除冻结」）', () => {
+    expect(breakerFrozen(null)).toBe(false)
+    expect(breakerFrozen(undefined)).toBe(false)
+    expect(breakerFrozen(routerState())).toBe(false)
+    expect(breakerFrozen(routerState({ breaker: { frozen: false } }))).toBe(false)
   })
 
-  it('出现带 unfreeze 动作的异常卡 → 已冻结（并列「解除冻结」）', () => {
+  it('breaker.frozen=true → 已冻结（并列「解除冻结」）', () => {
+    expect(breakerFrozen(routerState({ breaker: { frozen: true } }))).toBe(true)
+    expect(breakerFrozen(routerState({ breaker: { frozen: true, reason: 'infra 失败 3 次（10 分钟窗口）' } }))).toBe(true)
+  })
+
+  it('不再从通知卡推断冻结态（历史上那种推断恒为 false，导致「解除冻结」永不出现）', () => {
     const frozenCard = card('K-9', { kind: 'anomaly', actions: [{ action: 'unfreeze', label: '解除冻结' }] })
-    expect(emergencyButtonState([card('K-1'), frozenCard]).frozen).toBe(true)
+    expect(breakerFrozen(routerState({ notifications: [frozenCard] }))).toBe(false)
   })
 })
