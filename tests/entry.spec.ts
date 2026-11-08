@@ -101,7 +101,7 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
   })
 
-  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 四个注册项 + header.actions 一项）', () => {
+  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 三项 + conversation.view 提示词视图）', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
     // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮 + 提示词编辑浮层三个注册项；
@@ -111,17 +111,15 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
-      'shell.overlay',
       'conversation.header.leading',
-      'conversation.session.header.actions',
+      'conversation.view',
     ].sort())
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toContain('router-workbench-tabs')
     expect(ids).toContain('router-question-overlay')
     expect(ids).toContain('router-back-button')
-    expect(ids).toContain('router-prompt-editor')
+    expect(ids).toContain('router-system-prompt')
     expect(ids).toContain('router-notification-overlay')
-    expect(ids).toContain('router-prompt-action')
     expect(ids).toContain('router-settings')
     expect(new Set(ids).size).toBe(ids.length)
     // 登记的 name 必须就是槽位键（slots.register 的 name 指向被注入的 slot）。
@@ -163,7 +161,7 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
   it('浏览器面全部组件不再用原生 title 悬浮提示（规格 §9 禁原生黑浮层）', () => {
     const files = [
       'back-button.tsx',
-      'prompt-editor.tsx',
+      'system-prompt-view.tsx',
       'question-cards.tsx',
       'settings.tsx',
       'ui-kit.tsx',

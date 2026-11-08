@@ -95,9 +95,7 @@ export interface WorkbenchStore {
   setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void
   submitAnswer(questionId: string): Promise<void>
   /** 打开某会话的系统提示词编辑面板（v1.1 C5；头部按钮触发，浮层消费）。 */
-  openPromptEditor(sessionId: string): void
   /** 关闭编辑面板（幂等）。 */
-  closePromptEditor(): void
 }
 
 function emptyState(): RouterState {
@@ -242,15 +240,6 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
 
     toggleCollapsed(questionId: string): void {
       apply(() => ({ ...state, board: toggleCollapsed(state.board, questionId) }))
-    },
-
-    openPromptEditor(sessionId: string): void {
-      apply(() => ({ ...state, promptEditorSessionId: sessionId }))
-    },
-
-    closePromptEditor(): void {
-      if (state.promptEditorSessionId === undefined) return
-      apply(() => ({ ...state, promptEditorSessionId: undefined }))
     },
 
     setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void {
