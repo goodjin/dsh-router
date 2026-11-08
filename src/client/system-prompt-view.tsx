@@ -141,6 +141,14 @@ export function SystemPromptView(props: SystemPromptViewProps): ReactNode {
   const [error, setError] = useState<string | undefined>(undefined)
   const [busy, setBusy] = useState(false)
 
+  // hover 反馈的三个 hook 必须无条件调用：它们原先在下面 loading/error/empty
+  // 的 early return 之后，非 editor 相位渲染的 hook 数量比 editor 相位少 3，
+  // phase 或会话切换即触发「Rendered more hooks than during the previous
+  // render」整树崩溃——表现即「Router 会话提示词看不到内容」。
+  const [saveDarken, saveBind] = useHoverDarken()
+  const [resetDarken, resetBind] = useHoverDarken()
+  const [defaultDarken, defaultBind] = useHoverDarken()
+
   // 本会话生效提示词（覆盖 > 默认）；会话切换时重拉。
   useEffect(() => {
     if (!isRouter || sessionId === undefined) return
@@ -191,9 +199,6 @@ export function SystemPromptView(props: SystemPromptViewProps): ReactNode {
   }
 
   const dirty = isPromptDirty(editor)
-  const [saveDarken, saveBind] = useHoverDarken()
-  const [resetDarken, resetBind] = useHoverDarken()
-  const [defaultDarken, defaultBind] = useHoverDarken()
 
   const save = async (): Promise<void> => {
     if (!canSavePrompt(editor) || busy) return
