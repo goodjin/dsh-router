@@ -12,7 +12,7 @@ DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把�
 
 - 预设选择器出现「Router」与主管/ worker 预设；picker 自建的 Router 会话被收编进工作台并幂等收到身份卡（Router 会话全部独立，不去重不跳转）。
 - Router 会话里可派发任务（分叉创建 worker、继承历史与前缀缓存）、汇聚 worker 提问、收完成/异常卡片、作用域紧急暂停与解除冻结。
-- 设置页出现「Router 管理」栏目（worker 类型 CRUD、Router 默认提示词/模型）；Router 会话有「系统提示词」视图。
+- 设置页出现「Router 管理」栏目（worker 类型 CRUD、Router 默认模型）；提示词编辑 UI 已移除（2026-11），既有提示词数据与宿主按角色默认保留。
 - 浏览器控制台自报一行 `Router client loaded …`，让「装没装上」可查。
 
 装载接线（声明行、产物形状、入口指向）由 `tests/bundle.spec.ts` 盯着，任何一条断掉测试就红，不会重演「装上但静默失效」。
@@ -52,7 +52,7 @@ DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把�
 src/entry.ts          宿主侧入口（组装 routerCore、问答桥、HTTP 路由、类型存储与动态预设）→ dist/entry.js
 src/host/             账本 ledger / 调度与完成 core / 防护 guard / 会话桥 bridge /
                       收编索引 session / 记忆 memory / 上下文 context / 预设 presets / 工具 tools
-src/client/           浏览器半边（工作台标签、问答/通知浮窗、返回按钮、提示词编辑、设置段）→ lib/client.js
+src/client/           浏览器半边（工作台标签、问答/通知浮窗、返回按钮、设置段）→ lib/client.js
 src/shared/           宿主/浏览器共享类型与视图契约
 cordis.patch.yml      装载行（裸包名根服务行 + 主管/worker 两条静态预设行；Router 预设运行时动态注册）
 tests/                装载接线、账本/状态机、防护、收编、记忆、客户端模型等全套测试
