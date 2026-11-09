@@ -510,6 +510,27 @@ describe('OutcomeAdjudicator：第一级 injectClosurePrompt（r9 §3/§5）', (
     expect(h.coreCalls.blocked).toHaveLength(1)
   })
 
+  it('sessionState 抛错不外泄（2026-11-09 宿主崩溃回归）：按不占用处理，提醒照投', async () => {
+    // 事故现场：定时器路径裸调宿主 state 丢 receiver，sessionState 整体抛
+    // TypeError；外层无兜底 → unhandledRejection → 宿主 fatal 退出。
+    const h = await adjudicatorWith({
+      logs: { 'session-9': hungTurn(1) },
+      sessionState: async () => { throw new TypeError("Cannot read properties of undefined (reading 'stateController')") },
+    })
+    h.adjudicator.onDispatched('T-001')
+    await expect(h.adjudicator.onFirstResponseTimeout('T-001')).resolves.toBeUndefined()
+    expect(h.prompts).toHaveLength(1)
+    expect(h.prompts[0]!.text).toContain('系统收尾提醒')
+    // 墙钟路径同享 sessionBusy：同样不外泄
+    const h2 = await adjudicatorWith({
+      logs: { 'session-9': hungTurn(1) },
+      sessionState: async () => { throw new TypeError('boom') },
+    })
+    h2.adjudicator.onDispatched('T-001')
+    await expect(h2.adjudicator.onWallClock('T-001')).resolves.toBeUndefined()
+    expect(h2.prompts).toHaveLength(1)
+  })
+
   it('gateway/internal：同一 requestId 限时重试；重试耗尽保留 pending（下轮同 id 续投）', async () => {
     const h = await adjudicatorWith({
       failPrompt: (attempt) =>
