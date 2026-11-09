@@ -17,7 +17,6 @@ import type {
   RouterDefaults,
   RouterState,
   ScopedPauseReport,
-  SessionPromptResponse,
   SpawnModeResponse,
   TypesCreateRequest,
   TypesEnabledRequest,
@@ -85,11 +84,6 @@ export interface RouterApi {
   getSpawnMode(): Promise<SpawnModeResponse>
   /** 写 worker 派生模式（volatile：即时生效，重启回到启动配置值）。 */
   saveSpawnMode(mode: WorkerSpawnMode): Promise<SpawnModeResponse>
-  /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */
-  /** 当前会话生效文本（无覆盖回落默认，isDefault 标记）。 */
-  getPrompt(sessionId: string): Promise<SessionPromptResponse>
-  /** 写会话覆盖；prompt 空串 = 清除回落默认。 */
-  saveSessionPrompt(sessionId: string, prompt: string): Promise<void>
 }
 
 const DEFAULT_TIMEOUT_MS = 8000
@@ -106,8 +100,6 @@ export const WORKER_TYPES_ENABLED_PATH = '/router/worker-types/enabled'
 export const ROUTER_DEFAULTS_PATH = '/router/defaults'
 /** v1.3 Task C2：worker 派生模式（与宿主 routes 一侧逐字对齐）。 */
 export const ROUTER_SPAWN_MODE_PATH = '/router/spawn-mode'
-/** v1.1 Task C5：会话级 Router 系统提示词（与宿主 routes 一侧逐字对齐）。 */
-export const ROUTER_PROMPT_PATH = '/router/prompt'
 export const ROUTER_NOTIFICATIONS_ACK_PATH = '/router/notifications/ack'
 export const ROUTER_TASKS_CONTROL_PATH = '/router/tasks/control'
 export const ROUTER_BREAKER_UNFREEZE_PATH = '/router/breaker/unfreeze'
@@ -278,22 +270,6 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
         throw new RouterApiError('router: spawn-mode response missing mode')
       }
       return { mode: saved }
-    },
-
-    /* ── v1.1 Task C5：会话级 Router 系统提示词 ── */
-
-    async getPrompt(sessionId: string): Promise<SessionPromptResponse> {
-      const body = await request(`${ROUTER_PROMPT_PATH}?sessionId=${encodeURIComponent(sessionId)}`, { headers: { accept: 'application/json' } })
-      if (body === null || typeof body !== 'object') throw new RouterApiError('router: prompt response missing body')
-      return body as SessionPromptResponse
-    },
-
-    async saveSessionPrompt(sessionId: string, prompt: string): Promise<void> {
-      await request(ROUTER_PROMPT_PATH, {
-        method: 'PUT',
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({ sessionId, prompt }),
-      })
     },
 
     /* ── v1.2 C1/C2：通知确认与用户控制 ── */

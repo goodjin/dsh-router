@@ -298,27 +298,27 @@ describe('lib/client.js 是页面能装的产物', () => {
     }
 
     // 按页面物化的方式真跑一遍 apply：表面注册齐（shell.overlay 三个注册项：
-    // 问题浮窗 + 返回按钮 + 提示词编辑浮层；header.actions 提示词按钮）、
+    // 问题浮窗 + 返回按钮 + 通知卡浮层；提示词视图已移除不再注册）、
     // 自报一行、生命周期经 effect。
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
-      'conversation.view',
       'settings.section',
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
     ].sort())
+    expect(captured.injected, '提示词视图已移除，产物不得再注入 conversation.view').not.toContain('conversation.view')
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toEqual([
       'router-workbench-tabs',
-    'router-system-prompt',
       'router-question-overlay',
       'router-notification-overlay',
       'router-back-button',
-          'router-settings',
+      'router-settings',
     ])
+    expect(ids, '产物不得再登记提示词视图').not.toContain('router-system-prompt')
     expect(captured.infos.join(' ')).toMatch(/client loaded/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
   })

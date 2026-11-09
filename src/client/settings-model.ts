@@ -3,9 +3,11 @@
  * 「Router 管理」栏目状态机（reducer）、Router 默认值草稿。零 React、零
  * fetch——组件（settings.tsx）只消费这里，测试直接打纯函数（不启 DOM）。
  *
- * 口径裁定（见 ledger）：
- * - 必填：name 与 systemPrompt（与 C2 工具 create_worker_type 入参的必填口径
- *   对齐）；description/models/skills 可空；角色默认 worker。
+ * 口径裁定（见 ledger；2026-11 提示词 UI 移除后更新）：
+ * - 必填：仅 name；description/models/skills 可空；角色默认 worker。
+ * - 表单不收系统提示词：create 请求体不带 systemPrompt 键（宿主按角色补默认，
+ *   空串会盖掉默认值，所以连空串都不发）；update patch 不带 systemPrompt 键
+ *   （宿主逐字保留既有值，含首尾空白）。
  * - models/skills 归一化 = trim → 去空 → 保第一次出现顺序去重（模型列表有序，
  *   首个为该类型会话默认模型，顺序即优先级，不做字典序排序）。
  * - builtin 保护：不可编辑/不可删除/不可禁用（store 是权威，这里拦 UI 层）。
@@ -36,14 +38,13 @@ export const SPAWN_MODE_MODEL_HINT =
   '注意：切模型即换缓存——worker 手动切换模型（或换路由）后，前缀缓存立即失效，' +
   '下一请求要全量重算。缓存优先模式下类型 models 仅作展示与手动切换建议，不是默认钉定。'
 
-/** 类型编辑表单（templateId=null 表示新建）。 */
+/** 类型编辑表单（templateId=null 表示新建；不含 systemPrompt——提示词 UI 已移除）。 */
 export interface TypeFormState {
   templateId: string | null
   name: string
   description: string
   role: TypeRole
   models: string[]
-  systemPrompt: string
   skills: string[]
   enabled: boolean
 }
@@ -51,7 +52,6 @@ export interface TypeFormState {
 /** 逐字段校验结果（null = 该字段没问题）。 */
 export interface TypeFormProblems {
   name: string | null
-  systemPrompt: string | null
 }
 
 /** 新建表单：角色默认 worker、启用默认开、其余空。 */
@@ -62,13 +62,12 @@ export function emptyTypeForm(): TypeFormState {
     description: '',
     role: 'worker',
     models: [],
-    systemPrompt: '',
     skills: [],
     enabled: true,
   }
 }
 
-/** 记录 → 编辑表单（编辑基线也用它取快照）。 */
+/** 记录 → 编辑表单（编辑基线也用它取快照；systemPrompt 不进表单、不可经表单改动）。 */
 export function typeFormFromRecord(record: WorkerTypeRecord): TypeFormState {
   return {
     templateId: record.templateId,
@@ -76,17 +75,15 @@ export function typeFormFromRecord(record: WorkerTypeRecord): TypeFormState {
     description: record.description,
     role: record.role,
     models: [...record.models],
-    systemPrompt: record.systemPrompt,
     skills: [...record.skills],
     enabled: record.enabled,
   }
 }
 
-/** 必填校验：name 与 systemPrompt trim 后非空。 */
+/** 必填校验：仅 name trim 后非空。 */
 export function validateTypeForm(form: TypeFormState): TypeFormProblems {
   return {
     name: form.name.trim() === '' ? '名称必填' : null,
-    systemPrompt: form.systemPrompt.trim() === '' ? '系统提示词必填' : null,
   }
 }
 
@@ -103,25 +100,23 @@ export function dedupeOrdered(list: readonly string[]): string[] {
   return out
 }
 
-/** 表单归一化后的形状（trim 完毕、列表去重保序；create 请求体直接可用）。 */
+/** 表单归一化后的形状（trim 完毕、列表去重保序；create 请求体直接可用，无 systemPrompt 键）。 */
 export interface NormalizedTypeForm {
   name: string
   description: string
   role: TypeRole
   models: string[]
-  systemPrompt: string
   skills: string[]
   enabled: boolean
 }
 
-/** 表单 → 归一化形状：文本 trim、列表归一化（update 时取其去 enabled/role 的子集当 patch）。 */
+/** 表单 → 归一化形状：文本 trim、列表归一化（update 时取其去 enabled/role 的子集当 patch，均不含 systemPrompt）。 */
 export function normalizeTypeForm(form: TypeFormState): NormalizedTypeForm {
   return {
     name: form.name.trim(),
     description: form.description.trim(),
     role: form.role,
     models: dedupeOrdered(form.models),
-    systemPrompt: form.systemPrompt.trim(),
     skills: dedupeOrdered(form.skills),
     enabled: form.enabled,
   }

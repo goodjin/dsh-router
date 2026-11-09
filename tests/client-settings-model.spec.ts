@@ -1,8 +1,8 @@
 /**
  * 设置管理表单纯逻辑测试（v1.1 计划 Task C3：校验/归一化/reducer，先红后绿）。
  *
- * 五个简报指定用例 + reducer 往返：
- * 1. 必填校验：name 与 systemPrompt 必填（与 C2 工具入参口径一致）；
+ * 用例 + reducer 往返（2026-11 提示词 UI 移除后表单不再收系统提示词）：
+ * 1. 必填校验：name 必填（提示词由宿主按角色默认，表单不收不发）；
  * 2. 模型去重排序：trim、去空、保序去重（首个为默认模型，顺序即优先级）；
  * 3. 角色默认 worker；
  * 4. builtin 保护：不可编辑/不可删除/不可禁用（reducer 层再拦一道）；
@@ -55,25 +55,17 @@ function record(overrides: Partial<WorkerTypeRecord> = {}): WorkerTypeRecord {
 }
 
 describe('必填校验（validateTypeForm）', () => {
-  it('空表单：name 与 systemPrompt 都报必填', () => {
+  it('空表单：name 报必填（提示词 UI 移除后不再校验提示词）', () => {
     const problems = validateTypeForm(emptyTypeForm())
     expect(problems['name']).toBeTruthy()
-    expect(problems['systemPrompt']).toBeTruthy()
+    expect('systemPrompt' in problems).toBe(false)
   })
 
-  it('纯空白的 name 视同缺；填齐后无问题', () => {
-    const blank = validateTypeForm({ ...emptyTypeForm(), name: '   ', systemPrompt: '提示词' })
+  it('纯空白的 name 视同缺；填了 name 即无问题', () => {
+    const blank = validateTypeForm({ ...emptyTypeForm(), name: '   ' })
     expect(blank['name']).toBeTruthy()
-    expect(blank['systemPrompt']).toBeNull()
-    const ok = validateTypeForm({ ...emptyTypeForm(), name: '写手', systemPrompt: '提示词' })
+    const ok = validateTypeForm({ ...emptyTypeForm(), name: '写手' })
     expect(ok['name']).toBeNull()
-    expect(ok['systemPrompt']).toBeNull()
-  })
-
-  it('空 name 的 systemPrompt 缺失时只报各自字段', () => {
-    const problems = validateTypeForm({ ...emptyTypeForm(), systemPrompt: '' })
-    expect(problems['name']).toBeTruthy()
-    expect(problems['systemPrompt']).toBeTruthy()
   })
 })
 
@@ -83,14 +75,13 @@ describe('模型去重排序（dedupeOrdered / normalizeTypeForm）', () => {
     expect(dedupeOrdered([])).toEqual([])
   })
 
-  it('normalizeTypeForm：models/skills 归一化，文本字段 trim，输出可作 create/update 请求体', () => {
+  it('normalizeTypeForm：models/skills 归一化，文本字段 trim，输出可作 create 请求体（不带 systemPrompt 键）', () => {
     const form: TypeFormState = {
       templateId: null,
       name: '  写手  ',
       description: ' 描述 ',
       role: 'worker',
       models: ['p/b', 'p/a', '', 'p/b'],
-      systemPrompt: ' 提示词 ',
       skills: ['skill-a', ' skill-b ', 'skill-a'],
       enabled: true,
     }
@@ -100,10 +91,12 @@ describe('模型去重排序（dedupeOrdered / normalizeTypeForm）', () => {
       description: '描述',
       role: 'worker',
       models: ['p/b', 'p/a'],
-      systemPrompt: '提示词',
       skills: ['skill-a', 'skill-b'],
       enabled: true,
     })
+    // 新建类型不需要提示词：归一化输出不得带 systemPrompt 键（尤其不能是空串——
+    // 宿主 ?? 只挡 nullish，空串会盖掉按角色默认）。
+    expect('systemPrompt' in normalized).toBe(false)
   })
 })
 
@@ -118,7 +111,7 @@ describe('角色默认 worker（emptyTypeForm）', () => {
     expect(form.skills).toEqual([])
   })
 
-  it('record → 表单往返：字段一一对应', () => {
+  it('record → 表单往返：字段一一对应（提示词不进表单）', () => {
     const source = record({ name: '调研', role: 'supervisor', models: ['p/m'], skills: ['s1'], enabled: false, origin: 'router' })
     const form = typeFormFromRecord(source)
     expect(form).toEqual({
@@ -127,10 +120,10 @@ describe('角色默认 worker（emptyTypeForm）', () => {
       description: '',
       role: 'supervisor',
       models: ['p/m'],
-      systemPrompt: '提示词',
       skills: ['s1'],
       enabled: false,
     })
+    expect('systemPrompt' in form).toBe(false)
   })
 })
 

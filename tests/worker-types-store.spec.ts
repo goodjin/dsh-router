@@ -13,6 +13,7 @@ import { LedgerError } from '../src/host/ledger/errors.ts'
 import {
   BUILTIN_GENERAL_ID,
   WorkerTypeStore,
+  defaultPromptForRole,
   type WorkerTypeRecord,
 } from '../src/host/templates.ts'
 import type { WorkerTemplate } from '../src/shared/view-contract.ts'
@@ -106,6 +107,18 @@ describe('WorkerTypeStore：CRUD', () => {
     expect(first.templateId).toBe('type')
   })
 
+  it('create：不带 systemPrompt 也能建，按角色补默认提示词（worker/supervisor 各归各）', async () => {
+    // 2026-11 提示词 UI 移除后，客户端 create 一律不带 systemPrompt 键——
+    // 存储侧必须照旧按角色补默认，这是「新建类型无需提示词仍可创建」的宿主侧看守。
+    const { store } = makeStore()
+    const worker = await store.create({ name: '无提示词工人' })
+    const supervisor = await store.create({ name: '无提示词主管', role: 'supervisor' })
+    expect(worker.systemPrompt).toBe(defaultPromptForRole('worker'))
+    expect(supervisor.systemPrompt).toBe(defaultPromptForRole('supervisor'))
+    expect(worker.systemPrompt.length).toBeGreaterThan(0)
+    expect(supervisor.systemPrompt.length).toBeGreaterThan(0)
+  })
+
   it('create：名字为空拒绝', async () => {
     const { store } = makeStore()
     await expect(store.create({ name: '  ' })).rejects.toSatisfy((e: unknown) => errorCode(e) === 'invalid-input')
@@ -121,6 +134,18 @@ describe('WorkerTypeStore：CRUD', () => {
     expect(updated.name).toBe(before.name)
     expect(updated.updatedAt).toBeGreaterThan(before.updatedAt)
     await expect(store.update('ghost', { description: 'x' })).rejects.toSatisfy((e: unknown) => errorCode(e) === 'template-not-found')
+  })
+
+  it('update：patch 不带 systemPrompt 时既有提示词逐字保留（含首尾空白）', async () => {
+    // 2026-11 提示词 UI 移除后，客户端编辑类型一律不发 systemPrompt——
+    // 存储侧必须原样保留旧值，一个字节都不能动（空白也是内容）。
+    const { store } = makeStore()
+    const seeded = await store.create({ name: '带空白提示词的类型', systemPrompt: '  首尾都有空白的提示词。\n\n' })
+    const updated = await store.update(seeded.templateId, { name: '只改名' })
+    expect(updated.systemPrompt).toBe('  首尾都有空白的提示词。\n\n')
+    expect(updated.name).toBe('只改名')
+    const reread = await store.get(seeded.templateId)
+    expect(reread!.systemPrompt).toBe('  首尾都有空白的提示词。\n\n')
   })
 
   it('setEnabled：禁用后保留记录；builtin 禁用被拒（保证任何情况下可派发）', async () => {

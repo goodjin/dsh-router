@@ -1,8 +1,9 @@
 /**
  * 表面登记的唯一键名表（R3 报告核实的 slot key 与本包的登记 id）。
  *
- * 集中一处：index.ts 的 apply、四个表面模块、entry.spec 的接线断言都读
+ * 集中一处：index.ts 的 apply、各表面模块、entry.spec 的接线断言都读
  * 这里，键名漂移会在接线测试里立刻红掉，而不是装上后静默失效。
+ * （2026-11 提示词 UI 移除：conversation.view 的「提示词」视图条目已删。）
  */
 
 /** 会话导航标签条（single、root、零占用——头部 leading 座位）。 */
@@ -25,15 +26,6 @@ export const BACK_BUTTON_ORDER = 35
 export const NOTIFICATION_OVERLAY_SLOT = 'shell.overlay'
 export const NOTIFICATION_OVERLAY_ID = 'router-notification-overlay'
 export const NOTIFICATION_OVERLAY_ORDER = 37
-
-/**
- * 「提示词」视图标签（v1.5：提示词管理移入会话界面）：conversation.view
-  *（list、session）第三方条目自动进 viewTabs（r5 §1），order 20 落在轨迹与
-  * 统计之间；Router 会话=编辑器，其余=空态说明。
- */
-export const SYSTEM_PROMPT_VIEW_SLOT = 'conversation.view'
-export const SYSTEM_PROMPT_VIEW_ID = 'router-system-prompt'
-export const SYSTEM_PROMPT_VIEW_ORDER = 20
 
 /** 设置段（list、root——一个 entry 一整页设置）。 */
 export const SETTINGS_SLOT = 'settings.section'

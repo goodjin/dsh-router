@@ -1,12 +1,14 @@
 /**
  * 设置段（计划 Task B7 起；v1.1 Task C3 重写为「Router 管理」完整栏目）。
  *
- * 挂点 settings.section（slot key 以 R3 报告为准）。栏目三块：
+ * 挂点 settings.section（slot key 以 R3 报告为准）。栏目四块：
  * 1. 原偏好展示（pollMs/浮窗/活动卡上限——client-prefs 只读，写通道同前）；
- * 2. Worker 类型管理（规格 §6）：列表（名称/角色/模型数/技能数/启用态/来源）
+ * 2. 派生模式选择（v1.3 C2）；
+ * 3. Worker 类型管理（规格 §6）：列表（名称/角色/模型数/技能数/启用态/来源）
  *    + 行内操作（编辑/禁用启用/删除，builtin 无删除不可编辑）+ 新建/编辑表单
- *    （名称、描述、角色下拉、模型有序列表、系统提示词多行、技能勾选）；
- * 3. Router 默认区：默认系统提示词（多行）+ 默认模型。
+ *    （名称、描述、角色下拉、模型有序列表、技能勾选）；
+ * 4. Router 默认区：默认模型（默认系统提示词的编辑 UI 已移除，2026-11；
+ *    既有 routerSystemPrompt 数据保留，保存默认模型时原样带回）。
  *
  * 样式基线（规格 §9）：全部浅色，无黑底回退；悬浮提示一律 ui-kit 的
  * LightTooltip（禁原生 title），hover 反馈一律「颜色稍变深」（useHoverDarken）。
@@ -118,8 +120,6 @@ const FIELD_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
-const TEXTAREA_STYLE: CSSProperties = { ...FIELD_STYLE, minHeight: 84, resize: 'vertical', fontFamily: 'inherit' }
-
 const SMALL_BUTTON_STYLE: CSSProperties = {
   padding: '3px 10px',
   borderRadius: 6,
@@ -222,7 +222,7 @@ function TypeRow(props: {
       </span>
       <span style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
         {canEditRecord(record) ? (
-          <LightTooltip label="编辑名称/描述/模型/提示词/技能">
+          <LightTooltip label="编辑名称/描述/模型/技能（系统提示词不经此处改动）">
             <HoverButton label="编辑" dataTag={`edit-${record.templateId}`} onClick={() => props.onEdit(record)} />
           </LightTooltip>
         ) : (
@@ -412,11 +412,12 @@ function TypeForm(props: {
   const isNew = editing.templateId === null
 
   async function submit(): Promise<void> {
-    if (problems['name'] !== null || problems['systemPrompt'] !== null) return
+    if (problems['name'] !== null) return
     dispatch({ type: 'save-start' })
     try {
       const normalized = normalizeTypeForm(editing)
       if (isNew) {
+        // 不带 systemPrompt 键：宿主按角色补默认提示词（空串会盖掉默认，故不发）。
         props.onSaved(await api.createWorkerType(normalized))
         return
       }
@@ -426,8 +427,8 @@ function TypeForm(props: {
           name: normalized.name,
           description: normalized.description,
           models: normalized.models,
-          systemPrompt: normalized.systemPrompt,
           skills: normalized.skills,
+          // patch 不含 systemPrompt：宿主逐字保留既有提示词（含首尾空白）。
         },
       })
       if (props.baseline !== null && normalized.enabled !== props.baseline.enabled) {
@@ -483,16 +484,6 @@ function TypeForm(props: {
           onChange={(models) => { dispatch({ type: 'form-change', patch: { models } }) }}
         />
       </div>
-      <label style={FIELD_LABEL_STYLE}>
-        <span>系统提示词（必填，多行）</span>
-        <textarea
-          data-router-type-prompt
-          style={TEXTAREA_STYLE}
-          value={editing.systemPrompt}
-          onChange={(event) => { dispatch({ type: 'form-change', patch: { systemPrompt: event.target.value } }) }}
-        />
-        {problems['systemPrompt'] !== null ? <span style={PROBLEM_STYLE}>{problems['systemPrompt']}</span> : null}
-      </label>
       <div style={FIELD_LABEL_STYLE}>
         <span>初始技能（勾选；预设内真实挂载）</span>
         <SkillsEditor
@@ -523,12 +514,12 @@ function TypeForm(props: {
         {props.confirmDiscard ? (
           <HoverButton label="不放弃，继续编辑" dataTag="form-resume" onClick={() => { dispatch({ type: 'form-change', patch: {} }) }} />
         ) : null}
-        <LightTooltip label={isNew ? '创建类型（即刻注册动态预设）' : '保存修改'}>
+        <LightTooltip label={isNew ? '创建类型（即刻注册动态预设；系统提示词按角色取默认）' : '保存修改（系统提示词不受影响）'}>
           <HoverButton
             label={props.busy ? '保存中…' : '保存'}
             dataTag="form-save"
             style={PRIMARY_BUTTON_STYLE}
-            disabled={props.busy || problems['name'] !== null || problems['systemPrompt'] !== null}
+            disabled={props.busy || problems['name'] !== null}
             onClick={() => { void submit() }}
           />
         </LightTooltip>
@@ -729,22 +720,14 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
         </div>
       </div>
 
-      {/* 4. Router 默认区（规格 §6） */}
+      {/* 4. Router 默认区（规格 §6；默认系统提示词编辑 UI 已移除——数据保留，
+            保存时把加载到的 routerSystemPrompt 原样带回，宿主路由两字段都必填）。 */}
       {state.defaultsDraft !== null ? (
         <div style={CARD_STYLE} data-router-defaults-section>
           <div style={SECTION_TITLE_STYLE}>
             <strong>Router 默认</strong>
             {state.defaultsDirty ? <span style={NOTE_STYLE} data-router-defaults-dirty>有未保存的更改。</span> : null}
           </div>
-          <label style={FIELD_LABEL_STYLE}>
-            <span>默认系统提示词（多行；新建 Router 会话的 persona）</span>
-            <textarea
-              data-router-defaults-prompt
-              style={TEXTAREA_STYLE}
-              value={state.defaultsDraft.routerSystemPrompt}
-              onChange={(event) => { dispatch({ type: 'defaults-draft', patch: { routerSystemPrompt: event.target.value } }) }}
-            />
-          </label>
           <div style={FIELD_LABEL_STYLE}>
             <span>默认模型（创建 Router 会话时钉定；空 = 跟随宿主默认）</span>
             <select

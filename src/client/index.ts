@@ -15,9 +15,8 @@
  * - conversation.header.leading  → 会话导航标签条（Router 固定首位）
  * - shell.overlay                → worker 问题浮窗（收起 chip + 展开表单）
  * - shell.overlay                → 「返回 Router」浮动按钮（worker/主管会话时显示）
- * - shell.overlay                → 系统提示词编辑浮层（C5：提示词按钮点开）
- * - conversation.session.header.actions → 「提示词」按钮（仅 Router 会话渲染，C5）
- * - settings.section             → 插件设置段（只读 + 预留写通道）
+ * - shell.overlay                → 统一通知卡浮层（完成/异常卡 + 紧急暂停/解除冻结）
+ * - settings.section             → 插件设置段（偏好展示 + 类型管理 + 默认模型）
  *
  * 自报一行状态（仓库纪律：会静默失败的程序动手时就要留能自报的入口）；
  * 每个表面各自 try/catch——一块挂不上只损失那一块，不炸整条 entry。
@@ -26,7 +25,6 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
-import { registerSystemPromptView } from './system-prompt-view.tsx'
 import { registerQuestionCards } from './question-cards.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
@@ -89,7 +87,7 @@ function makeLogger(ctx: PluginContext): { info(message: string): void; warn(mes
 export function apply(ctx?: PluginContext): void {
   const safeCtx: PluginContext = ctx ?? {}
   const log = makeLogger(safeCtx)
-  const message = 'Router client loaded — workbench tabs / question overlay / back button / prompt editor / create entry / settings section'
+  const message = 'Router client loaded — workbench tabs / question overlay / back button / create entry / settings section'
   log.info(message)
 
   const slots = safeCtx.slots
@@ -139,7 +137,7 @@ export function apply(ctx?: PluginContext): void {
     log.warn('uiSession service unavailable — active tab mapping disabled')
   }
 
-  // 五个表面：各自独立，失败互不牵连。
+  // 五个表面：各自独立，失败互不牵连（提示词视图已移除，不再注册）。
   try {
     registerWorkbenchTabs(slotsHost, { store, uiWorkspace })
   } catch (error) {
@@ -147,10 +145,6 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerSystemPromptView(slotsHost, { store, api })
-  } catch (error) {
-    log.warn(`system prompt view failed to register: ${error instanceof Error ? error.message : String(error)}`)
-  }  try {
     registerQuestionCards(slotsHost, { store, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`notification overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)

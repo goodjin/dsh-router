@@ -172,24 +172,24 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
   })
 
-  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 三项 + conversation.view 提示词视图）', () => {
+  it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 三项；不再注册提示词视图）', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
-    // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮 + 提示词编辑浮层三个注册项；
-    // conversation.session.header.actions 是提示词按钮（v1.1 C5，仅 Router 会话渲染）。
+    // shell.overlay 是 list 级槽位：问题浮窗 + 返回按钮 + 通知卡浮层三个注册项。
+    // 2026-11 提示词 UI 移除：conversation.view 的「提示词」视图不再注册。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
       'shell.overlay',
       'shell.overlay',
       'shell.overlay',
       'conversation.header.leading',
-      'conversation.view',
     ].sort())
+    expect(captured.injected, '提示词视图已移除，不得再注入 conversation.view').not.toContain('conversation.view')
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toContain('router-workbench-tabs')
     expect(ids).toContain('router-question-overlay')
     expect(ids).toContain('router-back-button')
-    expect(ids).toContain('router-system-prompt')
+    expect(ids).not.toContain('router-system-prompt')
     expect(ids).toContain('router-notification-overlay')
     expect(ids).toContain('router-settings')
     expect(new Set(ids).size).toBe(ids.length)
@@ -232,7 +232,6 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
   it('浏览器面全部组件不再用原生 title 悬浮提示（规格 §9 禁原生黑浮层）', () => {
     const files = [
       'back-button.tsx',
-      'system-prompt-view.tsx',
       'question-cards.tsx',
       'settings.tsx',
       'ui-kit.tsx',
