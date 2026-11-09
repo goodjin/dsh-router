@@ -66,6 +66,10 @@ const ROW_STYLE: CSSProperties = {
   gap: 4,
   minWidth: 0,
   maxWidth: '25vw',
+  // 与相邻 preset 操作留出间隔；间隔在滚动区域之外，不随标签滚走。
+  marginInlineEnd: 8,
+  paddingInlineEnd: 2,
+  boxSizing: 'border-box',
   flexShrink: 1,
   overflowX: 'auto',
   scrollbarWidth: 'none',
@@ -74,6 +78,8 @@ const ROW_STYLE: CSSProperties = {
 function tabStyle(active: boolean, closing: boolean): CSSProperties {
   return {
     display: 'inline-flex',
+    // 标签整体滚动而非挤压，确保最右侧边框和关闭按钮保留完整宽度。
+    flex: '0 0 auto',
     alignItems: 'center',
     gap: 4,
     padding: '2px 8px',
