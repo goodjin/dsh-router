@@ -137,6 +137,19 @@ it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话�
   document.body.append(container)
   const root = createRoot(container)
   const openMain = vi.fn()
+  const retained = new Set<string>()
+  const subscribed = new Set<string>()
+  const sessions = { retain: (id: string) => {
+    retained.add(id)
+    return { release: () => { retained.delete(id) }, ready: Promise.resolve({
+      session: { getSnapshot: () => ({ openState: 'open' }) },
+      eventSource: {
+        getSnapshot: () => ({ entries: [{ event: { type: 'assistant/live-chunk', data: { attemptId: id, chunk: { type: 'text-delta', text: `输出 ${id}` } } } }] }),
+        subscribe: (_listener: () => void) => { subscribed.add(id); return () => { subscribed.delete(id) } },
+      },
+    }) }
+  } }
+
   const click = async (selector: string) => {
     const button = container.querySelector<HTMLElement>(selector)
     expect(button, selector).not.toBeNull()
@@ -145,12 +158,21 @@ it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话�
   const switchTo = async (id: string) => { await act(async () => { state = { ...state, currentSessionId: id }; emit() }) }
   const count = () => container.querySelectorAll('[data-router-session-window]').length
   try {
-    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, uiWorkspace: { openSession: openMain } })) })
+    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, sessions, uiWorkspace: { openSession: openMain } })) })
     expect(count()).toBe(3)
+    expect([...retained]).toEqual(['s-t1', 's-t2', 's-t3'])
+    expect(subscribed.size).toBe(3)
+    const card = container.querySelector('[data-router-session-window="s-t1"]')!
+    expect(card.children[0]?.textContent).toBe(data.tasks[0]!.title)
+    expect(card.children[1]?.hasAttribute('data-session-status-line')).toBe(true)
+    expect(card.children[2]?.textContent).toBe('输出 s-t1')
+    expect(card.lastElementChild?.hasAttribute('data-session-button-row')).toBe(true)
     // 直属 worker、下游 worker、其他 Router 的 worker 均不显示整组窗口。
     for (const id of ['s-t1', 's-child', 's-foreign', 'ordinary']) {
       await switchTo(id)
       expect(container.innerHTML).toBe('')
+      expect(retained.size).toBe(0)
+      expect(subscribed.size).toBe(0)
       // 后续轮询刷新不得把窗口重新带回 worker 视图。
       await act(async () => { state = { ...state, routerState: { ...data } }; emit() })
       expect(container.innerHTML).toBe('')
@@ -173,6 +195,8 @@ it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话�
     expect(openMain).toHaveBeenLastCalledWith('s-t1')
     await click('[data-overlay-pagination] button:last-child')
     expect(count()).toBe(2)
+    expect([...retained]).toEqual(['s-t4', 's-child'])
+    expect(subscribed.size).toBe(2)
     await click('[data-overlay-pagination] button:first-of-type')
     await click('[data-notification-action="n1:ack"]')
     expect(ack).not.toHaveBeenCalled()
@@ -209,4 +233,6 @@ it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话�
     container.remove()
   }
   expect(listeners.size).toBe(0)
+  expect(retained.size).toBe(0)
+  expect(subscribed.size).toBe(0)
 })

@@ -25,6 +25,7 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
+import type { PreviewSessions } from './session-preview.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
 import { registerWorkbenchTabs } from './workbench-tabs.tsx'
@@ -46,6 +47,7 @@ export const inject = ['slots', 'uiSession', 'uiWorkspace', 'workspaces', 'sessi
 export interface PluginContext {
   logger?(name: string): { info(message: string): void; warn(message: string): void }
   effect?(callback: () => unknown): unknown
+  sessions?: PreviewSessions
   slots?: Partial<SlotsHost>
   uiSession?: {
     adapter?: {
@@ -144,7 +146,7 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace })
+    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace, sessions: safeCtx.sessions })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

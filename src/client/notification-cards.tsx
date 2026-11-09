@@ -7,6 +7,7 @@
 import { useSyncExternalStore } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
+import { SessionPreview, type PreviewSessions } from './session-preview.tsx'
 import type { RouterApi } from './api.ts'
 import {
   actionAvailable,
@@ -34,6 +35,7 @@ import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 
 /** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
 export interface NotificationOverlayFace {
+  sessions?: PreviewSessions
   store: WorkbenchStore
   api: RouterApi
   prefs: ClientPrefsStore
@@ -69,6 +71,8 @@ const SESSION_WINDOW_STYLE: CSSProperties = {
   width: '100%',
   height: '20dvh',
   maxHeight: '20dvh',
+  display: 'flex', flexDirection: 'column', gap: 3,
+  overflow: 'hidden',
 }
 
 const ANOMALY_BORDER: CSSProperties = {
@@ -275,15 +279,18 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
         const status = sessionWindowStatus(row, questions.length > 0)
         return <section key={row.sessionId} data-router-session-window={row.sessionId} style={SESSION_WINDOW_STYLE}>
           <button type="button" data-open-session={row.sessionId} onClick={() => props.uiWorkspace.openSession(row.sessionId)}
-            style={{ ...ACTION_BUTTON_STYLE, width: '100%', textAlign: 'left', overflowWrap: 'anywhere' }}>
-            <strong>{row.title}</strong><br />
-            <span data-router-session-status={status.kind} aria-hidden>{status.icon}</span> {status.label}
-            <span> · 切换到该会话</span>
+            title={row.title} style={{ ...ACTION_BUTTON_STYLE, flexShrink: 0, padding: 0, border: 0, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <strong>{row.title}</strong>
           </button>
-          {notifications.map((entry) => <div key={entry.card.cardId} data-notification-card={entry.card.cardId}>
-            <p>[{kindLabel(entry.card.kind)}] {entry.card.summary}</p>
-            {entry.error && <p role="alert">{entry.error}</p>}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+          <div data-session-status-line style={{ flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            <span data-router-session-status={status.kind} aria-hidden>{status.icon}</span> {status.label}
+          </div>
+          <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
+            <SessionPreview sessionId={row.sessionId} sessions={props.sessions} />
+            {notifications.filter((entry) => entry.error).map((entry) => <div key={entry.card.cardId} role="alert">{entry.error}</div>)}
+          </div>
+          <div data-session-button-row style={{ display: 'flex', flexShrink: 0, gap: 6, overflowX: 'auto', whiteSpace: 'nowrap' }}>
+          {notifications.map((entry) => <div key={entry.card.cardId} data-notification-card={entry.card.cardId} title={`[${kindLabel(entry.card.kind)}] ${entry.card.summary}`} style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
               {entry.card.actions.map((action) => {
                 const availability = actionAvailable(entry.card, action.action, row.sessionId, entry.actionApplied === true)
                 return <LightTooltip key={action.action} label={action.action === 'ack' ? '只隐藏此会话，不确认、不取消任务' : availability.reason ?? action.label}>
@@ -294,10 +301,10 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
                     onClick={() => runAction(entry.card.cardId, action.action)}>{action.action === 'ack' ? '隐藏' : action.label}</button>
                 </LightTooltip>
               })}
-            </div>
           </div>)}
           {!notifications.some((entry) => entry.card.actions.some((action) => action.action === 'ack')) &&
             <button type="button" data-hide-session={row.sessionId} style={ACTION_BUTTON_STYLE} onClick={() => hideSession(row.sessionId)}>隐藏</button>}
+          </div>
         </section>
       })}
       </>}
