@@ -12,7 +12,7 @@
 import { useMemo, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { RouterState } from '../shared/view-contract.ts'
-import { activeTabIndex, buildTabList } from './tabs-model.ts'
+import { activeTabIndex, buildTabList, workbenchTabsVisible } from './tabs-model.ts'
 import type { RouterTabEntry } from './tabs-model.ts'
 import { WORKBENCH_TABS_ID, WORKBENCH_TABS_ORDER, WORKBENCH_TABS_SLOT } from './surface-ids.ts'
 import type { WorkbenchStore } from './workbench-store.ts'
@@ -127,8 +127,8 @@ export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
     [state.routerState],
   )
   const activeIndex = activeTabIndex(tabs, state.currentSessionId)
-  // 没有任何 router/worker 标签时整条不渲染（不占头部空间）。
-  if (tabs.length === 0) return null
+  // root slot 跨会话存活：普通会话或无当前会话时整条隐藏，不占头部空间。
+  if (!workbenchTabsVisible(state.routerState, state.currentSessionId) || tabs.length === 0) return null
   return (
     <nav data-router-workbench-tabs style={ROW_STYLE} aria-label="Router 会话标签">
       {tabs.map((entry, index) => {

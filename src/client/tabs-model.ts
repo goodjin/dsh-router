@@ -52,3 +52,14 @@ export function activeTabIndex(tabs: RouterTabEntry[], currentSessionId: string 
   if (currentSessionId === undefined) return -1
   return tabs.findIndex((tab) => tab.sessionId === currentSessionId)
 }
+
+/** 仅 Router 及其派发会话显示导航；关闭标签不改变任务会话的归属。 */
+export function workbenchTabsVisible(
+  state: RouterState | null | undefined,
+  currentSessionId: string | undefined,
+): boolean {
+  if (!state || !currentSessionId) return false
+  return state.routerSessions.some((row) => row.sessionId === currentSessionId)
+    || state.tabs.some((row) => row.sessionId === currentSessionId)
+    || state.tasks.some((row) => row.sessionId === currentSessionId)
+}
