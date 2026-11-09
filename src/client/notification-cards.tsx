@@ -63,6 +63,14 @@ const CARD_STYLE: CSSProperties = {
   lineHeight: 1.5,
 }
 
+// 会话小窗统一占当前视口高度的 1/5；内容多少不改变外框大小。
+const SESSION_WINDOW_STYLE: CSSProperties = {
+  ...CARD_STYLE,
+  width: '100%',
+  height: '20dvh',
+  maxHeight: '20dvh',
+}
+
 const ANOMALY_BORDER: CSSProperties = {
   borderColor: 'var(--dsh-color-warning, #b8860b)',
 }
@@ -256,7 +264,7 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
       </button>
       {batch.items.length === 0 && <p>暂无可见派发会话</p>}
       {batch.items.map((row) => {
-        if (showHidden) return <section key={row.sessionId} data-hidden-session={row.sessionId} style={CARD_STYLE}>
+        if (showHidden) return <section key={row.sessionId} data-hidden-session={row.sessionId} style={SESSION_WINDOW_STYLE}>
           {row.title} <button type="button" data-restore-session={row.sessionId} onClick={() => {
             setHiddenIds((current) => { const next = new Set(current); next.delete(row.sessionId); return next })
             setShowHidden(false)
@@ -265,7 +273,7 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
         const questions = ownQuestions.filter((entry) => entry.card.sessionId === row.sessionId)
         const notifications = ownNotifications.filter((entry) => row.tasks.some((task) => task.taskId === entry.card.taskId))
         const status = sessionWindowStatus(row, questions.length > 0)
-        return <section key={row.sessionId} data-router-session-window={row.sessionId} style={CARD_STYLE}>
+        return <section key={row.sessionId} data-router-session-window={row.sessionId} style={SESSION_WINDOW_STYLE}>
           <button type="button" data-open-session={row.sessionId} onClick={() => props.uiWorkspace.openSession(row.sessionId)}
             style={{ ...ACTION_BUTTON_STYLE, width: '100%', textAlign: 'left', overflowWrap: 'anywhere' }}>
             <strong>{row.title}</strong><br />
