@@ -53,6 +53,12 @@ export function registerWorkbenchTabs(slots: SlotsHost, face: WorkbenchTabsFace)
   ))
 }
 
+/** 宿主没有独立的标题 slot：仅隐藏同一 header 内的面包屑，保留操作与视图入口。
+ * 使用 CSS module 的语义后缀，不绑定构建哈希；标签卸载时规则随之移除。
+ */
+export const DUPLICATE_TITLE_SELECTOR = 'header:has([data-router-workbench-tabs]) nav[class$="_crumbs"]'
+const HEADER_STYLE = `${DUPLICATE_TITLE_SELECTOR} { display: none; }`
+
 const ROW_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -72,8 +78,8 @@ function tabStyle(active: boolean, closing: boolean): CSSProperties {
     padding: '2px 8px',
     borderRadius: 6,
     border: '1px solid',
-    borderColor: active ? 'var(--dsh-color-primary, #4f6bed)' : 'transparent',
-    background: active ? 'color-mix(in srgb, var(--dsh-color-primary, #4f6bed) 12%, transparent)' : 'transparent',
+    borderColor: active ? 'var(--dsh-color-primary, #4f6bed)' : 'var(--dsh-color-border, #d8dbe0)',
+    background: active ? 'color-mix(in srgb, var(--dsh-color-primary, #4f6bed) 12%, transparent)' : 'var(--dsh-color-surface, #f5f6f8)',
     color: 'inherit',
     fontSize: 12,
     lineHeight: '18px',
@@ -131,6 +137,7 @@ export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
   if (!workbenchTabsVisible(state.routerState, state.currentSessionId) || tabs.length === 0) return null
   return (
     <nav data-router-workbench-tabs style={ROW_STYLE} aria-label="Router 会话标签">
+      <style>{HEADER_STYLE}</style>
       {tabs.map((entry, index) => {
         const closing = state.closingSessionIds.includes(entry.sessionId)
         return (
