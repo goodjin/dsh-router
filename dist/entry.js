@@ -839,7 +839,7 @@ const TASK_ID_PARAM = {
 /** 八个工具的参数与输出 schema（形状照计划 Task B3 清单逐项）。 */
 const TOOL_SPECS = {
 	dispatch_task: {
-		description: "创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到任务书全文，Router 不阻塞等待。",
+		description: "创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到简洁任务分派（含任务书文档地址，全文自读），Router 不阻塞等待。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -862,6 +862,10 @@ const TOOL_SPECS = {
 				templateId: {
 					type: "string",
 					description: "专业类型（worker 模板 ID）"
+				},
+				project: {
+					type: "string",
+					description: "任务所属项目：项目 id 或工作区路径（上下文「项目列表」可对照）。用户没有明确指定、且任务不属于当前会话所在项目时才需要填；monorepo 的模块细分写进 goal/constraints，不在此填子目录"
 				},
 				parentTaskId: {
 					type: "string",
@@ -909,6 +913,7 @@ const TOOL_SPECS = {
 				constraints: args.constraints,
 				role: args.role,
 				templateId: String(args.templateId),
+				project: typeof args.project === "string" && args.project !== "" ? args.project : void 0,
 				parentTaskId: args.parentTaskId,
 				dependsOn: args.dependsOn,
 				materials: args.materials,
@@ -1323,31 +1328,14 @@ function toolSection(role) {
 	lines.push(ASK_USER_LINE);
 	return lines.join("\n");
 }
-/** Router 身份卡（Router 会话创建成功后投递一次；requestId=identity-<sessionId> 幂等）。 */
-function routerIdentityCard() {
-	return `【身份卡】你是 Router：长期在线的任务编排器。用户的每一句话都说给你；真正的执行工作由独立的执行会话完成。
-
-## 职责与边界
-
-- 理解需求、澄清模糊处、把需求整理成任务（目标、验收条件、约束）、派发、追踪、汇总汇报。
-- 你不亲自执行任务里的具体工作（不写代码、不跑命令）：这些属于执行会话。你的产出是清楚的任务书与准确的进度汇报。
-- 可以连续接收多条需求：派发完成后不要等待执行结果，继续处理用户的下一条消息。执行会话的进展通过任务快照与通知到达你这里。
-- 无需执行的事实问题直接回答，不建任务、不派发。答不准的先向用户澄清，再决定是否需要执行。
-- 简单单步任务直接派 worker：一个执行会话一次做完，不要升级主管。多步、需要协调多方、或有依赖拆分的任务才派 supervisor；单点工作永远不要套两层。
-- 派发前拿不准类型时先用 list_worker_types 查询，templateId 以它为准；没有合适的类型就先 create_worker_type 再派。
-- 派发通道按轻重选（缓存优先模式下你会挂有 subagent 工具；没挂就以会话实际工具为准）：轻活（一次查询、单点小改、格式转换这类收尾快、不留持久产出的）直接用 subagent 开一次性子代理，提示词写自包含，不要为它建任务；重活或持久活（多轮交互、要向用户提问、要留文件或仓库改动的）才建任务派发（dispatch_task）。
-- 任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言。回答「进行得怎么样」前先查。
-- 完成的任务结果与用户决定会自动进入记忆：回答「之前做过什么、定过什么」类问题前先 search_history，命中为空就如实说没有记录，不要编造。
-
-## 本身份可用工具（逐一列名；以会话实际挂载为准，范围外的调用会被系统拒绝——不要尝试）
-
-${toolSection("router")}
-`;
-}
 /**
 * 身份切换卡（分叉创建 worker 后投递的第一条消息的前段；主管分叉 worker 同路径
 * 同格式）。三段：①身份与职责（=该类型的系统提示词全文）②本身份可用工具清单
-* （逐一列名，按角色裁剪）③禁用提醒。任务书全文由投递方紧随其后拼接。
+* （逐一列名，按角色裁剪）③禁用提醒。任务简述（含任务书文档地址）由投递方
+* 紧随其后拼接。
+*
+* 2026-11-09 起 Router 会话不再投身份卡——Router 身份由预设 persona 直定
+* （长期会话不宜把身份钉在历史里）；只有接收任务的 worker/supervisor 用本卡。
 */
 function switchCard(type, role) {
 	const prompt = type.systemPrompt.trim() !== "" ? type.systemPrompt : `你是「${type.name}」的执行者，完成分派给你的任务。`;
@@ -1410,7 +1398,7 @@ var SessionBridge = class {
 	logger;
 	workerInstructions;
 	mode;
-	identityCards;
+	tasksDir;
 	onDelivered;
 	signal;
 	running = /* @__PURE__ */ new Map();
@@ -1428,7 +1416,7 @@ var SessionBridge = class {
 		this.workerInstructions = deps.workerInstructions;
 		const mode = deps.mode;
 		this.mode = typeof mode === "function" ? mode : () => mode ?? "minimal-face";
-		this.identityCards = deps.identityCards;
+		this.tasksDir = typeof deps.tasksDir === "string" && deps.tasksDir.trim() !== "" ? deps.tasksDir : ".router";
 		this.onDelivered = deps.onDelivered;
 		this.signal = deps.signal;
 	}
@@ -1589,33 +1577,27 @@ var SessionBridge = class {
 		}
 	}
 	/**
-	* 首发投递正文（v1.3 规格 §2.3/§2.4）：cache-priority = 切换卡（①类型系统
-	* 提示词 ②角色工具清单 ③禁用提醒）+ 任务书全文；minimal-face = 简化身份头 +
-	* 现行格式（任务书 + 执行指引）。
+	* 任务简述（2026-11-09 交互裁定）：派发投递不再塞任务书全文——一段简洁明了
+	* 的描述（ID/标题/目标/验收要点/版本）+ 任务书文档地址，worker 自己读全文。
+	* 文档地址相对任务 cwd（= worker 会话工作目录），可直接用文件工具打开。
 	*/
-	async firstDeliveryText(record, book) {
-		const identity = await this.typeIdentity(record.templateId ?? "");
-		const role = record.role === "supervisor" ? "supervisor" : "worker";
-		if (this.mode() === "cache-priority") return `${switchCard(identity, role)}\n${book}`;
-		return `${minimalSwitchHeader(identity, role)}\n${book}\n\n${this.workerInstructions()}`;
+	taskBrief(record) {
+		const lines = [`【任务分派】${record.id}「${record.title}」（任务书 v${record.docVersion}）`, `目标：${record.goal}`];
+		if (record.acceptance.length > 0) lines.push(`验收要点：${record.acceptance.join("；")}`);
+		if (record.constraints.length > 0) lines.push(`约束：${record.constraints.join("；")}`);
+		lines.push(`任务书全文（背景、范围、材料、来源）：${this.tasksDir}/tasks/${record.id}/task.v${record.docVersion}.md——先读全文再动手。`);
+		return lines.join("\n");
 	}
 	/**
-	* Router 身份卡投递（v1.3 A2）：requestId=identity-<sessionId> 宿主侧幂等，
-	* 已发标记（ui-state，跨重启）跳过；投递成功才打标，失败不打（下次重试时
-	* 同 requestId 在宿主侧去重，不会双发）。
+	* 首发投递正文（2026-11-09 起两模式同语义）：身份（cache-priority = 切换卡；
+	* minimal-face = 简化身份头）+ 任务简述（含任务书文档地址）；minimal 另附
+	* 执行指引。任务书全文由 worker 按地址自读。
 	*/
-	async deliverRouterIdentityCard(sessionId) {
-		if (this.identityCards?.has(sessionId)) return;
-		await this.host.prompt({
-			requestId: `identity-${sessionId}`,
-			sessionId,
-			mode: "queue",
-			content: [{
-				type: "text",
-				text: routerIdentityCard()
-			}]
-		}, this.hostSignal());
-		await this.identityCards?.mark(sessionId);
+	async firstDeliveryText(record) {
+		const identity = await this.typeIdentity(record.templateId ?? "");
+		const role = record.role === "supervisor" ? "supervisor" : "worker";
+		if (this.mode() === "cache-priority") return `${switchCard(identity, role)}\n${this.taskBrief(record)}`;
+		return `${minimalSwitchHeader(identity, role)}\n${this.taskBrief(record)}\n\n${this.workerInstructions()}`;
 	}
 	/**
 	* 派发任务：无会话则建——cache-priority 优先宿主分叉（来源=派发者/父任务会话，
@@ -1628,7 +1610,6 @@ var SessionBridge = class {
 		const record = this.ledger.get(taskId);
 		if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
 		const mode = this.mode();
-		const book = await this.docsFor(record.cwd).readDoc(taskId, "task", record.docVersion);
 		let sessionId = record.sessionId;
 		if (sessionId === void 0) {
 			const workspace = this.resolveWorkspace(record);
@@ -1655,7 +1636,7 @@ var SessionBridge = class {
 			if (mode !== "cache-priority") await this.pinDefaultModel(sessionId, record.templateId ?? "");
 		}
 		const deliverySessionId = sessionId;
-		const firstText = await this.firstDeliveryText(record, book);
+		const firstText = await this.firstDeliveryText(record);
 		const requestId = mode === "cache-priority" ? `switch-${taskId}-v${record.docVersion}` : `dispatch-${taskId}-v${record.docVersion}`;
 		await this.tagged("任务书投递失败", () => this.host.prompt({
 			requestId,
@@ -1679,9 +1660,11 @@ var SessionBridge = class {
 		const record = this.ledger.get(taskId);
 		if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
 		if (record.sessionId === void 0) return { sessionId: void 0 };
-		const book = await this.docsFor(record.cwd).readDoc(taskId, "task", record.docVersion);
 		const existingSessionId = record.sessionId;
-		const supplementText = this.mode() === "cache-priority" ? book : `${book}\n\n${this.workerInstructions()}`;
+		const lines = [`【任务补充】${record.id}「${record.title}」任务书已升到 v${record.docVersion}，以最新版本为准（旧的完成提交按新版本重算）。`];
+		if (record.constraints.length > 0) lines.push(`当前全部约束：${record.constraints.join("；")}`);
+		lines.push(`新版任务书全文：${this.tasksDir}/tasks/${record.id}/task.v${record.docVersion}.md——先读全文再继续。`);
+		const supplementText = lines.join("\n");
 		await this.tagged("任务书投递失败", () => this.host.prompt({
 			requestId: `dispatch-${taskId}-v${record.docVersion}`,
 			sessionId: existingSessionId,
@@ -2395,7 +2378,7 @@ async function adoptCandidate(deps, cache, candidate, now, baseBackoff, maxBacko
 				return;
 			}
 		}
-		if (!cache.delivered.has(sessionId)) {
+		if (deps.deliver !== void 0 && !cache.delivered.has(sessionId)) {
 			await deps.deliver(sessionId);
 			cache.delivered.add(sessionId);
 			cache.counters.delivered += 1;
@@ -6174,10 +6157,18 @@ function compactCard(record, waiting) {
 /** 渲染活动账本快照文本（systemPrompt.context 的 text 缓存源）。 */
 function renderLedgerSnapshot(tasks, options) {
 	const visible = tasks.filter(isSnapshotVisible);
-	if (visible.length === 0) return options.memoryBrief !== void 0 && options.memoryBrief !== "" ? `## 长期记忆摘要\n\n${options.memoryBrief}\n\n## 活动任务\n\n当前没有未结束任务。\n` : "当前没有未结束任务。所有任务均已完成或取消，可从归档检索。";
+	const projectSection = options.projects !== void 0 && options.projects.length > 0 ? `## 项目列表\n\n${options.projects.map((project) => `- ${project.id}${project.path !== void 0 ? `（${project.path}）` : ""}`).join("\n")}` : void 0;
+	if (visible.length === 0) {
+		const parts = [];
+		if (options.memoryBrief !== void 0 && options.memoryBrief !== "") parts.push(`## 长期记忆摘要\n\n${options.memoryBrief}`);
+		if (projectSection !== void 0) parts.push(projectSection);
+		parts.push(options.memoryBrief !== void 0 && options.memoryBrief !== "" ? `## 活动任务\n\n当前没有未结束任务。` : "当前没有未结束任务。所有任务均已完成或取消，可从归档检索。");
+		return parts.join("\n\n");
+	}
 	const compact = visible.length > options.maxCards;
 	const sections = [];
 	if (options.memoryBrief !== void 0 && options.memoryBrief !== "") sections.push(`## 长期记忆摘要\n\n${options.memoryBrief}`);
+	if (projectSection !== void 0) sections.push(projectSection);
 	const header = compact ? `## 活动任务（${visible.length} 项，超上限 ${options.maxCards}，已切换单行紧凑模式）` : `## 活动任务（${visible.length} 项）`;
 	const cards = visible.map((record) => {
 		const waiting = options.openQuestions?.[record.id];
@@ -6616,6 +6607,18 @@ function createRouterCore(deps) {
 	};
 	/** Router 会话所在 workspace（sessionIds 成员扫描；registry 是同步投影）。 */
 	const workspaceOfSession = (sessionId) => hosts.workspaceRegistry.list().find((workspace) => workspace.sessionIds?.includes(sessionId));
+	/**
+	* 派发指定的项目解析（2026-11-09 行为定义）：按 id 或工作区路径精确匹配
+	* registry；匹配不到 = task 类拒绝，错误带可用项目清单（教育性，同模板校验）。
+	*/
+	const resolveProjectTarget = (project) => {
+		if (project === void 0 || project === "") return void 0;
+		const list = hosts.workspaceRegistry.list();
+		const hit = list.find((workspace) => workspace.id === project || workspace.path === project);
+		if (hit !== void 0) return hit;
+		const catalog = list.map((workspace) => workspace.path !== void 0 ? `${workspace.id}（${workspace.path}）` : workspace.id).join("、");
+		throw new LedgerError("project-unavailable", `未知项目: ${project}（可用项目：${catalog === "" ? "无" : catalog}；缺省派到当前会话所在项目）`);
+	};
 	/** 派发后的公共收尾：打标、加标签、刷快照。 */
 	const afterDispatch = async (record, sessionId, workspaceId) => {
 		if (sessionId !== void 0) {
@@ -6658,7 +6661,11 @@ function createRouterCore(deps) {
 	const refreshSnapshot = async () => {
 		snapshotCache = renderLedgerSnapshot(await ledger.listAll(), {
 			maxCards: deps.maxActiveCards ?? 12,
-			openQuestions: await waitingCounts()
+			openQuestions: await waitingCounts(),
+			projects: hosts.workspaceRegistry.list().map((workspace) => ({
+				id: workspace.id,
+				path: workspace.path
+			}))
 		});
 	};
 	/** 记账时钟（熔断事件时间戳；缺省 Date.now）。 */
@@ -6717,8 +6724,9 @@ function createRouterCore(deps) {
 				if (!budgetVerdict.ok) throw new LedgerError(budgetVerdict.code, `本轮（当前用户消息）已派发过 ${deps.budgets.snapshot(callerSessionId$1).taskLimitPerTurn} 个任务。要派第二个任务，请先调用 ask_user 列出计划与理由征得用户确认；确认后预算清零重计`);
 			}
 			const workspace = workspaceOfSession(callerSessionId$1);
-			const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd();
-			const projectId = workspace?.id ?? `cwd:${cwd}`;
+			const target = resolveProjectTarget(input.project);
+			const cwd = target?.path ?? workspace?.path ?? callerTask?.cwd ?? process.cwd();
+			const projectId = target?.id ?? workspace?.id ?? `cwd:${cwd}`;
 			const record = await ledger.createTask({
 				title: input.title,
 				goal: input.goal,
@@ -7137,19 +7145,19 @@ function dispatchRejectionText(code, callerRole) {
 //#endregion
 //#region src/host/prompts/worker-instructions.ts
 /**
-* worker 执行指引（计划 B4；v1.1 C6 提问纪律同步）：
-* 随任务书全文一起投递给执行会话的附加文本。
+* worker 执行指引（计划 B4；2026-11-09 派发语义修订）：
+* 随任务分派（简洁任务描述 + 任务书文档地址）一起投递给执行会话的附加文本。
 *
-* 任务书说「做什么」，这份指引说「在这个编排系统里怎么工作」。
+* 任务分派说「做什么、去哪读全文」，这份指引说「在这个编排系统里怎么工作」。
 */
 const workerInstructions = `【执行指引】
 
-- 上面是任务书全文。先读目标、约束与验收条件，再动手；工作目录与依赖任务见任务书相应小节。
+- 上面是任务分派与任务书文档地址：第一步先按地址读任务书全文（背景、范围、约束、材料、来源），再动手。
 - 有合理默认就继续做，不要停下来问；提问前先看任务书里是否已有答案。真要问才用 ask_user：问题会汇集到用户界面的浮窗，用户的回答会直接回到你的工具结果里。等答案期间不要凭空编造。
 - 用户不是执行器：禁止让用户执行命令或粘贴输出。缺环境事实就自己用工具查，查不到或工具不足用 report_blocker 报告阻塞，不要硬撑，更不要用完成工具掩盖。
 - 长任务请阶段性用 report_progress 汇报一句话进度，让编排方与用户能看到推进。
-- 完成必须调用 complete_task 提交：结果摘要、交付物引用、验收依据；提交时带的版本号必须是任务书末尾标注的当前版本（docVersion）——版本不符会被拒，说明期间有补充版本，先读最新版本再继续。
-- 工作期间若收到任务书的新版本（补充约束），以最新版本为准，旧的完成提交按新版本重算。
+- 完成必须调用 complete_task 提交：结果摘要、交付物引用、验收依据；提交时带的版本号必须是任务书当前版本（docVersion）——版本不符会被拒，说明期间有补充版本，先读最新版本再继续。
+- 工作期间若收到【任务补充】（任务书升版）：以最新版本为准，先读新版全文再继续，旧的完成提交按新版本重算。
 - 完成后自然收尾即可；是否完成的判定由编排方按验收策略处理，不要重复提交。
 - 输出结束后若收到【系统收尾提醒】（系统自动消息，非用户新指令）：立即按其指引调用 complete_task 或 report_blocker 收尾；不做回应会被系统独立判定并可能以「系统判定」结单。
 `;
@@ -7226,12 +7234,17 @@ function assertSessionId(sessionId) {
 //#endregion
 //#region src/host/prompts/router.ts
 /**
-* Router 角色提示词（计划 B2；v1.1 C6 行为护栏修订）。
+* Router 角色提示词（计划 B2；2026-11-09 行为定义重写）。
 *
-* 完整替换式 persona（预设行 complete: true）。含 {{model}} 插值——这是模板里
-* 唯一允许的花括号序列，其余内容不得出现 {{...}}（宿主组装时遇到未注册变量
-* 会直接抛错）。Router 预设为动态注册（v1.1 C1），本文件是缺省提示词与静态
-* 兜底的唯一文本源，yml 里没有第二份可漂移。
+* 完整替换式 persona（预设行 complete: true）——Router 是长期会话，身份由本
+* 提示词直定，不再投历史身份卡（身份卡只用于接收任务的 worker/supervisor）。
+* 含 {{model}} 插值——这是模板里唯一允许的花括号序列，其余内容不得出现
+* {{...}}（宿主组装时遇到未注册变量会直接抛错）。Router 预设为动态注册
+* （v1.1 C1），本文件是缺省提示词与静态兜底的唯一文本源，yml 里没有第二份可漂移。
+*
+* 行为主线（用户裁定 2026-11-09）：判断意图 → 有疑问先问清 → 判断所属项目/
+* 模块 → 按简单/复杂选 worker → 派发（系统生成简洁任务分派 + 任务书文档）→
+* 派发后靠「活动任务」列表对照新请求（后续 → supplement 追加，不新建）。
 */
 const routerPrompt = `你是 Router，一个长期在线的任务编排器，由 {{model}} 驱动。用户的每一句话都说给你；真正的执行工作由独立的执行会话完成。
 
@@ -7239,37 +7252,37 @@ const routerPrompt = `你是 Router，一个长期在线的任务编排器，由
 
 - 理解需求、澄清模糊处、把需求整理成任务（目标、验收条件、约束）、派发、追踪、汇总汇报。
 - 你不亲自执行任务里的具体工作（不写代码、不跑命令）：这些属于执行会话。你的产出是清楚的任务书与准确的进度汇报。
-- 可以连续接收多条需求：派发完成后不要等待执行结果，继续处理用户的下一条消息。执行会话的进展通过任务快照与通知到达你这里。
+- 可以连续接收多条需求：派发完成后不要等待执行结果，继续处理用户的下一条消息。执行会话的进展通过活动任务快照与通知到达你这里。
 - 用户不是执行器：任何时候都不得要求用户替你运行命令、粘贴命令输出或报告系统状态。需要环境事实就派任务去查；工具或信息不够时如实告知用户，而不是转嫁给用户。
 
-## 先判断要不要建任务
+## 工作流程：每条用户消息按此主线走
 
-- 无需执行的事实问题（记忆里有、上下文里有、常识可答的）直接回答，不建任务、不派发。答不准的先向用户澄清，再决定是否需要执行。
-- 派发通道按轻重选（v1.3 准则：轻→子代理，重/持久→分叉 worker）：轻活（一次查询、单点小改、格式转换这类收尾快、不留持久产出的）直接用 subagent 开一次性子代理，不要为它建任务；重活或持久活（多轮交互、要向用户提问、要留文件或仓库改动的）才建任务派发（dispatch_task）：任务书立档、可追踪、可验收。
-- 简单单步任务直接派 worker：一个执行会话一次做完，不要升级主管。
-- 多步、需要协调多方、或有依赖拆分的任务才派 supervisor；单点工作永远不要套两层。
-
-## 分叉 worker 与类型提示词（cache 模式说明）
-
-- dispatch_task 的执行会话由「分叉」创建：继承本会话历史与你所在环境的工具面，模型也继承来源会话；类型的 models 字段仅作展示与手动切换建议，中途切换模型等于放弃已热的前缀缓存。
-- 该类型 worker 的系统提示词经【身份切换卡】生效（worker 收到的第一张卡 = 类型身份职责，不进会话系统提示词）：所以 create_worker_type 写 systemPrompt 时要写成完整的身份与职责说明，创建类型指引不变——没有合适的类型就先建再派。
+1. **判断意图**：无需执行的事实问题（上下文里有、常识可答的）直接回答，不建任务；拿不准、信息不足以写出合格任务书的，先 ask_user 问清楚再动手——宁可多问一句，不要派一个方向错误的任务；明确要执行的工作才进入派发。
+2. **判断所属项目与模块**：弄清这个任务属于哪个项目。用户说清楚了就用用户的；没说清楚就对照上下文「项目列表」从需求关键词（仓库名、路径、功能名）判断，dispatch_task 的 project 填对应项目；确实判断不了再问用户。项目属于 monorepo 时，把具体模块（子目录/子包）写进 goal 和 constraints，让执行会话直接在正确位置工作。
+3. **选择执行方式**（从轻到重）：
+   - 轻活（一次查询、单点小改、格式转换这类收尾快、不留持久产出的）→ 直接用 subagent 开一次性子代理，不建任务；
+   - 简单任务（单步、一个执行会话一次做完）→ 派 worker；
+   - 复杂任务（多步、需协调、有依赖拆分）→ 派 supervisor（注意递归深度限制）。
+   - 选 worker 类型：list_worker_types 查当前类型，以 templateId 为准；**没有合适的类型就先用 create_worker_type 新建**（类型提示词经身份切换卡生效，是该 worker 的实际身份来源——systemPrompt 要写清这个身份的职责与专长），再派发——不要把任务硬塞给不对口的类型。
+4. **派发**：dispatch_task 写清 goal（要什么、为什么）、acceptance（可验证的完成判据）、constraints（边界与禁做）、materials（输入材料路径/链接）。系统会自动生成任务书文档，并给执行会话投一段含文档地址的简洁任务分派——执行会话自己去读全文，所以你的目标与验收必须写得自足、无歧义。
+5. **后续请求对照活动任务**：收到新消息先看「活动任务」一节——它就是当前在跑任务的清单。新请求若是某个在跑任务的补充、修正或追加材料，用 supplement_task 追加给那个任务（任务书升版、重投原执行会话），**不要为后续新建任务**；只有全新的工作才走新的 dispatch_task。
 
 ## 你的上下文
 
-- 你每轮能看到：本角色提示词 + 长期记忆摘要 + 活动任务快照（系统自动注入的「活动任务」一节）+ 本轮用户消息。
-- 完整历史会话日志不在你的窗口里。任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言。
-- 活动快照覆盖全部未结束任务（含失败待处理）；已完成的任务从快照消失，需要追溯时用 search_history 或查询归档文档。
+- 你每轮能看到：本角色提示词 + 项目列表 + 活动任务快照（系统自动注入）+ 本轮用户消息；派发转交后的旧讨论会被系统压缩成摘要。
+- 完整历史会话日志不在你的窗口里。任何关于任务当前状态的问题，用 query_tasks 查询，不要凭对话记忆断言；回答「进行得怎么样」前先查。
+- 活动快照覆盖全部未结束任务（含失败待处理）；已完成的任务从快照消失，需要追溯时用 query_tasks 查归档文档。
 
 ## 你的工具
 
-- dispatch_task：派发新任务。需求明确后尽快派发。goal 写清要什么、为什么；acceptance 写可验证的完成判据；constraints 写边界与禁做事项；materials 给输入材料（路径、链接）。role 按上面的层级自决：简单单步派 worker，复杂拆解才派 supervisor（注意递归深度限制）。acceptancePolicy 选验收方式：缺省 auto（校验通过即完成）；重要交付设 supervisor（由派发方验收）或 user（由用户在工作台验收）。
-- supplement_task：给已有任务补充约束或修正方向。任务书会升版并重投原执行会话；不要为补充重新派发新任务。
-- query_tasks：查询任务短卡（按状态或任务 ID）。回答用户「进行得怎么样」前先查。
-- control_task：暂停、恢复、取消某个任务。取消时执行会话会收到立即停止的通知。待验收（review-pending）的任务若由你派发，可用 accept 验收通过、reject 驳回返工（note 写明理由）；验收策略为 user 的任务由用户在工作台验收，不要代替用户裁定。
-- search_history：检索项目或全局记忆。完成的任务结果、用户的决定、已验证的事实会自动进入记忆；回答「之前做过什么、定过什么」类问题前先检索，命中为空就如实说没有记录，不要编造。
-- list_worker_types：列出当前全部 worker 类型（含停用与来源）。派发前拿不准类型时先查这里，templateId 以它为准。
+- dispatch_task：派发新任务（含 project 字段指明所属项目，缺省为当前会话所在项目）。需求明确后尽快派发，不要攒。
+- supplement_task：给已有任务补充约束或修正方向。任务书会升版并重投原执行会话；后续请求一律走这里，不要为补充重新派发新任务。
+- query_tasks：查询任务短卡（按状态或任务 ID），返回带当前派发预算与熔断状态。
+- control_task：暂停、恢复、取消某个任务；待验收（review-pending）的任务若由你派发，可用 accept 验收通过、reject 驳回返工（note 写明理由）；验收策略为 user 的任务由用户在工作台验收，不要代替用户裁定。
+- search_history：检索历史记忆（当前记忆库停用中，如实告知没有记录即可，不要编造）。
+- list_worker_types：列出当前全部 worker 类型（含停用与来源）。派发前拿不准类型时先查，templateId 以它为准。
 - create_worker_type：现场创建新的 worker 类型（同名会被拒）并立即注册预设，创建成功即可按返回的 templateId 派发；presetRegistered=false 时派发会被拒，要如实告知用户。
-- ask_user：向用户澄清。只问真正影响任务书内容的问题；执行会话的问题不会经过你，它们会直接汇集到用户界面的浮窗，由用户直接回答。
+- ask_user：向用户澄清。只问真正影响任务书内容的问题，一次批量问完；执行会话的问题不会经过你，它们会直接汇集到用户界面的浮窗，由用户直接回答。
 
 ## 完成协议
 
@@ -9657,27 +9670,6 @@ function bindSessionLifecycle(ctx, index) {
 		index.onLiveSessionDisposed(session);
 	}));
 }
-/**
-* 身份卡投递包装（review I2）：
-* - `strict`：**失败向上抛**——收编面据此判定"投递真的成功了吗"，只有真成功
-*   才记账（否则失败被吞掉后收编器会把候选记成已投递，永久不再补发）。
-* - `lenient`：失败只告警——保留给"创建成功后补发"这类不该被投递失败打断
-*   主流程的路径。
-*/
-function makeIdentityCardDeliverer(deliver, log) {
-	return {
-		strict: async (sessionId) => {
-			await deliver(sessionId);
-		},
-		lenient: async (sessionId) => {
-			try {
-				await deliver(sessionId);
-			} catch (error) {
-				log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`);
-			}
-		}
-	};
-}
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
 *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 const inject = [
@@ -9938,10 +9930,7 @@ function apply(ctx, rawConfig) {
 		logger: { warn: (message) => log.warn(message) },
 		signal: void 0,
 		mode: spawnMode,
-		identityCards: {
-			has: (sessionId) => ui.hasIdentityCard(sessionId),
-			mark: (sessionId) => ui.markIdentityCardSent(sessionId)
-		},
+		tasksDir: config.tasksDir,
 		host: {
 			create: async (opts, signal) => (await ctx.sessionController.create(opts, signal)).sessionId,
 			prompt: (request, signal) => ctx.sessionController.prompt(request, signal),
@@ -9978,19 +9967,6 @@ function apply(ctx, rawConfig) {
 			}
 		}
 	});
-	/**
-	* Router 身份卡投递（v1.3 A2 规格 §2.2）：两个入口共用——①我们创建的 Router
-	* 会话（POST /router/sessions 成功后）②picker 自建、被收编的 Router 会话
-	* （GET /router/state 收编扫描后）。桥内按已发标记幂等，requestId=
-	* identity-<sessionId> 宿主侧再去重。
-	*
-	* 两条路径的失败语义不同（review I2）：创建路径失败只告警（不打断主流程）；
-	* **收编路径失败必须向上抛**——只有真成功才记账，否则失败被吞掉后收编器会
-	* 把候选记成"已投递"，永久不再补发。
-	*/
-	const identityCardDeliverer = makeIdentityCardDeliverer((sessionId) => bridge.deliverRouterIdentityCard(sessionId), { warn: (message) => log.warn(message) });
-	const deliverRouterCard = identityCardDeliverer.lenient;
-	const deliverRouterCardStrict = identityCardDeliverer.strict;
 	const engine = new DynamicPresetEngine({
 		presets: ctx.agentPresets,
 		effect: (factory, label) => ctx.effect(factory, label),
@@ -10248,6 +10224,12 @@ function apply(ctx, rawConfig) {
 		else adjudicator.onTurnEnd(sessionId);
 	});
 	adjudicator.syncWatched();
+	ctx.effect(() => {
+		const timer = setInterval(() => {
+			assembled.refreshSnapshot();
+		}, 6e4);
+		return () => clearInterval(timer);
+	}, "dsh-router: 快照项目列表补刷");
 	ctx.on("user-questions/request", (async (request, next) => {
 		const outcome = await relay.claimQuestion(request, next);
 		assembled.refreshSnapshot();
@@ -10296,9 +10278,6 @@ function apply(ctx, rawConfig) {
 						register: async (sessionId, wsId) => {
 							await ui.addRouterSession(sessionId, wsId, "Router");
 						},
-						deliver: async (sessionId) => {
-							await deliverRouterCardStrict(sessionId);
-						},
 						logger: { warn: (message) => log.warn(message) }
 					}, config.routerPreset, adoptionCache);
 				} catch (error) {
@@ -10316,9 +10295,7 @@ function apply(ctx, rawConfig) {
 			},
 			createRouterSession: async (workspaceId, name$1) => {
 				await engine.ensureRouterPresent(spawnMode());
-				const created = await assembled.workbench.createRouterSession(workspaceId, name$1);
-				await deliverRouterCard(created.sessionId);
-				return created;
+				return await assembled.workbench.createRouterSession(workspaceId, name$1);
 			},
 			answerQuestion: async (questionId, answers) => {
 				await assembled.workbench.answerQuestion(questionId, answers);
@@ -10404,5 +10381,5 @@ function apply(ctx, rawConfig) {
 }
 
 //#endregion
-export { Config, apply, bindSessionLifecycle, inject, makeIdentityCardDeliverer, name, resolveRootConfig, spawnModeOr };
+export { Config, apply, bindSessionLifecycle, inject, name, resolveRootConfig, spawnModeOr };
 //# sourceMappingURL=entry.js.map

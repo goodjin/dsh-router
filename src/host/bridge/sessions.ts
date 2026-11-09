@@ -15,7 +15,7 @@ import type { WorkerSpawnMode } from '../../shared/view-contract.ts'
 import type { TaskDocStore } from '../docs/task-docs.ts'
 import { parseModelRef } from '../model-ref.ts'
 import { tagInfraFailure } from '../guard/classify.ts'
-import { minimalSwitchHeader, routerIdentityCard, switchCard } from '../prompts/identity-cards.ts'
+import { minimalSwitchHeader, switchCard } from '../prompts/identity-cards.ts'
 import type { WorkerTypeRecord } from '../../shared/view-contract.ts'
 
 /** 宿主会话控制器的最小调用面（r2 §1/§2：sessionController.create/prompt）。 */
@@ -95,6 +95,8 @@ export interface SessionBridgeDeps {
   ledger: Pick<TaskLedger, 'get' | 'transition' | 'attachSession'>
   /** 任务文档存储按任务工作目录取（每项目一个根：<cwd>/<tasksDir>）。 */
   docsFor(cwd: string): TaskDocStore
+  /** 任务文档根目录名（相对任务 cwd；缺省 '.router'）——任务简述里拼文档地址用。 */
+  tasksDir?: string
   /** registry 可选缺席（缺席即全部回退 cwd 创建）。 */
   workspaces?: WorkspaceFace
   host: SessionBridgeHost
@@ -124,11 +126,6 @@ export interface SessionBridgeDeps {
    * 每次派发读当前值（M5：构造时拍死会让切换只对新装配生效）。
    */
   mode?: WorkerSpawnMode | (() => WorkerSpawnMode)
-  /**
-   * Router 身份卡已发标记（v1.3 A2，Review Focus 5；entry 接 UiStateStore）。
-   * 缺席 = 无幂等标记面（照发——宿主 requestId 去重仍兜底）。
-   */
-  identityCards?: { has(sessionId: string): boolean; mark(sessionId: string): Promise<void> }
   /** v1.2 B3：投递成功即回调（判定器武装定时器/重置周期）。 */
   onDelivered?(taskId: string, sessionId: string): void
   /** 投递用的中止信号（缺席时每次调用自造 2 分钟超时）。 */
@@ -203,7 +200,7 @@ export class SessionBridge {
   private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
   private mode: () => WorkerSpawnMode
-  private identityCards: SessionBridgeDeps['identityCards']
+  private tasksDir: string
   private onDelivered: SessionBridgeDeps['onDelivered']
   private signal: AbortSignal | undefined
   private running = new Map<string, boolean>()
@@ -222,7 +219,7 @@ export class SessionBridge {
     this.workerInstructions = deps.workerInstructions
     const mode = deps.mode
     this.mode = typeof mode === 'function' ? mode : () => mode ?? 'minimal-face'
-    this.identityCards = deps.identityCards
+    this.tasksDir = typeof deps.tasksDir === 'string' && deps.tasksDir.trim() !== '' ? deps.tasksDir : '.router'
     this.onDelivered = deps.onDelivered
     this.signal = deps.signal
   }
@@ -422,36 +419,37 @@ export class SessionBridge {
   }
 
   /**
-   * 首发投递正文（v1.3 规格 §2.3/§2.4）：cache-priority = 切换卡（①类型系统
-   * 提示词 ②角色工具清单 ③禁用提醒）+ 任务书全文；minimal-face = 简化身份头 +
-   * 现行格式（任务书 + 执行指引）。
+   * 任务简述（2026-11-09 交互裁定）：派发投递不再塞任务书全文——一段简洁明了
+   * 的描述（ID/标题/目标/验收要点/版本）+ 任务书文档地址，worker 自己读全文。
+   * 文档地址相对任务 cwd（= worker 会话工作目录），可直接用文件工具打开。
    */
-  private async firstDeliveryText(record: TaskRecord, book: string): Promise<string> {
-    const identity = await this.typeIdentity(record.templateId ?? '')
-    const role = record.role === 'supervisor' ? 'supervisor' : 'worker'
-    if (this.mode() === 'cache-priority') {
-      return `${switchCard(identity, role)}\n${book}`
+  taskBrief(record: TaskRecord): string {
+    const lines = [
+      `【任务分派】${record.id}「${record.title}」（任务书 v${record.docVersion}）`,
+      `目标：${record.goal}`,
+    ]
+    if (record.acceptance.length > 0) {
+      lines.push(`验收要点：${record.acceptance.join('；')}`)
     }
-    return `${minimalSwitchHeader(identity, role)}\n${book}\n\n${this.workerInstructions()}`
+    if (record.constraints.length > 0) {
+      lines.push(`约束：${record.constraints.join('；')}`)
+    }
+    lines.push(`任务书全文（背景、范围、材料、来源）：${this.tasksDir}/tasks/${record.id}/task.v${record.docVersion}.md——先读全文再动手。`)
+    return lines.join('\n')
   }
 
   /**
-   * Router 身份卡投递（v1.3 A2）：requestId=identity-<sessionId> 宿主侧幂等，
-   * 已发标记（ui-state，跨重启）跳过；投递成功才打标，失败不打（下次重试时
-   * 同 requestId 在宿主侧去重，不会双发）。
+   * 首发投递正文（2026-11-09 起两模式同语义）：身份（cache-priority = 切换卡；
+   * minimal-face = 简化身份头）+ 任务简述（含任务书文档地址）；minimal 另附
+   * 执行指引。任务书全文由 worker 按地址自读。
    */
-  async deliverRouterIdentityCard(sessionId: string): Promise<void> {
-    if (this.identityCards?.has(sessionId)) return
-    await this.host.prompt(
-      {
-        requestId: `identity-${sessionId}`,
-        sessionId,
-        mode: 'queue',
-        content: [{ type: 'text', text: routerIdentityCard() }],
-      },
-      this.hostSignal(),
-    )
-    await this.identityCards?.mark(sessionId)
+  private async firstDeliveryText(record: TaskRecord): Promise<string> {
+    const identity = await this.typeIdentity(record.templateId ?? '')
+    const role = record.role === 'supervisor' ? 'supervisor' : 'worker'
+    if (this.mode() === 'cache-priority') {
+      return `${switchCard(identity, role)}\n${this.taskBrief(record)}`
+    }
+    return `${minimalSwitchHeader(identity, role)}\n${this.taskBrief(record)}\n\n${this.workerInstructions()}`
   }
 
   /**
@@ -466,7 +464,6 @@ export class SessionBridge {
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     // 每次派发读当前模式（设置页即改即生效）；单次派发内取值一致，不在中途换形。
     const mode = this.mode()
-    const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     let sessionId = record.sessionId
     if (sessionId === undefined) {
       const workspace = this.resolveWorkspace(record)
@@ -500,7 +497,7 @@ export class SessionBridge {
       }
     }
     const deliverySessionId: string = sessionId
-    const firstText = await this.firstDeliveryText(record, book)
+    const firstText = await this.firstDeliveryText(record)
     const requestId = mode === 'cache-priority'
       ? `switch-${taskId}-v${record.docVersion}`
       : `dispatch-${taskId}-v${record.docVersion}`
@@ -531,11 +528,17 @@ export class SessionBridge {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
     if (record.sessionId === undefined) return { sessionId: undefined }
-    const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     const existingSessionId: string = record.sessionId
-    // 重投正文（v1.3 A2 裁定）：cache-priority = 任务书全文（身份已在会话历史，
-    // 不重发切换卡与指引）；minimal-face = 现行格式（任务书 + 执行指引）。
-    const supplementText = this.mode() === 'cache-priority' ? book : `${book}\n\n${this.workerInstructions()}`
+    // 重投正文（2026-11-09 起两模式同语义）：任务书已升版的简述 + 最新约束 +
+    // 新版本文档地址——worker 自己读全文；不重发身份卡与指引。
+    const lines = [
+      `【任务补充】${record.id}「${record.title}」任务书已升到 v${record.docVersion}，以最新版本为准（旧的完成提交按新版本重算）。`,
+    ]
+    if (record.constraints.length > 0) {
+      lines.push(`当前全部约束：${record.constraints.join('；')}`)
+    }
+    lines.push(`新版任务书全文：${this.tasksDir}/tasks/${record.id}/task.v${record.docVersion}.md——先读全文再继续。`)
+    const supplementText = lines.join('\n')
     await this.tagged('任务书投递失败', () =>
       this.host.prompt(
         {

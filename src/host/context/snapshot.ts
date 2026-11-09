@@ -19,6 +19,11 @@ export interface SnapshotOptions {
   memoryBrief?: string
   /** 任务 ID → 待答问题数（缺省不渲染待答行）。 */
   openQuestions?: Record<string, number>
+  /**
+   * 项目列表（2026-11-09 行为定义）：Router 判断任务所属项目的数据源，
+   * 渲染在活动任务之前；缺省无此节。
+   */
+  projects?: readonly { id: string; path?: string }[]
 }
 
 /** 状态 → 中文词。 */
@@ -92,16 +97,24 @@ function compactCard(record: TaskRecord, waiting: number | undefined): string {
 /** 渲染活动账本快照文本（systemPrompt.context 的 text 缓存源）。 */
 export function renderLedgerSnapshot(tasks: TaskRecord[], options: SnapshotOptions): string {
   const visible = tasks.filter(isSnapshotVisible)
+  const projectSection = options.projects !== undefined && options.projects.length > 0
+    ? `## 项目列表\n\n${options.projects.map((project) => `- ${project.id}${project.path !== undefined ? `（${project.path}）` : ''}`).join('\n')}`
+    : undefined
   if (visible.length === 0) {
-    return options.memoryBrief !== undefined && options.memoryBrief !== ''
-      ? `## 长期记忆摘要\n\n${options.memoryBrief}\n\n## 活动任务\n\n当前没有未结束任务。\n`
-      : '当前没有未结束任务。所有任务均已完成或取消，可从归档检索。'
+    const parts: string[] = []
+    if (options.memoryBrief !== undefined && options.memoryBrief !== '') parts.push(`## 长期记忆摘要\n\n${options.memoryBrief}`)
+    if (projectSection !== undefined) parts.push(projectSection)
+    parts.push(options.memoryBrief !== undefined && options.memoryBrief !== ''
+      ? `## 活动任务\n\n当前没有未结束任务。`
+      : '当前没有未结束任务。所有任务均已完成或取消，可从归档检索。')
+    return parts.join('\n\n')
   }
   const compact = visible.length > options.maxCards
   const sections: string[] = []
   if (options.memoryBrief !== undefined && options.memoryBrief !== '') {
     sections.push(`## 长期记忆摘要\n\n${options.memoryBrief}`)
   }
+  if (projectSection !== undefined) sections.push(projectSection)
   const header = compact
     ? `## 活动任务（${visible.length} 项，超上限 ${options.maxCards}，已切换单行紧凑模式）`
     : `## 活动任务（${visible.length} 项）`

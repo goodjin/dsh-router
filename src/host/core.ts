@@ -321,6 +321,19 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
   const workspaceOfSession = (sessionId: string): WorkspaceInfo | undefined =>
     hosts.workspaceRegistry.list().find((workspace) => workspace.sessionIds?.includes(sessionId))
 
+  /**
+   * 派发指定的项目解析（2026-11-09 行为定义）：按 id 或工作区路径精确匹配
+   * registry；匹配不到 = task 类拒绝，错误带可用项目清单（教育性，同模板校验）。
+   */
+  const resolveProjectTarget = (project: string | undefined): WorkspaceInfo | undefined => {
+    if (project === undefined || project === '') return undefined
+    const list = hosts.workspaceRegistry.list()
+    const hit = list.find((workspace) => workspace.id === project || workspace.path === project)
+    if (hit !== undefined) return hit
+    const catalog = list.map((workspace) => workspace.path !== undefined ? `${workspace.id}（${workspace.path}）` : workspace.id).join('、')
+    throw new LedgerError('project-unavailable', `未知项目: ${project}（可用项目：${catalog === '' ? '无' : catalog}；缺省派到当前会话所在项目）`)
+  }
+
   /** 派发后的公共收尾：打标、加标签、刷快照。 */
   const afterDispatch = async (record: TaskRecord, sessionId: string | undefined, workspaceId: string | undefined): Promise<void> => {
     if (sessionId !== undefined) {
@@ -373,6 +386,9 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     snapshotCache = renderLedgerSnapshot(records, {
       maxCards: deps.maxActiveCards ?? 12,
       openQuestions: await waitingCounts(),
+      // 项目列表（2026-11-09 行为定义）：Router 判断任务所属项目/模块的数据源；
+      // registry 面缺席时无此节（cwd 模式照常可用）。
+      projects: hosts.workspaceRegistry.list().map((workspace) => ({ id: workspace.id, path: workspace.path })),
     })
   }
 
@@ -456,8 +472,9 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         }
       }
       const workspace = workspaceOfSession(callerSessionId)
-      const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd()
-      const projectId = workspace?.id ?? `cwd:${cwd}`
+      const target = resolveProjectTarget(input.project)
+      const cwd = target?.path ?? workspace?.path ?? callerTask?.cwd ?? process.cwd()
+      const projectId = target?.id ?? workspace?.id ?? `cwd:${cwd}`
       const record = await ledger.createTask({
         title: input.title,
         goal: input.goal,

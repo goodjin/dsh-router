@@ -13,7 +13,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
-import { Config as rootConfig, bindSessionLifecycle, inject, makeIdentityCardDeliverer, name, resolveRootConfig } from '../src/entry.ts'
+import { Config as rootConfig, bindSessionLifecycle, inject, name, resolveRootConfig } from '../src/entry.ts'
 import { SessionHeaderIndex } from '../src/host/session/session-index.ts'
 import {
   hoverDarkenStyle,
@@ -123,18 +123,6 @@ describe('宿主侧入口 src/entry.ts：live 生命周期接线（真实事件�
     listeners.get('session/disposed')?.(session)
     expect(index.verdictOf('s-live').status).not.toBe('classified')
     await index.dispose()
-  })
-})
-
-describe('宿主侧入口 src/entry.ts：身份卡投递的失败语义（review I2）', () => {
-  it('strict 包装传播失败；lenient 包装只告警', async () => {
-    const warns: string[] = []
-    const deliverer = makeIdentityCardDeliverer(async () => { throw new Error('prompt failed') }, {
-      warn: (message) => { warns.push(message) },
-    })
-    await expect(deliverer.strict('s1')).rejects.toThrow('prompt failed')
-    await expect(deliverer.lenient('s1')).resolves.toBeUndefined()
-    expect(warns.join(' ')).toContain('prompt failed')
   })
 })
 

@@ -95,35 +95,6 @@ export function bindSessionLifecycle(ctx: EventBinder, index: LiveLifecycleFace)
   ctx.on('session/disposed', ((session: unknown) => { index.onLiveSessionDisposed(session) }) as (...args: unknown[]) => unknown)
 }
 
-/** 身份卡投递面（桥的幂等投递）。 */
-export interface IdentityCardDeliverer {
-  /** 投递（失败向上抛）。 */
-  (sessionId: string): Promise<void>
-}
-
-/**
- * 身份卡投递包装（review I2）：
- * - `strict`：**失败向上抛**——收编面据此判定"投递真的成功了吗"，只有真成功
- *   才记账（否则失败被吞掉后收编器会把候选记成已投递，永久不再补发）。
- * - `lenient`：失败只告警——保留给"创建成功后补发"这类不该被投递失败打断
- *   主流程的路径。
- */
-export function makeIdentityCardDeliverer(
-  deliver: (sessionId: string) => Promise<void>,
-  log: { warn(message: string): void },
-): { strict: IdentityCardDeliverer; lenient: IdentityCardDeliverer } {
-  return {
-    strict: async (sessionId: string) => { await deliver(sessionId) },
-    lenient: async (sessionId: string) => {
-      try {
-        await deliver(sessionId)
-      } catch (error) {
-        log.warn(`Router 身份卡投递失败（下次 state 重试，requestId 幂等）: ${error instanceof Error ? error.message : String(error)}`)
-      }
-    },
-  }
-}
-
 /** 必需的宿主服务（缺席行装载失败，fail loud，不留静默残废）。
  *  agentPresets（r4 §1：动态注册预设的注册表，宿主基础组合常驻服务）。 */
 export const inject = ['sessionController', 'agents', 'workspaceRegistry', 'sessionQuery', 'llm', 'agentPresets']
@@ -527,13 +498,10 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     workerInstructions: () => workerInstructionsText(),
     logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
-    // v1.3 A2：worker 生成模式与身份卡已发标记（Review Focus 5 幂等）。
-    // 传 getter 而非快照：设置页改模式后新派发即用新值（M5）。
+    // v1.3 A2：worker 生成模式。传 getter 而非快照：设置页改模式后新派发即用
+    // 新值（M5）。任务简述的文档地址需要 tasksDir（2026-11-09 派发语义）。
     mode: spawnMode,
-    identityCards: {
-      has: (sessionId: string) => ui.hasIdentityCard(sessionId),
-      mark: (sessionId: string) => ui.markIdentityCardSent(sessionId),
-    },
+    tasksDir: config.tasksDir,
     // v1.3 A3：分叉创建面（cache=宿主 fork；minimal=五步复刻的宿主砖块，全可缺席）。
     host: {
       create: async (opts, signal) => (await ctx.sessionController.create(opts, signal)).sessionId,
@@ -587,23 +555,6 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       },
     },
   })
-
-  /**
-   * Router 身份卡投递（v1.3 A2 规格 §2.2）：两个入口共用——①我们创建的 Router
-   * 会话（POST /router/sessions 成功后）②picker 自建、被收编的 Router 会话
-   * （GET /router/state 收编扫描后）。桥内按已发标记幂等，requestId=
-   * identity-<sessionId> 宿主侧再去重。
-   *
-   * 两条路径的失败语义不同（review I2）：创建路径失败只告警（不打断主流程）；
-   * **收编路径失败必须向上抛**——只有真成功才记账，否则失败被吞掉后收编器会
-   * 把候选记成"已投递"，永久不再补发。
-   */
-  const identityCardDeliverer = makeIdentityCardDeliverer(
-    (sessionId: string) => bridge.deliverRouterIdentityCard(sessionId),
-    { warn: (message: string) => log.warn(message) },
-  )
-  const deliverRouterCard = identityCardDeliverer.lenient
-  const deliverRouterCardStrict = identityCardDeliverer.strict
 
   // 动态预设引擎：类型/默认值变更 → unregister+register 增量同步；每次注册的
   // 注销器自接线 ctx.effect（r4 条件①）；Router 动态注册失败回退静态定义。
@@ -917,6 +868,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   })
   void adjudicator.syncWatched()
 
+  // 项目列表新鲜度（2026-11-09 行为定义）：快照缓存只在账本写后刷新，用户
+  // 新开项目不会碰账本——低频补刷让「项目列表」跟上 registry（60s，量级同
+  // 预设巡检；fire-and-forget，失败不重试等下轮）。
+  ctx.effect(() => {
+    const timer = setInterval(() => { void assembled.refreshSnapshot() }, 60_000)
+    return () => clearInterval(timer)
+  }, 'dsh-router: 快照项目列表补刷')
+
   // 问答瀑布：全局监听收所有会话；prepend 抢在客户端兜底 UI 之前认领 worker 提问
   //（答案走 Router 界面浮窗，见规格 §3.3）。
   ctx.on('user-questions/request', (async (request: unknown, next: () => Promise<unknown>) => {
@@ -987,8 +946,6 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
             index: sessionHeaderIndex,
             known: (sessionId) => ui.routerSessions().some((entry) => entry.sessionId === sessionId),
             register: async (sessionId, wsId) => { await ui.addRouterSession(sessionId, wsId, 'Router') },
-            // 收编面的投递**传播失败**：只有真成功才记账（review I2）。
-            deliver: async (sessionId) => { await deliverRouterCardStrict(sessionId) },
             logger: { warn: (message: string) => log.warn(message) },
           }, config.routerPreset, adoptionCache)
         } catch (error) {
@@ -1003,8 +960,6 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         // v1.3.1 自愈：创建前确保 Router 预设在册（重应用窗口/注册失败遗留）。
         await engine.ensureRouterPresent(spawnMode())
         const created = await assembled.workbench.createRouterSession(workspaceId, name)
-        // v1.3 A2 规格 §2.2：Router 会话创建成功后投递一次身份卡（幂等）。
-        await deliverRouterCard(created.sessionId)
         return created
       },
       answerQuestion: async (questionId, answers) => {

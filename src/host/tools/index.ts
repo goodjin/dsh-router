@@ -234,7 +234,7 @@ const TOOL_SPECS: Record<
 > = {
   dispatch_task: {
     description:
-      '创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到任务书全文，Router 不阻塞等待。',
+      '创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到简洁任务分派（含任务书文档地址，全文自读），Router 不阻塞等待。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -245,6 +245,7 @@ const TOOL_SPECS: Record<
         constraints: stringArray('约束：范围、技术选型、禁做事项等'),
         role: { type: 'string', enum: ['supervisor', 'worker'], description: '指派角色：supervisor 可再拆分，worker 只执行' },
         templateId: { type: 'string', description: '专业类型（worker 模板 ID）' },
+        project: { type: 'string', description: '任务所属项目：项目 id 或工作区路径（上下文「项目列表」可对照）。用户没有明确指定、且任务不属于当前会话所在项目时才需要填；monorepo 的模块细分写进 goal/constraints，不在此填子目录' },
         parentTaskId: { type: 'string', description: '父任务 ID（主管再拆分时填写）' },
         dependsOn: { type: 'array', items: TASK_REF_SCHEMA, description: '依赖任务：全部完成后本任务才派发' },
         materials: stringArray('输入材料：需求链接、文档路径等'),
@@ -270,6 +271,7 @@ const TOOL_SPECS: Record<
         constraints: args.constraints as string[] | undefined,
         role: args.role as 'supervisor' | 'worker',
         templateId: String(args.templateId),
+        project: typeof args.project === 'string' && args.project !== '' ? args.project : undefined,
         parentTaskId: args.parentTaskId as string | undefined,
         dependsOn: args.dependsOn as DispatchTaskInput['dependsOn'],
         materials: args.materials as string[] | undefined,

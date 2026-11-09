@@ -43,27 +43,49 @@ describe('routerPrompt', () => {
     expect(routerPrompt).toMatch(/浮窗|直接送达|不经 Router/)
   })
 
-  it('层级自决（v1.1 C6 规格 §3.1）：简单单步直接派 worker，多步/需协调才派主管', () => {
-    expect(routerPrompt).toMatch(/简单.{0,20}(直接派|直接指派)worker|简单单步/)
-    expect(routerPrompt).toMatch(/多步|需要协调|有依赖/)
-    expect(routerPrompt).toMatch(/才派|才.{0,6}主管|指派 supervisor/)
+  it('层级自决（2026-11-09 行为主线）：轻→子代理、简单→worker、复杂→supervisor，从轻到重一梯列出', () => {
+    expect(routerPrompt).toMatch(/简单任务[^。]{0,30}worker/)
+    expect(routerPrompt).toMatch(/复杂任务[^。]{0,40}supervisor/)
+    expect(routerPrompt).toContain('从轻到重')
+    expect(routerPrompt).toContain('subagent')
+  })
+
+  it('没有合适类型就新建：create_worker_type 先建再派，不硬塞不对口类型', () => {
+    expect(routerPrompt).toMatch(/没有合适的类型[^。]{0,40}create_worker_type/)
+    expect(routerPrompt).toMatch(/不对口|硬塞/)
+  })
+
+  it('类型提示词经切换卡生效（cache 模式说明保留给 create_worker_type 的写法指引）', () => {
+    expect(routerPrompt).toContain('切换卡')
+    expect(routerPrompt).toMatch(/systemPrompt[^。]{0,40}职责/)
+  })
+
+  it('项目与模块判定（2026-11-09）：对照「项目列表」判断所属项目，monorepo 模块写进任务书', () => {
+    expect(routerPrompt).toContain('项目列表')
+    expect(routerPrompt).toMatch(/monorepo|模块/)
+    expect(routerPrompt).toMatch(/project/)
+  })
+
+  it('问清楚再派发：信息不足先 ask_user，宁可多问一句不派错方向', () => {
+    expect(routerPrompt).toMatch(/先[^。]{0,12}问清楚|问清楚再/)
+    expect(routerPrompt).toMatch(/ask_user/)
+  })
+
+  it('后续请求对照活动任务：属于在跑任务的后续用 supplement_task 追加，不新建', () => {
+    expect(routerPrompt).toMatch(/后续请求对照活动任务/)
+    expect(routerPrompt).toMatch(/supplement_task/)
+    expect(routerPrompt).toMatch(/不要为后续新建任务/)
+  })
+
+  it('派发产出语义：简洁任务分派 + 任务书文档地址，执行会话自读全文', () => {
+    expect(routerPrompt).toMatch(/简洁任务分派|简洁[^。]{0,10}任务分派/)
+    expect(routerPrompt).toMatch(/文档地址/)
+    expect(routerPrompt).toMatch(/自足|无歧义/)
   })
 
   it('直答路径（v1.1 C6 规格 §3.2）：无需执行的事实问题直接回答，不建任务不派发', () => {
     expect(routerPrompt).toMatch(/直接回答/)
     expect(routerPrompt).toMatch(/不建任务|不要建任务|不派发/)
-  })
-
-  it('派发通道准则（v1.3 A4 规格 §3.4）：轻→子代理、重/持久→分叉 worker', () => {
-    expect(routerPrompt).toMatch(/轻(活|量)?[^。]{0,40}子代理/)
-    expect(routerPrompt).toMatch(/重(活|型)?[^。]{0,20}持久|持久[^。]{0,20}worker|才建任务/)
-    expect(routerPrompt).toContain('subagent')
-  })
-
-  it('cache 模式说明（v1.3 A4）：类型提示词经切换卡生效；类型 models 仅展示', () => {
-    expect(routerPrompt).toContain('切换卡')
-    expect(routerPrompt).toMatch(/models|模型/)
-    expect(routerPrompt).toMatch(/systemPrompt/)
   })
 
   it('用户不是执行器（v1.1 C6 规格 §3.5）：不得要求用户跑命令/粘贴输出/报告系统状态', () => {
