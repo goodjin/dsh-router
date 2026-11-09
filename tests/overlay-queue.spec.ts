@@ -70,14 +70,11 @@ describe('浮窗排队与隔离', () => {
   })
 })
 
-import { act, createElement, createContext, useContext } from 'react'
-import type { ReactNode } from 'react'
+import { act, createElement } from 'react'
 import { createRoot } from 'react-dom/client'
 import { vi } from 'vitest'
 import { NotificationOverlay } from '../src/client/notification-cards.tsx'
 import { dispatchedSessionWindows, sessionWindowStatus, SESSION_WINDOW_ANIMATIONS } from '../src/client/session-windows.ts'
-import { detailBounds, SessionDetailContent } from '../src/client/session-detail.tsx'
-import type { RetainedSession } from '../src/client/session-detail.tsx'
 import type { WorkbenchState, WorkbenchStore } from '../src/client/workbench-store.ts'
 import type { RouterApi } from '../src/client/api.ts'
 import type { ClientPrefsStore } from '../src/client/client-prefs.ts'
@@ -110,17 +107,9 @@ it('真实状态及减少动态效果，不把已派发或终态伪装成运行'
   expect(sessionWindowStatus(row, true).kind).toBe('waiting')
   expect(SESSION_WINDOW_ANIMATIONS).toContain('@media (prefers-reduced-motion: reduce)')
   expect(SESSION_WINDOW_ANIMATIONS).toContain('animation: none !important')
-  const narrow = detailBounds({ left: 0, top: 50, width: 320, height: 400 }, 320, 480)
-  expect(narrow).toMatchObject({ left: 8, top: 58, width: 304, height: 384 })
 })
 
-it('详情使用官方 embedded 工厂，不创建新的主会话', () => {
-  const factory = vi.fn(() => null)
-  SessionDetailContent({ renderFactorySlot: factory })
-  expect(factory).toHaveBeenCalledWith('conversation.content', { variant: 'embedded', phase: 'active', hero: false }, expect.any(Object))
-})
-
-it('会话卡三项分页、隐藏只改可见性、单实例详情及输入/滚动恢复、底部操作不回归', async () => {
+it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话、底部操作不回归', async () => {
   const data = routerState()
   data.tasks = [task('t1'), task('t2'), task('t3'), task('t4'), task('foreign', 'r2'), task('child', 's-t1', 't1')]
   data.tasks[0]!.sessionRunning = true
@@ -139,21 +128,6 @@ it('会话卡三项分页、隐藏只改可见性、单实例详情及输入/滚
   const ack = vi.fn(async () => {})
   const control = vi.fn(async () => {})
   const api = { ackNotification: ack, controlTask: control } as unknown as RouterApi
-  const retained: string[] = [], released: string[] = []
-  const drafts = new Map<string, string>()
-  const context = createContext('')
-  const retainSession = (id: string) => { retained.push(id); return { id, ready: Promise.resolve(), release: () => { released.push(id) } } }
-  const Provider = ({ session, children }: { session: RetainedSession; children?: ReactNode }) => createElement(context.Provider, { value: (session as RetainedSession & { id: string }).id }, children)
-  const Content = () => {
-    const id = useContext(context)
-    return createElement('div', { 'data-conversation-scroll': '', style: { overflow: 'auto', height: 100 } },
-      createElement('input', { 'data-detail-input': id, defaultValue: drafts.get(id) ?? '', onInput: (event: { currentTarget: HTMLInputElement }) => drafts.set(id, event.currentTarget.value) }))
-  }
-  const main = document.createElement('div')
-  main.dataset.conversationContent = ''
-  main.innerHTML = '<input value="主会话草稿" />'
-  main.getBoundingClientRect = () => ({ left: 80, top: 70, width: 900, height: 650 }) as DOMRect
-  document.body.append(main)
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -166,38 +140,28 @@ it('会话卡三项分页、隐藏只改可见性、单实例详情及输入/滚
   const switchTo = async (id: string) => { await act(async () => { state = { ...state, currentSessionId: id }; emit() }) }
   const count = () => container.querySelectorAll('[data-router-session-window]').length
   try {
-    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, retainSession, SessionProvider: Provider, renderSlot: () => createElement(Content), uiWorkspace: { openSession: openMain } })) })
+    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, uiWorkspace: { openSession: openMain } })) })
     expect(count()).toBe(3)
-    expect(retained).toEqual([])
     expect(container.querySelector('[data-overlay-pagination]')?.textContent).toContain('1/2 页 · 共 5')
     expect(container.querySelector('[data-router-session-window="s-foreign"]')).toBeNull()
     const actionButtons = [...container.querySelectorAll('[data-notification-action]')]
     expect(actionButtons.map((el) => el.textContent)).toEqual(['打开会话', '查看结果', '退回重做', '重派', '取消', '通过', '驳回', '隐藏'])
     expect((actionButtons[1] as HTMLButtonElement).disabled).toBe(true)
-    await click('[data-open-session-detail="s-t1"]')
-    expect(retained).toEqual(['s-t1'])
-    expect(container.querySelectorAll('[data-router-session-detail]')).toHaveLength(1)
-    const input = container.querySelector<HTMLInputElement>('[data-detail-input="s-t1"]')!
-    await act(async () => { input.value = '会话一草稿'; input.dispatchEvent(new Event('input', { bubbles: true })) })
-    const scroll = container.querySelector<HTMLElement>('[data-conversation-scroll]')!
-    await act(async () => { scroll.scrollTop = 123; scroll.dispatchEvent(new Event('scroll', { bubbles: true })) })
-    await click('[data-open-session-detail="s-t2"]')
-    expect(released).toContain('s-t1')
-    expect(container.querySelectorAll('[data-router-session-detail]')).toHaveLength(1)
-    await click('[data-open-session-detail="s-t1"]')
-    expect(container.querySelector<HTMLInputElement>('[data-detail-input]')?.value).toBe('会话一草稿')
-    expect(container.querySelector<HTMLElement>('[data-conversation-scroll]')?.scrollTop).toBe(123)
-    const collapse = [...container.querySelectorAll('button')].find((el) => el.textContent === '收起详情')!
-    await act(async () => { collapse.click() })
-    expect(container.querySelector<HTMLInputElement>('[data-detail-input]')?.value).toBe('会话一草稿')
+    // 点击窗口 = 直接切换到该会话（内嵌详情浮层已移除，2026-11-09 用户裁定）
+    await click('[data-open-session="s-t1"]')
+    expect(openMain).toHaveBeenCalledWith('s-t1')
+    expect(container.querySelector('[data-router-session-detail]')).toBeNull()
+    await click('[data-open-session="s-t2"]')
+    expect(openMain).toHaveBeenCalledWith('s-t2')
+    // 卡片动作「打开会话」同样走切换，不再开内嵌详情
+    await click('[data-notification-action="n1:open-session"]')
+    expect(openMain).toHaveBeenLastCalledWith('s-t1')
     await click('[data-overlay-pagination] button:last-child')
     expect(count()).toBe(2)
-    expect(container.querySelectorAll('[data-router-session-detail]')).toHaveLength(1)
     await click('[data-overlay-pagination] button:first-of-type')
     await click('[data-notification-action="n1:ack"]')
     expect(ack).not.toHaveBeenCalled()
     expect(control).not.toHaveBeenCalled()
-    expect(container.querySelector('[data-router-session-detail]')).toBeNull()
     expect(count()).toBe(3)
     await act(async () => { state = { ...state, routerState: { ...data } }; emit() })
     expect(container.querySelector('[data-router-session-window="s-t1"]')).toBeNull()
@@ -223,12 +187,11 @@ it('会话卡三项分页、隐藏只改可见性、单实例详情及输入/滚
     expect(count()).toBe(1)
     await switchTo('ordinary')
     expect(container.innerHTML).toBe('')
-    expect(openMain).not.toHaveBeenCalled()
-    expect(main.querySelector('input')?.value).toBe('主会话草稿')
+    // 三次点击（两次窗口 + 一次卡片动作）全部走 openSession 切换
+    expect(openMain).toHaveBeenCalledTimes(3)
   } finally {
     await act(async () => root.unmount())
-    container.remove(); main.remove()
+    container.remove()
   }
-  expect(retained.length).toBe(released.length)
   expect(listeners.size).toBe(0)
 })

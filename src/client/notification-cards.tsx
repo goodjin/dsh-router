@@ -27,16 +27,13 @@ import type { NotificationActionKind } from '../shared/view-contract.ts'
 import { isRouterSessionView, type WorkbenchStore } from './workbench-store.ts'
 import { NOTIFICATION_OVERLAY_ID, NOTIFICATION_OVERLAY_ORDER, NOTIFICATION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
-import { QuestionCardEntry } from './question-cards.tsx'
 import type { ClientPrefsStore } from './client-prefs.ts'
 import { overlayBatch, overlayRouterSession, taskRouterSession, OVERLAY_STACK_STYLE, OVERLAY_CARD_SIZE } from './overlay-queue.ts'
 import { dispatchedSessionWindows, sessionWindowStatus, SESSION_WINDOW_ANIMATIONS } from './session-windows.ts'
-import { SessionDetail, SessionDetailContent, SESSION_DETAIL_SLOT } from './session-detail.tsx'
-import type { DetailRuntime } from './session-detail.tsx'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 
 /** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
-export interface NotificationOverlayFace extends DetailRuntime {
+export interface NotificationOverlayFace {
   store: WorkbenchStore
   api: RouterApi
   prefs: ClientPrefsStore
@@ -48,11 +45,9 @@ export type NotificationOverlayProps = NotificationOverlayFace
 /** 把通知浮窗注册进 shell.overlay。键名/id 见 surface-ids.ts（entry.spec 断言用）。 */
 export function registerNotificationCards(slots: SlotsHost, face: NotificationOverlayFace): void {
   slots.inject(NOTIFICATION_OVERLAY_SLOT, () => slots.register(
-    { name: NOTIFICATION_OVERLAY_SLOT, id: NOTIFICATION_OVERLAY_ID, order: NOTIFICATION_OVERLAY_ORDER,
-      children: { [SESSION_DETAIL_SLOT]: { kind: 'single', scope: 'session' } }, inject: () => face },
+    { name: NOTIFICATION_OVERLAY_SLOT, id: NOTIFICATION_OVERLAY_ID, order: NOTIFICATION_OVERLAY_ORDER, inject: () => face },
     NotificationOverlay,
   ))
-  slots.inject(SESSION_DETAIL_SLOT, () => slots.register({ name: SESSION_DETAIL_SLOT, id: 'router-session-detail' }, SessionDetailContent))
 }
 
 const CARD_STYLE: CSSProperties = {
@@ -95,15 +90,8 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
   const scope = overlayRouterSession(state, workbench.currentSessionId)
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set())
   const [showHidden, setShowHidden] = useState(false)
-  const [selectedByScope, setSelectedByScope] = useState<Record<string, string | undefined>>({})
-  const [detailCollapsed, setDetailCollapsed] = useState<Record<string, boolean>>({})
-  const scrollPositions = useRef(new Map<string, number>())
-  const selectDetail = (id: string): void => {
-    if (scope) setSelectedByScope((current) => ({ ...current, [scope]: id }))
-  }
   const hideSession = (id: string): void => {
     setHiddenIds((current) => new Set([...current, id]))
-    setSelectedByScope((current) => Object.fromEntries(Object.entries(current).map(([key, value]) => [key, value === id ? undefined : value])))
   }
   const [pages, setPages] = useState<Record<string, number>>({})
   const [collapsedScopes, setCollapsedScopes] = useState<Record<string, boolean>>({})
@@ -137,7 +125,7 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
     if (action === 'ack') { if (target) hideSession(target); return }
     const plan = cardActionPlan(entry.card, action, cardSessionTarget(entry.card.taskId, workbench.routerState?.tasks ?? [], workbench.routerState?.tabs ?? []))
     if (plan.type === 'open-session') {
-      selectDetail(plan.sessionId)
+      props.uiWorkspace.openSession(plan.sessionId)
       return
     }
     if (plan.type === 'disabled') return
@@ -196,7 +184,6 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
   const pageKey = `${scope}:${showHidden ? 'hidden' : 'visible'}`
   const listed = showHidden ? hidden : visible
   const batch = overlayBatch(listed, pages[pageKey] ?? 0)
-  const selected = sessions.find((row) => row.sessionId === selectedByScope[scope] && !hiddenIds.has(row.sessionId))
   const collapsed = collapsedScopes[scope] ?? false
   return (
     <div data-router-overlay-queue style={OVERLAY_STACK_STYLE}>
@@ -279,11 +266,11 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
         const notifications = ownNotifications.filter((entry) => row.tasks.some((task) => task.taskId === entry.card.taskId))
         const status = sessionWindowStatus(row, questions.length > 0)
         return <section key={row.sessionId} data-router-session-window={row.sessionId} style={CARD_STYLE}>
-          <button type="button" data-open-session-detail={row.sessionId} onClick={() => selectDetail(row.sessionId)}
+          <button type="button" data-open-session={row.sessionId} onClick={() => props.uiWorkspace.openSession(row.sessionId)}
             style={{ ...ACTION_BUTTON_STYLE, width: '100%', textAlign: 'left', overflowWrap: 'anywhere' }}>
             <strong>{row.title}</strong><br />
             <span data-router-session-status={status.kind} aria-hidden>{status.icon}</span> {status.label}
-            <span> · 打开详情</span>
+            <span> · 切换到该会话</span>
           </button>
           {notifications.map((entry) => <div key={entry.card.cardId} data-notification-card={entry.card.cardId}>
             <p>[{kindLabel(entry.card.kind)}] {entry.card.summary}</p>
@@ -306,13 +293,6 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
         </section>
       })}
       </>}
-      {selected && <SessionDetail key={selected.sessionId} {...props} sessionId={selected.sessionId} title={selected.title}
-        collapsed={detailCollapsed[selected.sessionId] ?? false} scrollPositions={scrollPositions.current}
-        onToggle={() => setDetailCollapsed((current) => ({ ...current, [selected.sessionId]: !current[selected.sessionId] }))}
-        onClose={() => setSelectedByScope((current) => ({ ...current, [scope]: undefined }))}>
-        {ownQuestions.filter((entry) => entry.card.sessionId === selected.sessionId).map((entry) =>
-          <QuestionCardEntry key={entry.card.questionId} entry={entry} store={props.store} uiWorkspace={{ openSession: selectDetail }} />)}
-      </SessionDetail>}
     </div>
   )
 }

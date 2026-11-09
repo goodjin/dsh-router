@@ -57,7 +57,6 @@ export interface PluginContext {
   }
   uiWorkspace?: { openSession(target: string): void }
   workspaces?: { list?: WorkspacesListLike }
-  sessions?: { retain(id: string, options: { source: string }): import('./session-detail.tsx').RetainedSession }
 }
 
 /** 从 uiSession 的 binding source 读当前主视图会话 id（R3 报告 §5 的用法）。 */
@@ -145,7 +144,7 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace, retainSession: safeCtx.sessions ? (id) => safeCtx.sessions!.retain(id, { source: 'router-session-detail' }) : undefined })
+    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

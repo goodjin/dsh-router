@@ -196,7 +196,6 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     // 2026-11 提示词 UI 移除：conversation.view 的「提示词」视图不再注册。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
-      'router.session-window.detail',
       'shell.overlay',
       'shell.overlay',
       'conversation.header.leading',

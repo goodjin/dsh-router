@@ -305,7 +305,6 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
       'settings.section',
-      'router.session-window.detail',
       'shell.overlay',
       'shell.overlay',
     ].sort())
@@ -314,7 +313,6 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(ids).toEqual([
       'router-workbench-tabs',
       'router-notification-overlay',
-      'router-session-detail',
       'router-back-button',
       'router-settings',
     ])
