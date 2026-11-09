@@ -349,8 +349,16 @@ export class OutcomeAdjudicator {
   /** 会话是否仍在跑一轮（桌面 sessionState 优先，CLI 老 host 用 agentsGet 兜底）。 */
   private async sessionBusy(sessionId: string): Promise<boolean> {
     if (this.deps.sessionState !== undefined) {
-      const state = await this.deps.sessionState(sessionId)
-      return state?.running === true
+      try {
+        const state = await this.deps.sessionState(sessionId)
+        return state?.running === true
+      } catch (error) {
+        // 兜底定时器路径无外层兜底，异常外泄会被宿主当 fatal 整个退出
+        //（2026-11-09 崩溃循环）；读不到态按「不占用」处理，判定流程继续，
+        // 后续 prompt 对已销毁会话自有 not-found 分治。
+        this.deps.logger?.warn(`sessionState 读取失败（会话 ${sessionId}），按不占用处理: ${error instanceof Error ? error.message : String(error)}`)
+        return false
+      }
     }
     return this.deps.agentsGet(sessionId)?.status === 'running'
   }

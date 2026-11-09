@@ -8991,7 +8991,12 @@ var OutcomeAdjudicator = class {
 	}
 	/** 会话是否仍在跑一轮（桌面 sessionState 优先，CLI 老 host 用 agentsGet 兜底）。 */
 	async sessionBusy(sessionId) {
-		if (this.deps.sessionState !== void 0) return (await this.deps.sessionState(sessionId))?.running === true;
+		if (this.deps.sessionState !== void 0) try {
+			return (await this.deps.sessionState(sessionId))?.running === true;
+		} catch (error) {
+			this.deps.logger?.warn(`sessionState 读取失败（会话 ${sessionId}），按不占用处理: ${error instanceof Error ? error.message : String(error)}`);
+			return false;
+		}
 		return this.deps.agentsGet(sessionId)?.status === "running";
 	}
 	async activeTaskFor(sessionId) {
@@ -10179,8 +10184,8 @@ function apply(ctx, rawConfig) {
 		},
 		prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(12e4)),
 		sessionState: async (sessionId) => {
-			const state = ctx.sessionController.state;
-			return state === void 0 ? void 0 : await state(sessionId);
+			const controller = ctx.sessionController;
+			return controller.state === void 0 ? void 0 : controller.state(sessionId);
 		},
 		agentsGet: (sessionId) => {
 			const agent = ctx.agents.get(sessionId);
@@ -10195,7 +10200,9 @@ function apply(ctx, rawConfig) {
 		now: () => Date.now(),
 		schedule: (delayMs, fn) => {
 			const timer = setTimeout(() => {
-				fn();
+				Promise.resolve(fn()).catch((error) => {
+					log.warn(`判定器定时器回调失败: ${error instanceof Error ? error.message : String(error)}`);
+				});
 			}, delayMs);
 			return () => clearTimeout(timer);
 		},

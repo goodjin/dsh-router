@@ -86,6 +86,20 @@ describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修�
     const block = source.slice(at, source.indexOf('adjudicatorRef.current', at))
     expect(block, '判定器依赖不得再挂 llm 通道').not.toContain('llm:')
   })
+
+  it('判定器接线不摘调宿主 state、定时器回调吞异常（2026-11-09 宿主 fatal 崩溃回归）', () => {
+    const stateAt = source.indexOf('sessionState: async (sessionId)')
+    expect(stateAt).toBeGreaterThan(0)
+    const stateBlock = source.slice(stateAt, source.indexOf('agentsGet', stateAt))
+    expect(stateBlock, '宿主 state 是实例方法：摘出裸调丢 receiver，this.stateController 直接 TypeError')
+      .toMatch(/controller\.state\(sessionId\)/)
+    expect(stateBlock).not.toMatch(/\bawait state\(sessionId\)/)
+    const scheduleAt = source.indexOf('schedule: (delayMs, fn)')
+    expect(scheduleAt).toBeGreaterThan(0)
+    const scheduleBlock = source.slice(scheduleAt, scheduleAt + 800)
+    expect(scheduleBlock, '定时器回调 rejection 外泄 = 宿主 unhandledRejection → fatal load failure')
+      .toMatch(/Promise\.resolve\(fn\(\)\)\.catch/)
+  })
 })
 
 describe('宿主侧入口 src/entry.ts：live 生命周期接线（真实事件绑定）', () => {

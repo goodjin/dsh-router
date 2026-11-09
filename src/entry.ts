@@ -817,10 +817,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     },
     prompt: (request) => ctx.sessionController.prompt(request, AbortSignal.timeout(120_000)) as Promise<{ accepted: boolean }>,
     sessionState: async (sessionId) => {
-      const state = (ctx.sessionController as {
+      const controller = ctx.sessionController as {
         state?: (id: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
-      }).state
-      return state === undefined ? undefined : await state(sessionId)
+      }
+      // 不得摘出方法裸调：丢 receiver 后宿主 state() 里 this.stateController 抛
+      // TypeError（2026-11-09 宿主 fatal crash 事故）。
+      return controller.state === undefined ? undefined : controller.state(sessionId)
     },
     agentsGet: (sessionId) => {
       const agent = ctx.agents.get(sessionId) as { status?: string } | undefined
@@ -834,7 +836,13 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     recordIncident,
     now: () => Date.now(),
     schedule: (delayMs, fn) => {
-      const timer = setTimeout(() => { void fn() }, delayMs)
+      // 定时器回调的 rejection 不得外泄：宿主把 unhandledRejection 当
+      // fatal load failure 整个退出（2026-11-09 十分钟节奏崩溃循环）。
+      const timer = setTimeout(() => {
+        void Promise.resolve(fn()).catch((error) => {
+          log.warn(`判定器定时器回调失败: ${error instanceof Error ? error.message : String(error)}`)
+        })
+      }, delayMs)
       return () => clearTimeout(timer)
     },
     ...(config.firstResponseTimeoutMs !== undefined ? { firstResponseTimeoutMs: config.firstResponseTimeoutMs } : {}),
