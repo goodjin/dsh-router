@@ -487,6 +487,23 @@ describe('SessionHeaderIndex：低频目录对账（成员跟踪 + 指纹，无 
     expectVerdict(index, 's-imported', 'router')
   })
 
+  it('会话确认消失后辅助记账被回收：authorityToken 归零、router 授予代数清空（审查修复：无界 Map 慢泄漏）', async () => {
+    const root = await tmpRoot()
+    await writeSession(root, 's-gone', { agentPreset: 'dsh-router' })
+    const { index } = makeIndex(root)
+    await index.reconcile()
+    await index.advance()
+    expectVerdict(index, 's-gone', 'router')
+    expect(index.authorityToken('s-gone')).toBeGreaterThan(0)
+    expect(index.routerGrantGeneration('s-gone')).toBeDefined()
+
+    await rm(join(root, '--proj--', encodeSegment('s-gone')), { recursive: true, force: true })
+    await index.reconcile()
+    expect(index.verdictOf('s-gone').status).toBe('pending')
+    expect(index.authorityToken('s-gone')).toBe(0)
+    expect(index.routerGrantGeneration('s-gone')).toBeUndefined()
+  })
+
   it('live 未落盘会话在对账中保留（宿主 created-but-unmaterialized）', async () => {
     const root = await tmpRoot()
     const { index } = makeIndex(root, { resolveLivePreset: () => null })

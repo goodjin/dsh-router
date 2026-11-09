@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -263,11 +263,31 @@ export function resolveRootConfig(raw: unknown): ResolvedRootConfig {
   }
 }
 
+/** 原子写序号：与 pid 一起保证同目录临时文件名唯一，并发写不互踩临时文件。 */
+let atomicTmpSeq = 0
+
+/**
+ * 原子写：写同目录临时文件再 rename 覆盖。rename 原子性保证崩溃时目标文件
+ * 要么旧版完整、要么新版完整，绝不留下半写截断的 JSON（账本/索引/类型文件
+ * 一旦截断，load 解析失败返 null 会静默清零全部数据）。
+ */
+async function atomicWriteFile(path: string, content: string): Promise<void> {
+  await mkdir(join(path, '..'), { recursive: true })
+  const tmp = `${path}.tmp-${process.pid}-${++atomicTmpSeq}`
+  try {
+    await writeFile(tmp, content, 'utf8')
+    await rename(tmp, path)
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
 /** node:fs/promises 适配成 FsAdapter。 */
 function fsAdapter(): FsAdapter {
   return {
     readFile: (p) => readFile(p, 'utf8'),
-    writeFile: (p, content) => writeFile(p, content, 'utf8'),
+    writeFile: (p, content) => atomicWriteFile(p, content),
     mkdirp: async (p) => {
       await mkdir(p, { recursive: true })
     },
@@ -304,8 +324,7 @@ function jsonFilePersistence<T>(path: string): {
       }
     },
     async save(value: unknown) {
-      await mkdir(join(path, '..'), { recursive: true })
-      await writeFile(path, JSON.stringify(value, null, 2), 'utf8')
+      await atomicWriteFile(path, JSON.stringify(value, null, 2))
     },
   } as never
 }

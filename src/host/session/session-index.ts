@@ -593,6 +593,7 @@ export class SessionHeaderIndex {
           this.dropEntry(id)
           this.dequeue(id)
           this.failures.delete(id)
+          this.forgetSessionAuxiliaries(id)
           this.recomputeNextRetryAt()
           this.markDirty()
         }
@@ -1560,6 +1561,22 @@ export class SessionHeaderIndex {
     this.unverified.delete(sessionId)
     if (previous !== undefined) this.bumpAuthority(sessionId)
     this.syncRouterGrant(sessionId)
+  }
+
+  /**
+   * 彻底遗忘一个已确认消失的会话的辅助记账（审查：revisions/authorityTokens/
+   * grantState 按 id 无限累积，长运行宿主慢泄漏）。只在「对账确认磁盘无此会话
+   * 且无 live 实例」处调用——该点与 advance/verify 同一串行链，没有在途计划持有
+   * 旧 token；重新出现会经 putEntry 从全局单调代际重新发授予，不与旧计划撞代。
+   * 不在 dropEntry 内做：dropEntry 也用于「指纹变了→重判」，那时不能清记账。
+   */
+  private forgetSessionAuxiliaries(sessionId: string): void {
+    if (this.liveInstances.has(sessionId)) return
+    this.revisions.delete(sessionId)
+    this.authorityTokens.delete(sessionId)
+    this.grantState.delete(sessionId)
+    this.pendingGrants.delete(sessionId)
+    this.claimedGrants.delete(sessionId)
   }
 
   /** 生命周期代际 +1（任何影响授权的事实变化）。 */

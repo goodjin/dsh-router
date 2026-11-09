@@ -323,9 +323,10 @@ function QuestionCardEntry(props: {
 /** 浮窗组件：多卡垂直排队互不覆盖；展示量按偏好封顶（账本不删，审查 F4）；状态机在 question-state。 */
 export function QuestionCards(props: QuestionOverlayProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
-  // v1.4：浮窗只在 Router 会话视图展示（用户 2026-11-08 指示）。
-  if (!isRouterSessionView(props.store.get())) return null
   const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
+  // 门控放在所有 hooks 之后：早退若插在 hooks 之间，会话切换时 hook 数量变化
+  // 会触发 "Rendered more hooks" 整树崩溃。v1.4：浮窗只在 Router 会话视图展示。
+  if (!isRouterSessionView(props.store.get())) return null
   if (!prefs.overlayEnabled) return null
   const cards = visibleCards(state.board.cards, prefs.maxActiveCards)
   if (cards.length === 0) return null

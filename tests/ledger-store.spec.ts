@@ -135,6 +135,18 @@ describe('依赖环检测', () => {
     const next = await ledger.createTask(taskInput({ title: 'C' }))
     expect(next.id).toBe('T-002')
   })
+
+  it('菱形依赖（D→B→A、D→C→A）不是环：共享祖先重复可达不误报（审查修复）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const a = await ledger.createTask(taskInput({ title: 'A' }))
+    const b = await ledger.createTask(taskInput({ title: 'B', dependsOn: [a.id] }))
+    const c = await ledger.createTask(taskInput({ title: 'C', dependsOn: [a.id] }))
+    // D 同时依赖 B、C：A 经两条路径可达。无 done 集的 DFS 会把第二次到访的 A
+    // 误判成环（A 仍在 visiting 栈里）；三色标记修复后应正常落库。
+    const d = await ledger.createTask(taskInput({ title: 'D', dependsOn: [b.id, c.id] }))
+    expect(d.id).toBe('T-004')
+    expect(d.dependsOn).toEqual([b.id, c.id])
+  })
 })
 
 describe('transition：非法迁移拒绝、合法链通过', () => {

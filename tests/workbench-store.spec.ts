@@ -195,6 +195,21 @@ describe('pollOnce：轮询门控', () => {
     expect(api.stateCalls[1]).toBe('ws-1')
   })
 
+  it('门控重开（审查修复）：同 workspace 内切换会话即重开门控——picker 自建的首个 Router 不被永久关门漏掉', async () => {
+    const api = fakeApi([emptyState()])
+    const ws = workspaces([{ workspaceId: 'ws-1', sessionIds: ['s1', 's2'] }])
+    const store = startWorkbenchStore({ api, prefs: prefsStore(), workspacesList: ws })
+    store.setCurrentSession('s1')
+    await store.pollOnce() // 首次必拉，得知无 router → 门控关
+    await store.pollOnce() // 跳过
+    expect(api.stateCalls).toHaveLength(1)
+    // 同一 workspace 内切到另一个会话（如新建 Router 被打开）：门控须重开。
+    store.setCurrentSession('s2')
+    await store.pollOnce()
+    expect(api.stateCalls).toHaveLength(2)
+    expect(api.stateCalls[1]).toBe('ws-1')
+  })
+
   it('迟到响应不覆盖现状（审查 F3）：旧 workspace 的响应被丢弃', async () => {
     const stale = emptyState({ routerSessions: [{ sessionId: 'router-old', title: '旧工作区的 Router' }] })
     const fresh = emptyState({ routerSessions: [{ sessionId: 'router-new', title: '新工作区的 Router' }] })

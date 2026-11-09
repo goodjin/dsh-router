@@ -165,28 +165,47 @@ export class AnswerRelay {
       parked.resolve = resolve
       parked.reject = reject
     })
+    if (request.signal?.aborted) {
+      throw new LedgerError('question-cancelled', `问题已被中止: ${questionId}`)
+    }
     this.parked.set(questionId, parked)
     const summary =
       request.questions.length > 1
         ? `${request.questions[0]?.question ?? ''} 等 ${request.questions.length} 个问题`
         : request.questions[0]?.question ?? ''
-    await this.ledger.addQuestion({
-      id: questionId,
-      taskId: taskRecord.id,
-      question: summary,
-      status: 'open',
-      createdAt: receivedAt,
-    })
-    request.signal?.addEventListener(
-      'abort',
-      () => {
-        if (!this.parked.has(questionId)) return
-        this.parked.delete(questionId)
-        parked.reject(new LedgerError('question-cancelled', `问题已被中止: ${questionId}`))
-        void this.ledger.settleQuestion(questionId, 'expired', '问题被中止')
-      },
-      { once: true },
-    )
+    const signal = request.signal
+    let aborted = false
+    const onAbort = (): void => {
+      aborted = true
+      if (!this.parked.has(questionId)) return
+      this.parked.delete(questionId)
+      parked.reject(new LedgerError('question-cancelled', `问题已被中止: ${questionId}`))
+      void this.ledger.settleQuestion(questionId, 'expired', '问题被中止').catch(() => {})
+    }
+    // 监听器必须在 await addQuestion 之前挂上：否则落库期间的 abort 会丢失，
+    // gate 永不落定、worker 工具调用永久挂起。
+    signal?.addEventListener('abort', onAbort, { once: true })
+    try {
+      await this.ledger.addQuestion({
+        id: questionId,
+        taskId: taskRecord.id,
+        question: summary,
+        status: 'open',
+        createdAt: receivedAt,
+      })
+    } catch (error) {
+      signal?.removeEventListener('abort', onAbort)
+      this.parked.delete(questionId)
+      throw error
+    }
+    // 落库期间已中止：onAbort 可能赶在记录落库前 settle（落空），这里补收尾，
+    // 杜绝账本遗留孤儿 open 记录。重复 reject 已拒绝的 gate 无害。
+    if (aborted) {
+      signal?.removeEventListener('abort', onAbort)
+      this.parked.delete(questionId)
+      await this.ledger.settleQuestion(questionId, 'expired', '问题被中止').catch(() => {})
+      parked.reject(new LedgerError('question-cancelled', `问题已被中止: ${questionId}`))
+    }
     return gate
   }
 

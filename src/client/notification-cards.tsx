@@ -11,7 +11,7 @@
  */
 
 import { useSyncExternalStore } from 'react'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { RouterApi } from './api.ts'
 import {
@@ -114,61 +114,70 @@ function kindLabel(kind: 'completion' | 'anomaly'): string {
 
 function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
   const workbench = useSyncExternalStore(props.store.subscribe, props.store.get)
-  // v1.4：浮窗只在 Router 会话视图展示（用户 2026-11-08 指示）。
-  if (!isRouterSessionView(props.store.get())) return null
   const state = workbench.routerState
   const [emergencyDarken, emergencyBind] = useHoverDarken()
   const [actionDarken, actionBind] = useHoverDarken()
   const [chipDarken, chipBind] = useHoverDarken()
   const [board, setBoard] = useState<NotificationBoard>(emptyNotifications)
   const [pauseResult, setPauseResult] = useState<string | undefined>(undefined)
+  // boardRef 与 board 同步：副作用（导航/POST）必须放在 setState 更新器之外——
+  // StrictMode 会双调用更新器探纯，更新器里发 POST 会重复提交。所有写经 commitBoard
+  // 同步推进 ref，runAction 读 ref 取最新板并做幂等门（已在提交中即返回）。
+  const boardRef = useRef(board)
+  const commitBoard = useCallback((next: NotificationBoard): void => {
+    boardRef.current = next
+    setBoard(next)
+  }, [])
 
   // 轮询合流：服务端通知进板，本地 UI 状态（提交中/展开）跨轮询保持。
   useEffect(() => {
-    if (state !== null) setBoard((current) => syncedNotifications(current, state.notifications ?? []))
-  }, [state])
+    if (state !== null) commitBoard(syncedNotifications(boardRef.current, state.notifications ?? []))
+  }, [state, commitBoard])
 
-  const runAction = useCallback((cardId: string, action: NotificationActionKind) => {
-    setBoard((current) => {
-      const entry = current.cards.find((item) => item.card.cardId === cardId)
-      if (entry === undefined) return current
-      const plan = cardActionPlan(entry.card, action, cardSessionTarget(entry.card.taskId, workbench.routerState?.tasks ?? [], workbench.routerState?.tabs ?? []))
-      if (plan.type === 'open-session') {
-        props.uiWorkspace.openSession(plan.sessionId)
-        return notificationCollapsed(current, cardId)
-      }
-      if (plan.type === 'disabled') return current
-      const started = notificationActionStarted(current, cardId)
-      if (started === current) return current
-      void (async () => {
-        try {
-          const request = plan.request
-          if (request.channel === 'control') {
-            await props.api.controlTask(request.taskId, request.action)
-          } else if (request.channel === 'unfreeze') {
-            await props.api.unfreezeBreaker()
-          } else {
-            await props.api.ackNotification(request.cardId)
-            setBoard((now) => notificationAckSucceeded(now, cardId))
-            return
-          }
-          // 动作成功 → 补确认 → 消失。
-          setBoard((now) => {
-            const afterAckStart = notificationAckStarted(notificationActionSucceeded(now, cardId), cardId)
-            void props.api.ackNotification(cardId)
-              .then(() => setBoard((inner) => notificationAckSucceeded(inner, cardId)))
-              .catch(() => setBoard((inner) => notificationAckFailed(inner, cardId, '确认发送失败，可重试补确认')))
-            return afterAckStart
-          })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          setBoard((now) => notificationActionFailed(now, cardId, message))
+  const runAction = useCallback((cardId: string, action: NotificationActionKind): void => {
+    const current = boardRef.current
+    const entry = current.cards.find((item) => item.card.cardId === cardId)
+    if (entry === undefined) return
+    const plan = cardActionPlan(entry.card, action, cardSessionTarget(entry.card.taskId, workbench.routerState?.tasks ?? [], workbench.routerState?.tabs ?? []))
+    if (plan.type === 'open-session') {
+      props.uiWorkspace.openSession(plan.sessionId)
+      commitBoard(notificationCollapsed(current, cardId))
+      return
+    }
+    if (plan.type === 'disabled') return
+    const started = notificationActionStarted(current, cardId)
+    if (started === current) return // 已在提交中：幂等，不重发
+    commitBoard(started)
+    void (async () => {
+      try {
+        const request = plan.request
+        if (request.channel === 'control') {
+          await props.api.controlTask(request.taskId, request.action)
+        } else if (request.channel === 'unfreeze') {
+          await props.api.unfreezeBreaker()
+        } else {
+          await props.api.ackNotification(request.cardId)
+          commitBoard(notificationAckSucceeded(boardRef.current, cardId))
+          return
         }
-      })()
-      return started
-    })
-  }, [props, workbench.routerState])
+        // 动作成功 → 补确认 → 消失。
+        commitBoard(notificationAckStarted(notificationActionSucceeded(boardRef.current, cardId), cardId))
+        try {
+          await props.api.ackNotification(cardId)
+          commitBoard(notificationAckSucceeded(boardRef.current, cardId))
+        } catch {
+          commitBoard(notificationAckFailed(boardRef.current, cardId, '确认发送失败，可重试补确认'))
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        commitBoard(notificationActionFailed(boardRef.current, cardId, message))
+      }
+    })()
+  }, [props, workbench.routerState, commitBoard])
 
+  // v1.4：浮窗只在 Router 会话视图展示。门控必须放在所有 hooks 之后——早退若
+  // 插在 hooks 之间，会话切换时 hook 数量变化会触发 "Rendered more hooks" 崩溃。
+  if (!isRouterSessionView(props.store.get())) return null
   if (state === null || (board.cards.length === 0 && pauseResult === undefined)) return null
 
   const { tasks: stateTasks, tabs: stateTabs, notifications: stateNotifications } = state
@@ -220,7 +229,7 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
                 style={{ ...CHIP_STYLE, ...chipDarken, background: 'transparent', border: 'none', textAlign: 'left' }}
                 {...chipBind}
                 data-notification-chip={entry.card.cardId}
-                onClick={() => { setBoard((now) => toggleNotificationCollapsed(now, entry.card.cardId)) }}
+                onClick={() => { commitBoard(toggleNotificationCollapsed(boardRef.current, entry.card.cardId)) }}
               >
                 <span style={{ fontWeight: 600 }}>[{kindLabel(entry.card.kind)}]</span>
                 <span>{notificationChipSummary(entry.card)}</span>

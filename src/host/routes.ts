@@ -190,6 +190,19 @@ function readBody(request: IncomingMessage): Promise<string> {
 }
 
 /**
+ * 读并解析 JSON 请求体为对象。JSON.parse("null")/数字/字符串/数组都合法 JSON
+ * 但不是对象，后续 body.xxx 取值会在 null 上抛 TypeError 落 500——统一在边界
+ * 拒成 400，避免把客户端坏输入当成内部错误（也避免 500 泄露堆栈/路径）。
+ */
+async function readJsonBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  const parsed: unknown = JSON.parse(await readBody(request))
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new LedgerError('bad-request', '请求体须为 JSON 对象')
+  }
+  return parsed as Record<string, unknown>
+}
+
+/**
  * 挂 exact 路由。webServer/connection 缺席时不挂（观测面不挡装载）；
  * 每条路由先过 connection.admit 同一登录准入，再校验方法（一条路径可声明
  * 多个合法方法，如 worker-types 的 GET/POST/DELETE），再进逻辑。
@@ -224,7 +237,11 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
               const { status, body } = await logic(request)
               respondJson(response, status, body)
             } catch (error) {
-              respondJson(response, errorStatus(error), JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+              const status = errorStatus(error)
+              // 5xx 是未预期的内部错误：原始 message 可能带绝对路径/堆栈，对外只给
+              // 通用文案；4xx 域错误（LedgerError/SyntaxError）的 message 是受控的。
+              const message = status >= 500 ? 'internal error' : error instanceof Error ? error.message : String(error)
+              respondJson(response, status, JSON.stringify({ error: message }))
             }
           },
         }),
@@ -240,7 +257,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   })
 
   handle(ROUTER_SESSION_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; name?: unknown }
+    const body = await readJsonBody(request) as { workspaceId?: unknown; name?: unknown }
     if (typeof body.workspaceId !== 'string' || body.workspaceId === '') {
       throw new LedgerError('bad-request', 'workspaceId 必填')
     }
@@ -250,16 +267,31 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   })
 
   handle(ROUTER_ANSWER_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { questionId?: unknown; answers?: unknown }
+    const body = await readJsonBody(request) as { questionId?: unknown; answers?: unknown }
     if (typeof body.questionId !== 'string' || !Array.isArray(body.answers)) {
       throw new LedgerError('bad-request', 'questionId 与 answers 必填')
     }
-    await deps.answerQuestion(body.questionId, body.answers as AskUserQuestionAnswerItem[])
+    // 逐条校验答案形状（id 字符串、selected 字符串数组、custom 可选字符串）：
+    // 未校验的脏条目会一路透传进宿主 user-questions，在那里才炸成难定位的 500。
+    const answers = body.answers.map((item): AskUserQuestionAnswerItem => {
+      if (item === null || typeof item !== 'object') throw new LedgerError('bad-request', 'answers 条目须为对象')
+      const record = item as { id?: unknown; selected?: unknown; custom?: unknown }
+      if (typeof record.id !== 'string' || !Array.isArray(record.selected) || !record.selected.every((s) => typeof s === 'string')) {
+        throw new LedgerError('bad-request', 'answers 条目须含 id 与字符串数组 selected')
+      }
+      if (record.custom !== undefined && typeof record.custom !== 'string') {
+        throw new LedgerError('bad-request', 'answers 条目的 custom 须为字符串')
+      }
+      return record.custom === undefined
+        ? { id: record.id, selected: record.selected as string[] }
+        : { id: record.id, selected: record.selected as string[], custom: record.custom }
+    })
+    await deps.answerQuestion(body.questionId, answers)
     return { status: 200, body: JSON.stringify({ ok: true }) }
   })
 
   handle(ROUTER_TABS_CLOSE_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { workspaceId?: unknown; sessionId?: unknown }
+    const body = await readJsonBody(request) as { workspaceId?: unknown; sessionId?: unknown }
     if (typeof body.workspaceId !== 'string' || typeof body.sessionId !== 'string') {
       throw new LedgerError('bad-request', 'workspaceId 与 sessionId 必填')
     }
@@ -274,7 +306,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
       return { status: 200, body: JSON.stringify(await deps.listWorkerTypes()) }
     }
     if (request.method === 'POST') {
-      const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+      const body = await readJsonBody(request) as Record<string, unknown>
       const input = sanitizeCreateInput(body)
       const created = await deps.createWorkerType(input)
       return { status: 200, body: JSON.stringify(created) }
@@ -288,7 +320,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   })
 
   handle(WORKER_TYPES_UPDATE_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { templateId?: unknown; patch?: unknown }
+    const body = await readJsonBody(request) as { templateId?: unknown; patch?: unknown }
     if (typeof body.templateId !== 'string' || body.templateId === '' || body.patch === null || typeof body.patch !== 'object') {
       throw new LedgerError('bad-request', 'templateId 与 patch 必填')
     }
@@ -298,7 +330,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   })
 
   handle(WORKER_TYPES_ENABLED_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { templateId?: unknown; enabled?: unknown }
+    const body = await readJsonBody(request) as { templateId?: unknown; enabled?: unknown }
     if (typeof body.templateId !== 'string' || body.templateId === '' || typeof body.enabled !== 'boolean') {
       throw new LedgerError('bad-request', 'templateId 与 enabled(布尔) 必填')
     }
@@ -308,7 +340,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   })
 
   handle(ROUTER_NOTIFICATIONS_ACK_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    const body = await readJsonBody(request) as Record<string, unknown>
     if (body === null || typeof body !== 'object' || typeof body['cardId'] !== 'string' || body['cardId'] === '') {
       throw new LedgerError('bad-request', 'cardId(字符串) 必填')
     }
@@ -321,7 +353,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     if (request.method === 'GET') {
       return { status: 200, body: JSON.stringify(await deps.getDefaults()) }
     }
-    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    const body = await readJsonBody(request) as Record<string, unknown>
     if (body === null || typeof body !== 'object'
       || typeof body['routerSystemPrompt'] !== 'string' || typeof body['routerModel'] !== 'string') {
       throw new LedgerError('bad-request', 'routerSystemPrompt 与 routerModel(字符串) 必填')
@@ -336,7 +368,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     if (request.method === 'GET') {
       return { status: 200, body: JSON.stringify(await deps.getSpawnMode()) }
     }
-    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    const body = await readJsonBody(request) as Record<string, unknown>
     const mode = body['mode']
     if (mode !== 'cache-priority' && mode !== 'minimal-face') {
       throw new LedgerError('bad-request', "mode 必须是 'cache-priority' | 'minimal-face' 之一")
@@ -355,7 +387,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
       const prompt = await deps.getSessionPrompt(sessionId)
       return { status: 200, body: JSON.stringify(prompt) }
     }
-    const body = JSON.parse(await readBody(request)) as Record<string, unknown>
+    const body = await readJsonBody(request) as Record<string, unknown>
     if (body === null || typeof body !== 'object'
       || typeof body['sessionId'] !== 'string' || body['sessionId'] === ''
       || typeof body['prompt'] !== 'string') {
@@ -368,7 +400,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   /* ── 用户控制与紧急暂停（v1.2 Task B4）：逻辑在 deps（根服务组装），此处只折叠 HTTP ── */
 
   handle(ROUTER_TASKS_CONTROL_PATH, ['POST'], async (request) => {
-    const body = JSON.parse(await readBody(request)) as { taskId?: unknown; action?: unknown }
+    const body = await readJsonBody(request) as { taskId?: unknown; action?: unknown }
     if (typeof body.taskId !== 'string' || body.taskId === '') {
       throw new LedgerError('bad-request', 'taskId 必填')
     }

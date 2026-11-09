@@ -154,6 +154,12 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     return deps.workspacesList?.getSnapshot().items ?? []
   }
 
+  // 门控重开 + 在途快照作废。用闭包而非 this：store 方法可能被解构调用。
+  function reopenGate(): void {
+    mutationSeq += 1
+    lastGateKey = undefined
+  }
+
   return {
     get: () => state,
 
@@ -165,6 +171,9 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     setCurrentSession(sessionId) {
       if (state.currentSessionId === sessionId) return
       apply(() => ({ ...state, currentSessionId: sessionId }))
+      // 会话切换（含新建 Router 被打开）重开门控：否则门控一旦因「本工作区无
+      // Router」关闭就永不重开，picker 自建的首个 Router 永远不被轮询/收编发现。
+      reopenGate()
     },
 
     pollIntervalMs: () => prefs.get().pollMs,
@@ -174,8 +183,7 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     invalidateGate(): void {
       // 本工作区发生了服务端会关心的变化（如创建了首个 Router）：
       // 门控重开 + 在途快照作废，下一次 tick 立即拉真。
-      mutationSeq += 1
-      lastGateKey = undefined
+      reopenGate()
     },
 
     async pollOnce(): Promise<void> {

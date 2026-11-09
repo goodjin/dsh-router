@@ -101,15 +101,15 @@ describe('GET /router/health：诊断路由', () => {
     expect(captured.status).toBe(405)
   })
 
-  it('getHealth 抛错：500 + { error }（不裸崩）', async () => {
+  it('getHealth 抛错：500 + 通用 { error }（不裸崩，也不泄露原始 message/路径）', async () => {
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, healthDeps(async () => {
-      throw new Error('boom')
+      throw new Error('boom /Users/secret/path')
     }))
     const route = routes.find((entry) => entry.path === ROUTER_HEALTH_PATH)!
     const { req, res, captured } = fakeExchange('GET', ROUTER_HEALTH_PATH)
     await route.handler(req, res)
     expect(captured.status).toBe(500)
-    expect(JSON.parse(captured.body)).toEqual({ error: 'boom' })
+    expect(JSON.parse(captured.body)).toEqual({ error: 'internal error' })
   })
 })

@@ -112,6 +112,7 @@ export class CircuitBreaker {
     completions: [],
   }
   private loaded = false
+  private loadPromise: Promise<void> | undefined
 
   constructor(deps: CircuitBreakerDeps) {
     this.fs = deps.fs
@@ -128,8 +129,15 @@ export class CircuitBreaker {
   }
 
   /** 首次访问时从持久化装载（构造函数保持同步；坏文件/版本不符从空白开始）。 */
-  private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return
+  private ensureLoaded(): Promise<void> {
+    if (this.loaded) return Promise.resolve()
+    // 并发首访共用同一次装载：否则两个调用都见 loaded=false 各自读盘，
+    // 后完成的装载会把先完成者已做的内存增量（push/prune）整片覆盖回磁盘快照。
+    this.loadPromise ??= this.loadFromDisk().then(() => { this.loaded = true })
+    return this.loadPromise
+  }
+
+  private async loadFromDisk(): Promise<void> {
     try {
       const parsed = JSON.parse(await this.fs.readFile(this.path)) as Partial<GuardStateFile> | null
       if (parsed !== null && typeof parsed === 'object' && parsed.schemaVersion === 1) {
@@ -146,7 +154,6 @@ export class CircuitBreaker {
     } catch {
       // 首启无文件或文件损坏：从空白状态开始（未冻结）。
     }
-    this.loaded = true
   }
 
   /** 状态落盘（mkdirp 父目录；失败只告警，内存熔断仍生效）。 */

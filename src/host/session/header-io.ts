@@ -1412,7 +1412,10 @@ export class SessionHeaderReader {
     )
     if (raced.kind === 'value') return raced.value
     if (raced.kind === 'error') {
-      return { reason: 'aborted' as const, error: 'header read aborted', stats: { bytesCompressed: frame.length, bytesDecompressed: 0 } }
+      // 真同步异常（createStream 抛错/解码失败）是 unreadable，不是 aborted：
+      // aborted 会被索引当成可重试的瞬态态重新排到队首，损坏会话永远解码失败
+      // 就会卡死队首（饿死后续会话）。真正的中断走 expired/value 的 aborted 路。
+      return { reason: 'unreadable' as const, error: `session ${sessionId}: zstd decode failed: ${raced.error instanceof Error ? raced.error.message : String(raced.error)}`, stats: { bytesCompressed: frame.length, bytesDecompressed: 0 } }
     }
     if (raced.kind === 'busy') {
       stream?.destroy(new Error('io budget exhausted'))

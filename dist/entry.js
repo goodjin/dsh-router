@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import Schema from "@deepseek-ai/schemastery";
@@ -116,12 +116,14 @@ function formatTaskId(n) {
 */
 function findDependencyCycle(edges, start) {
 	const visiting = /* @__PURE__ */ new Set();
+	const done = /* @__PURE__ */ new Set();
 	const stack = [];
 	const visit = (node) => {
 		if (visiting.has(node)) {
 			const from = stack.indexOf(node);
 			return [...stack.slice(from), node];
 		}
+		if (done.has(node)) return null;
 		visiting.add(node);
 		stack.push(node);
 		for (const dep of edges.get(node) ?? []) {
@@ -129,6 +131,8 @@ function findDependencyCycle(edges, start) {
 			if (cycle) return cycle;
 		}
 		stack.pop();
+		visiting.delete(node);
+		done.add(node);
 		return null;
 	};
 	return visit(start);
@@ -141,6 +145,8 @@ var TaskLedger = class {
 	nextTaskNumber = 1;
 	questions = [];
 	loaded = false;
+	/** 写串行化链：所有 commit 依次排队，杜绝并发写互抹与 save 乱序覆盖。 */
+	writeChain = Promise.resolve();
 	constructor(persistence, clock = Date.now) {
 		this.persistence = persistence;
 		this.clock = clock;
@@ -169,21 +175,36 @@ var TaskLedger = class {
 	* 写操作统一通道：备份 → 校验并变更内存（校验抛错则状态未动、不触发保存）
 	* → 保存新状态 → 保存失败回滚内存并抛 persistence-failed。
 	*/
-	async commit(mutate) {
-		await this.ensureLoaded();
-		const backupTasks = structuredClone(this.tasks);
-		const backupNext = this.nextTaskNumber;
-		const backupQuestions = structuredClone(this.questions);
-		const value = mutate();
-		try {
-			await this.persistence.save(this.currentFile());
-		} catch (cause) {
-			this.tasks = backupTasks;
-			this.nextTaskNumber = backupNext;
-			this.questions = backupQuestions;
-			throw new LedgerError("persistence-failed", `账本保存失败，内存已回滚: ${String(cause)}`, { cause });
-		}
-		return value;
+	commit(mutate) {
+		const run = this.writeChain.then(async () => {
+			await this.ensureLoaded();
+			const backupTasks = structuredClone(this.tasks);
+			const backupNext = this.nextTaskNumber;
+			const backupQuestions = structuredClone(this.questions);
+			let value;
+			try {
+				value = mutate();
+				await this.persistence.save(this.currentFile());
+			} catch (cause) {
+				this.tasks = backupTasks;
+				this.nextTaskNumber = backupNext;
+				this.questions = backupQuestions;
+				if (cause instanceof LedgerError) throw cause;
+				throw new LedgerError("persistence-failed", `账本保存失败，内存已回滚: ${String(cause)}`, { cause });
+			}
+			return value;
+		});
+		this.writeChain = run.then(() => void 0, () => void 0);
+		return run;
+	}
+	/** 串行只读判定：与写共用一条链保证一致性，但不保存（纯幂等无变更不落盘）。 */
+	readLocked(fn) {
+		const run = this.writeChain.then(async () => {
+			await this.ensureLoaded();
+			return fn();
+		});
+		this.writeChain = run.then(() => void 0, () => void 0);
+		return run;
 	}
 	/** 取任务，不存在抛 task-not-found。 */
 	mustGet(id) {
@@ -207,38 +228,37 @@ var TaskLedger = class {
 	}
 	/** 创建任务：分配单调 ID、依赖图查环；依赖未满足落 queued，否则 draft。 */
 	async createTask(input) {
-		await this.ensureLoaded();
-		const id = formatTaskId(this.nextTaskNumber);
 		const dependsOn = input.dependsOn ?? [];
-		const edges = new Map(this.tasks.map((t) => [t.id, t.dependsOn]));
-		edges.set(id, dependsOn);
-		const cycle = findDependencyCycle(edges, id);
-		if (cycle) throw new LedgerError("dependency-cycle", `依赖环: ${cycle.join(" → ")}`);
-		const depsSatisfied = dependsOn.every((depId) => {
-			const dep = this.tasks.find((t) => t.id === depId);
-			return dep !== void 0 && dep.status === "completed";
-		});
-		const now = this.clock();
-		const record = {
-			id,
-			title: input.title,
-			goal: input.goal,
-			acceptance: input.acceptance ?? [],
-			constraints: input.constraints ?? [],
-			projectId: input.projectId,
-			cwd: input.cwd,
-			role: input.role,
-			templateId: input.templateId,
-			parentId: input.parentId,
-			dependsOn,
-			status: depsSatisfied ? "draft" : "queued",
-			docVersion: 1,
-			retryCount: 0,
-			acceptancePolicy: input.acceptancePolicy ?? "auto",
-			createdAt: now,
-			updatedAt: now
-		};
 		return this.commit(() => {
+			const id = formatTaskId(this.nextTaskNumber);
+			const edges = new Map(this.tasks.map((t) => [t.id, t.dependsOn]));
+			edges.set(id, dependsOn);
+			const cycle = findDependencyCycle(edges, id);
+			if (cycle) throw new LedgerError("dependency-cycle", `依赖环: ${cycle.join(" → ")}`);
+			const depsSatisfied = dependsOn.every((depId) => {
+				const dep = this.tasks.find((t) => t.id === depId);
+				return dep !== void 0 && dep.status === "completed";
+			});
+			const now = this.clock();
+			const record = {
+				id,
+				title: input.title,
+				goal: input.goal,
+				acceptance: input.acceptance ?? [],
+				constraints: input.constraints ?? [],
+				projectId: input.projectId,
+				cwd: input.cwd,
+				role: input.role,
+				templateId: input.templateId,
+				parentId: input.parentId,
+				dependsOn,
+				status: depsSatisfied ? "draft" : "queued",
+				docVersion: 1,
+				retryCount: 0,
+				acceptancePolicy: input.acceptancePolicy ?? "auto",
+				createdAt: now,
+				updatedAt: now
+			};
 			this.tasks.push(record);
 			this.nextTaskNumber += 1;
 			return record;
@@ -306,14 +326,40 @@ var TaskLedger = class {
 	* 策略：auto 且无未结子任务 → completed；否则 → review-pending。
 	*/
 	async complete(id, input) {
-		await this.ensureLoaded();
-		const task = this.mustGet(id);
-		if (input.docVersion !== task.docVersion) throw new LedgerError("stale-version", `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`);
-		if (task.status === "completed") return task;
-		if (task.status === "review-pending" && task.result) return task;
-		return this.commit(() => {
+		const decision = await this.readLocked(() => {
+			const task = this.mustGet(id);
+			if (input.docVersion !== task.docVersion) throw new LedgerError("stale-version", `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`);
+			if (task.status === "completed") return {
+				task,
+				write: false
+			};
 			const openSubtasks = this.tasks.filter((t) => t.parentId === id && !isTerminal(t.status));
-			const target = task.acceptancePolicy === "auto" && openSubtasks.length === 0 ? "completed" : "review-pending";
+			const canComplete = task.acceptancePolicy === "auto" && openSubtasks.length === 0;
+			if (task.status === "review-pending" && task.result && !canComplete) return {
+				task,
+				write: false
+			};
+			return {
+				task,
+				write: true
+			};
+		});
+		if (!decision.write) return decision.task;
+		return this.commit(() => {
+			const task = this.mustGet(id);
+			if (input.docVersion !== task.docVersion) throw new LedgerError("stale-version", `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`);
+			if (task.status === "completed") return task;
+			const openSubtasks = this.tasks.filter((t) => t.parentId === id && !isTerminal(t.status));
+			const canComplete = task.acceptancePolicy === "auto" && openSubtasks.length === 0;
+			if (task.status === "review-pending" && task.result) {
+				if (canComplete) {
+					assertTransition(task.status, "completed");
+					task.status = "completed";
+					task.updatedAt = this.clock();
+				}
+				return task;
+			}
+			const target = canComplete ? "completed" : "review-pending";
 			assertTransition(task.status, target);
 			task.result = {
 				summary: input.summary,
@@ -1796,21 +1842,38 @@ var AnswerRelay = class {
 			parked.resolve = resolve;
 			parked.reject = reject;
 		});
+		if (request.signal?.aborted) throw new LedgerError("question-cancelled", `问题已被中止: ${questionId}`);
 		this.parked.set(questionId, parked);
 		const summary = request.questions.length > 1 ? `${request.questions[0]?.question ?? ""} 等 ${request.questions.length} 个问题` : request.questions[0]?.question ?? "";
-		await this.ledger.addQuestion({
-			id: questionId,
-			taskId: taskRecord.id,
-			question: summary,
-			status: "open",
-			createdAt: receivedAt
-		});
-		request.signal?.addEventListener("abort", () => {
+		const signal = request.signal;
+		let aborted = false;
+		const onAbort = () => {
+			aborted = true;
 			if (!this.parked.has(questionId)) return;
 			this.parked.delete(questionId);
 			parked.reject(new LedgerError("question-cancelled", `问题已被中止: ${questionId}`));
-			this.ledger.settleQuestion(questionId, "expired", "问题被中止");
-		}, { once: true });
+			this.ledger.settleQuestion(questionId, "expired", "问题被中止").catch(() => {});
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		try {
+			await this.ledger.addQuestion({
+				id: questionId,
+				taskId: taskRecord.id,
+				question: summary,
+				status: "open",
+				createdAt: receivedAt
+			});
+		} catch (error) {
+			signal?.removeEventListener("abort", onAbort);
+			this.parked.delete(questionId);
+			throw error;
+		}
+		if (aborted) {
+			signal?.removeEventListener("abort", onAbort);
+			this.parked.delete(questionId);
+			await this.ledger.settleQuestion(questionId, "expired", "问题被中止").catch(() => {});
+			parked.reject(new LedgerError("question-cancelled", `问题已被中止: ${questionId}`));
+		}
 		return gate;
 	}
 	/** 当前待答问题（Router 界面浮窗与 GET /router/state 的数据源）。 */
@@ -3646,8 +3709,8 @@ var SessionHeaderReader = class {
 		});
 		if (raced.kind === "value") return raced.value;
 		if (raced.kind === "error") return {
-			reason: "aborted",
-			error: "header read aborted",
+			reason: "unreadable",
+			error: `session ${sessionId}: zstd decode failed: ${raced.error instanceof Error ? raced.error.message : String(raced.error)}`,
 			stats: {
 				bytesCompressed: frame.length,
 				bytesDecompressed: 0
@@ -4097,6 +4160,7 @@ var SessionHeaderIndex = class {
 					this.dropEntry(id);
 					this.dequeue(id);
 					this.failures.delete(id);
+					this.forgetSessionAuxiliaries(id);
 					this.recomputeNextRetryAt();
 					this.markDirty();
 				}
@@ -5025,6 +5089,21 @@ var SessionHeaderIndex = class {
 		if (previous !== void 0) this.bumpAuthority(sessionId);
 		this.syncRouterGrant(sessionId);
 	}
+	/**
+	* 彻底遗忘一个已确认消失的会话的辅助记账（审查：revisions/authorityTokens/
+	* grantState 按 id 无限累积，长运行宿主慢泄漏）。只在「对账确认磁盘无此会话
+	* 且无 live 实例」处调用——该点与 advance/verify 同一串行链，没有在途计划持有
+	* 旧 token；重新出现会经 putEntry 从全局单调代际重新发授予，不与旧计划撞代。
+	* 不在 dropEntry 内做：dropEntry 也用于「指纹变了→重判」，那时不能清记账。
+	*/
+	forgetSessionAuxiliaries(sessionId) {
+		if (this.liveInstances.has(sessionId)) return;
+		this.revisions.delete(sessionId);
+		this.authorityTokens.delete(sessionId);
+		this.grantState.delete(sessionId);
+		this.pendingGrants.delete(sessionId);
+		this.claimedGrants.delete(sessionId);
+	}
 	/** 生命周期代际 +1（任何影响授权的事实变化）。 */
 	bumpAuthority(sessionId) {
 		this.authorityTokens.set(sessionId, (this.authorityTokens.get(sessionId) ?? 0) + 1);
@@ -5671,6 +5750,16 @@ function readBody(request) {
 	});
 }
 /**
+* 读并解析 JSON 请求体为对象。JSON.parse("null")/数字/字符串/数组都合法 JSON
+* 但不是对象，后续 body.xxx 取值会在 null 上抛 TypeError 落 500——统一在边界
+* 拒成 400，避免把客户端坏输入当成内部错误（也避免 500 泄露堆栈/路径）。
+*/
+async function readJsonBody(request) {
+	const parsed = JSON.parse(await readBody(request));
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new LedgerError("bad-request", "请求体须为 JSON 对象");
+	return parsed;
+}
+/**
 * 挂 exact 路由。webServer/connection 缺席时不挂（观测面不挡装载）；
 * 每条路由先过 connection.admit 同一登录准入，再校验方法（一条路径可声明
 * 多个合法方法，如 worker-types 的 GET/POST/DELETE），再进逻辑。
@@ -5701,7 +5790,9 @@ function registerRouterRoutes(ctx, deps) {
 					const { status, body } = await logic(request);
 					respondJson(response, status, body);
 				} catch (error) {
-					respondJson(response, errorStatus(error), JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+					const status = errorStatus(error);
+					const message = status >= 500 ? "internal error" : error instanceof Error ? error.message : String(error);
+					respondJson(response, status, JSON.stringify({ error: message }));
 				}
 			}
 		}), `dsh-router: ${allow} ${path}`);
@@ -5715,7 +5806,7 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(ROUTER_SESSION_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.workspaceId !== "string" || body.workspaceId === "") throw new LedgerError("bad-request", "workspaceId 必填");
 		const name$1 = typeof body.name === "string" && body.name !== "" ? body.name : void 0;
 		const created = await deps.createRouterSession(body.workspaceId, name$1);
@@ -5725,16 +5816,30 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(ROUTER_ANSWER_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.questionId !== "string" || !Array.isArray(body.answers)) throw new LedgerError("bad-request", "questionId 与 answers 必填");
-		await deps.answerQuestion(body.questionId, body.answers);
+		const answers = body.answers.map((item) => {
+			if (item === null || typeof item !== "object") throw new LedgerError("bad-request", "answers 条目须为对象");
+			const record = item;
+			if (typeof record.id !== "string" || !Array.isArray(record.selected) || !record.selected.every((s) => typeof s === "string")) throw new LedgerError("bad-request", "answers 条目须含 id 与字符串数组 selected");
+			if (record.custom !== void 0 && typeof record.custom !== "string") throw new LedgerError("bad-request", "answers 条目的 custom 须为字符串");
+			return record.custom === void 0 ? {
+				id: record.id,
+				selected: record.selected
+			} : {
+				id: record.id,
+				selected: record.selected,
+				custom: record.custom
+			};
+		});
+		await deps.answerQuestion(body.questionId, answers);
 		return {
 			status: 200,
 			body: JSON.stringify({ ok: true })
 		};
 	});
 	handle(ROUTER_TABS_CLOSE_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.workspaceId !== "string" || typeof body.sessionId !== "string") throw new LedgerError("bad-request", "workspaceId 与 sessionId 必填");
 		await deps.closeTab(body.workspaceId, body.sessionId);
 		return {
@@ -5752,7 +5857,7 @@ function registerRouterRoutes(ctx, deps) {
 			body: JSON.stringify(await deps.listWorkerTypes())
 		};
 		if (request.method === "POST") {
-			const input = sanitizeCreateInput(JSON.parse(await readBody(request)));
+			const input = sanitizeCreateInput(await readJsonBody(request));
 			const created = await deps.createWorkerType(input);
 			return {
 				status: 200,
@@ -5768,7 +5873,7 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(WORKER_TYPES_UPDATE_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.templateId !== "string" || body.templateId === "" || body.patch === null || typeof body.patch !== "object") throw new LedgerError("bad-request", "templateId 与 patch 必填");
 		const request_ = {
 			templateId: body.templateId,
@@ -5781,7 +5886,7 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(WORKER_TYPES_ENABLED_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.templateId !== "string" || body.templateId === "" || typeof body.enabled !== "boolean") throw new LedgerError("bad-request", "templateId 与 enabled(布尔) 必填");
 		const request_ = {
 			templateId: body.templateId,
@@ -5794,7 +5899,7 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(ROUTER_NOTIFICATIONS_ACK_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (body === null || typeof body !== "object" || typeof body["cardId"] !== "string" || body["cardId"] === "") throw new LedgerError("bad-request", "cardId(字符串) 必填");
 		if (!await deps.ackNotification(body["cardId"])) throw new LedgerError("card-not-found", `通知卡不存在或已确认: ${body["cardId"]}`);
 		return {
@@ -5807,7 +5912,7 @@ function registerRouterRoutes(ctx, deps) {
 			status: 200,
 			body: JSON.stringify(await deps.getDefaults())
 		};
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (body === null || typeof body !== "object" || typeof body["routerSystemPrompt"] !== "string" || typeof body["routerModel"] !== "string") throw new LedgerError("bad-request", "routerSystemPrompt 与 routerModel(字符串) 必填");
 		const saved = await deps.saveDefaults({
 			routerSystemPrompt: body["routerSystemPrompt"],
@@ -5823,7 +5928,7 @@ function registerRouterRoutes(ctx, deps) {
 			status: 200,
 			body: JSON.stringify(await deps.getSpawnMode())
 		};
-		const mode = JSON.parse(await readBody(request))["mode"];
+		const mode = (await readJsonBody(request))["mode"];
 		if (mode !== "cache-priority" && mode !== "minimal-face") throw new LedgerError("bad-request", "mode 必须是 'cache-priority' | 'minimal-face' 之一");
 		const saved = await deps.saveSpawnMode(mode);
 		return {
@@ -5841,7 +5946,7 @@ function registerRouterRoutes(ctx, deps) {
 				body: JSON.stringify(prompt)
 			};
 		}
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (body === null || typeof body !== "object" || typeof body["sessionId"] !== "string" || body["sessionId"] === "" || typeof body["prompt"] !== "string") throw new LedgerError("bad-request", "sessionId(字符串) 与 prompt(字符串) 必填；prompt 空串 = 清除覆盖");
 		await deps.saveSessionPrompt(body["sessionId"], body["prompt"]);
 		return {
@@ -5850,7 +5955,7 @@ function registerRouterRoutes(ctx, deps) {
 		};
 	});
 	handle(ROUTER_TASKS_CONTROL_PATH, ["POST"], async (request) => {
-		const body = JSON.parse(await readBody(request));
+		const body = await readJsonBody(request);
 		if (typeof body.taskId !== "string" || body.taskId === "") throw new LedgerError("bad-request", "taskId 必填");
 		const action = body.action;
 		if (action !== "pause" && action !== "resume" && action !== "cancel" && action !== "redispatch") throw new LedgerError("bad-request", "action 必须是 'pause' | 'resume' | 'cancel' | 'redispatch' 之一");
@@ -6339,94 +6444,95 @@ function createRouterCore(deps) {
 	* 启动装载后维护），缺席退回 v1 Config 模板（降级兼容）。
 	*/
 	const enabledTemplates = () => deps.types !== void 0 ? deps.types.enabled() : [...config.templates];
-	return {
-		core: {
-			enabledTemplates,
-			listWorkerTypes() {
-				return deps.types !== void 0 ? deps.types.summaries() : config.templates.map((template) => ({
-					...template,
-					enabled: true,
-					origin: "user"
-				}));
-			},
-			async createWorkerType(callerSessionId$1, input) {
-				await assertDispatchOpen();
-				const face = deps.types;
-				if (face?.createRouterType === void 0) throw new LedgerError("types-unavailable", "类型存储未接线（WorkerTypesFace.createRouterType 缺席），无法现场创建 worker 类型");
-				const { record, presetRegistered } = await face.createRouterType(input);
+	const core = {
+		enabledTemplates,
+		listWorkerTypes() {
+			return deps.types !== void 0 ? deps.types.summaries() : config.templates.map((template) => ({
+				...template,
+				enabled: true,
+				origin: "user"
+			}));
+		},
+		async createWorkerType(callerSessionId$1, input) {
+			await assertDispatchOpen();
+			const face = deps.types;
+			if (face?.createRouterType === void 0) throw new LedgerError("types-unavailable", "类型存储未接线（WorkerTypesFace.createRouterType 缺席），无法现场创建 worker 类型");
+			const { record, presetRegistered } = await face.createRouterType(input);
+			return {
+				templateId: record.templateId,
+				presetRegistered
+			};
+		},
+		async dispatchTask(callerSessionId$1, input) {
+			await assertDispatchOpen();
+			assertTemplateUsable(input.templateId, enabledTemplates());
+			const callerTask = await taskBySession(callerSessionId$1);
+			const callerRole = callerTask?.role ?? "router";
+			const parentTaskId = callerTask?.id;
+			const verdict = scheduler.dispatchGuard({
+				sessionIdRole: callerRole,
+				parentTaskId,
+				depth: parentTaskId !== void 0 ? depthOf(ledger, parentTaskId) : 0
+			}, {
+				role: input.role,
+				dependsOn: input.dependsOn?.map((ref) => ref.taskId)
+			});
+			if (!verdict.ok) throw new LedgerError(verdict.code, `派发被拒（${verdict.code}）：${dispatchRejectionText(verdict.code, callerRole)}`);
+			if (deps.budgets !== void 0) if (callerRole === "supervisor") {
+				if (deps.budgets.supervisorFrozen(callerSessionId$1)) throw new LedgerError("supervisor-failure-budget", `连续 ${deps.budgets.snapshot(callerSessionId$1).consecutiveDispatchFailures} 次派发失败，你的派发已被冻结：请停止重试，调用 report_blocker 向用户报告阻塞`);
+			} else {
+				const budgetVerdict = deps.budgets.tryConsumeTaskDispatch(callerSessionId$1);
+				if (!budgetVerdict.ok) throw new LedgerError(budgetVerdict.code, `本轮（当前用户消息）已派发过 ${deps.budgets.snapshot(callerSessionId$1).taskLimitPerTurn} 个任务。要派第二个任务，请先调用 ask_user 列出计划与理由征得用户确认；确认后预算清零重计`);
+			}
+			const workspace = workspaceOfSession(callerSessionId$1);
+			const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd();
+			const projectId = workspace?.id ?? `cwd:${cwd}`;
+			const record = await ledger.createTask({
+				title: input.title,
+				goal: input.goal,
+				acceptance: input.acceptance,
+				constraints: input.constraints ?? [],
+				projectId,
+				cwd,
+				role: input.role,
+				templateId: input.templateId,
+				parentId: parentTaskId,
+				dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
+				acceptancePolicy: "auto"
+			});
+			const docs = deps.docsFor(record.cwd);
+			const book = renderTaskBook(record, {
+				materials: input.materials,
+				sourceRef: `router 会话 ${callerSessionId$1}`
+			});
+			const docPath = await docs.initTask(record, book);
+			await deps.breaker?.recordCreation(record.id, now());
+			try {
+				const { sessionId } = await bridge.dispatchTask(record.id, { forkFrom: callerSessionId$1 });
+				deps.budgets?.recordDispatchSuccess(callerSessionId$1);
+				driver.onDispatched(callerSessionId$1);
+				await afterDispatch(record, sessionId, workspace?.id);
 				return {
-					templateId: record.templateId,
-					presetRegistered
+					taskId: record.id,
+					docPath,
+					sessionId
 				};
-			},
-			async dispatchTask(callerSessionId$1, input) {
-				await assertDispatchOpen();
-				assertTemplateUsable(input.templateId, enabledTemplates());
-				const callerTask = await taskBySession(callerSessionId$1);
-				const callerRole = callerTask?.role ?? "router";
-				const parentTaskId = input.parentTaskId;
-				const verdict = scheduler.dispatchGuard({
-					sessionIdRole: callerRole,
-					parentTaskId,
-					depth: parentTaskId !== void 0 ? depthOf(ledger, parentTaskId) : 0
-				}, {
-					role: input.role,
-					dependsOn: input.dependsOn?.map((ref) => ref.taskId)
-				});
-				if (!verdict.ok) throw new LedgerError(verdict.code, `派发被拒（${verdict.code}）：${dispatchRejectionText(verdict.code, callerRole)}`);
-				if (deps.budgets !== void 0) if (callerRole === "supervisor") {
-					if (deps.budgets.supervisorFrozen(callerSessionId$1)) throw new LedgerError("supervisor-failure-budget", `连续 ${deps.budgets.snapshot(callerSessionId$1).consecutiveDispatchFailures} 次派发失败，你的派发已被冻结：请停止重试，调用 report_blocker 向用户报告阻塞`);
-				} else {
-					const budgetVerdict = deps.budgets.tryConsumeTaskDispatch(callerSessionId$1);
-					if (!budgetVerdict.ok) throw new LedgerError(budgetVerdict.code, `本轮（当前用户消息）已派发过 ${deps.budgets.snapshot(callerSessionId$1).taskLimitPerTurn} 个任务。要派第二个任务，请先调用 ask_user 列出计划与理由征得用户确认；确认后预算清零重计`);
-				}
-				const workspace = workspaceOfSession(callerSessionId$1);
-				const cwd = workspace?.path ?? callerTask?.cwd ?? process.cwd();
-				const projectId = workspace?.id ?? `cwd:${cwd}`;
-				const record = await ledger.createTask({
-					title: input.title,
-					goal: input.goal,
-					acceptance: input.acceptance,
-					constraints: input.constraints ?? [],
-					projectId,
-					cwd,
-					role: input.role,
-					templateId: input.templateId,
-					parentId: parentTaskId,
-					dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
-					acceptancePolicy: "auto"
-				});
-				const docs = deps.docsFor(record.cwd);
-				const book = renderTaskBook(record, {
-					materials: input.materials,
-					sourceRef: `router 会话 ${callerSessionId$1}`
-				});
-				const docPath = await docs.initTask(record, book);
-				await deps.breaker?.recordCreation(record.id, now());
-				try {
-					const { sessionId } = await bridge.dispatchTask(record.id, { forkFrom: callerSessionId$1 });
-					deps.budgets?.recordDispatchSuccess(callerSessionId$1);
-					driver.onDispatched(callerSessionId$1);
-					await afterDispatch(record, sessionId, workspace?.id);
-					return {
-						taskId: record.id,
-						docPath,
-						sessionId
-					};
-				} catch (error) {
-					deps.budgets?.recordDispatchFailure(callerSessionId$1);
-					const failed = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId$1);
-					await refreshSnapshot();
-					throw new LedgerError("dispatch-failed", `任务 ${record.id} 派发失败（第 ${failed.retryCount} 次，任务保持${failed.status === "blocked" ? "blocked" : record.status}）: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			},
-			async supplementTask(callerSessionId$1, taskId, additions) {
-				const record = ledger.get(taskId);
-				if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
-				if (isTerminal(record.status)) throw new LedgerError("illegal-transition", `终态任务不可补充: ${taskId}（${record.status}）`);
-				const fromVersion = record.docVersion;
-				const newVersion = await ledger.supplement(taskId, additions);
-				await deps.docsFor(record.cwd).supplement(taskId, fromVersion, additions);
+			} catch (error) {
+				deps.budgets?.recordDispatchFailure(callerSessionId$1);
+				const failed = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId$1);
+				await refreshSnapshot();
+				throw new LedgerError("dispatch-failed", `任务 ${record.id} 派发失败（第 ${failed.retryCount} 次，任务保持${failed.status === "blocked" ? "blocked" : record.status}）: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		},
+		async supplementTask(callerSessionId$1, taskId, additions) {
+			await assertDispatchOpen();
+			const callerRole = (await taskBySession(callerSessionId$1))?.role ?? "router";
+			const record = ledger.get(taskId);
+			if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
+			if (isTerminal(record.status)) throw new LedgerError("illegal-transition", `终态任务不可补充: ${taskId}（${record.status}）`);
+			const newVersion = await withTaskLock(taskId, async () => {
+				const bumped = await ledger.supplement(taskId, additions);
+				await deps.docsFor(record.cwd).supplement(taskId, bumped - 1, additions);
 				let delivered;
 				try {
 					delivered = await bridge.supplementTo(taskId);
@@ -6451,162 +6557,177 @@ function createRouterCore(deps) {
 						const dispatched = ledger.get(taskId);
 						await afterDispatch(dispatched, delivered.sessionId, dispatched.projectId.startsWith("cwd:") ? void 0 : dispatched.projectId);
 					}
-				} else await withTaskLock(taskId, async () => {
-					const live = ledger.get(taskId);
-					if (!(live.sessionId === void 0 && (live.status === "draft" || live.status === "queued") && await depsSatisfied(taskId))) return;
-					try {
-						const { sessionId } = await bridge.dispatchTask(taskId);
-						deps.budgets?.recordDispatchSuccess(callerSessionId$1);
-						if (sessionId !== void 0) driver.onDispatched(sessionId);
-						driver.onDispatched(callerSessionId$1);
-						const dispatched = ledger.get(taskId);
-						await afterDispatch(dispatched, sessionId, dispatched.projectId.startsWith("cwd:") ? void 0 : dispatched.projectId);
-					} catch (error) {
-						deps.budgets?.recordDispatchFailure(callerSessionId$1);
-						const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId$1);
-						await refreshSnapshot();
-						throw new LedgerError("dispatch-failed", `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === "blocked" ? "blocked" : live.status}）: ${error instanceof Error ? error.message : String(error)}`);
-					}
-				});
-				await refreshSnapshot();
-				return { docVersion: newVersion };
-			},
-			async queryTasks(filter, viewerSessionId) {
-				const records = await ledger.listAll();
-				const counts = await waitingCounts();
-				let cards = records.map((record) => toCard(record, counts[record.id] ?? 0));
-				if (filter?.status !== void 0 && filter.status.length > 0) {
-					const wanted = new Set(filter.status);
-					cards = cards.filter((card) => wanted.has(card.status));
-				}
-				if (filter?.taskId !== void 0) cards = cards.filter((card) => card.taskId === filter.taskId);
-				const result = { tasks: cards };
-				if (deps.budgets !== void 0 && viewerSessionId !== void 0) result.budgets = deps.budgets.snapshot(viewerSessionId);
-				if (deps.breaker !== void 0) {
-					const breakerState = await deps.breaker.state();
-					const view = { frozen: breakerState.frozen };
-					if (breakerState.frozen) {
-						if (breakerState.reason !== void 0) view.reason = breakerState.reason;
-						if (breakerState.frozenAt !== void 0) view.frozenAt = breakerState.frozenAt;
-					}
-					result.breaker = view;
-				}
-				return result;
-			},
-			async controlTask(callerSessionId$1, taskId, action) {
-				const record = ledger.get(taskId);
-				if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
-				if (action === "pause") {
-					await ledger.transition(taskId, "paused");
-					if (record.sessionId !== void 0) await bridge.notify(record.sessionId, `pause-${taskId}`, `任务 ${taskId}「${record.title}」已暂停。请停止推进，等待恢复指示；不要提交完成。`);
-				} else if (action === "resume") {
-					await ledger.transition(taskId, "running");
-					if (record.sessionId !== void 0) await bridge.notify(record.sessionId, `resume-${taskId}`, `任务 ${taskId}「${record.title}」已恢复，请继续按任务书当前版本推进。`);
 				} else {
-					await ledger.cancel(taskId, `cancelled by ${callerSessionId$1}`);
-					await bridge.notifyCancel(taskId);
-				}
-				await refreshSnapshot();
-				return { status: ledger.get(taskId)?.status ?? record.status };
-			},
-			async searchHistory(_callerSessionId, query, scope) {
-				if (deps.memory === void 0) return {
-					hits: [],
-					note: "记忆服务未配置"
-				};
-				try {
-					return { hits: await deps.memory.search(query, scope) };
-				} catch (error) {
-					deps.logger?.warn(`记忆检索失败: ${error instanceof Error ? error.message : String(error)}`);
-					return {
-						hits: [],
-						note: "记忆检索失败"
-					};
-				}
-			},
-			async reportProgress(callerSessionId$1, taskId, progress) {
-				const record = mustOwn(callerSessionId$1, taskId);
-				await ledger.updateProgress(taskId, progress);
-				await deps.docsFor(record.cwd).writeProgress(taskId, progress);
-				await refreshSnapshot();
-				return { ok: true };
-			},
-			async completeTask(callerSessionId$1, taskId, input) {
-				const record = mustOwn(callerSessionId$1, taskId);
-				const wasTerminal = isTerminal(record.status);
-				const completed = await ledger.complete(taskId, {
-					docVersion: input.docVersion,
-					summary: input.summary,
-					deliverables: input.deliverables,
-					acceptanceEvidence: input.acceptanceEvidence,
-					openIssues: input.leftovers,
-					...input.deliveryOrigin !== void 0 ? { deliveryOrigin: input.deliveryOrigin } : {}
-				});
-				if (completed.result !== void 0) await deps.docsFor(record.cwd).writeResult(taskId, completed.result);
-				let pendingFrom;
-				if (completed.status === "review-pending") pendingFrom = completed.acceptancePolicy === "user" ? "user" : "supervisor";
-				if (completed.status === "completed" && !wasTerminal) {
-					await deps.breaker?.recordCompletion(taskId, now());
-					const cacheLine = completed.firstRequestCacheReadTokens !== void 0 ? `\n首请求缓存命中 ${completed.firstRequestCacheReadTokens} tok` : "";
-					await deps.notifications?.push({
-						kind: "completion",
-						taskId,
-						title: record.title,
-						summary: `${input.summary}${cacheLine}`,
-						actions: completionActions(),
-						deliveryOrigin: input.deliveryOrigin ?? "worker"
-					});
-					deps.memory?.onTaskCompleted({
-						taskId,
-						title: record.title,
-						summary: input.summary,
-						resultRelPath: `${deps.tasksDir ?? ".router"}/tasks/${taskId}/result.md`,
-						sessionId: record.sessionId
-					});
-					const parent = completed.parentId !== void 0 ? ledger.get(completed.parentId) : void 0;
-					if (parent?.sessionId !== void 0 && parent.sessionId !== callerSessionId$1) await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${input.summary}`);
-					const unlocked = await scheduler.onCompleted(taskId);
-					for (const nextTask of unlocked) try {
-						await withTaskLock(nextTask.id, async () => {
-							const delivered = await bridge.dispatchTask(nextTask.id);
-							const workspace = nextTask.projectId.startsWith("cwd:") ? void 0 : nextTask.projectId;
-							await afterDispatch(nextTask, delivered.sessionId, workspace);
-						});
-					} catch (error) {
-						await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId);
-						await refreshSnapshot();
-						deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（retryCount=${ledger.get(nextTask.id)?.retryCount}）: ${error instanceof Error ? error.message : String(error)}`);
+					const live = ledger.get(taskId);
+					if (live.sessionId === void 0 && (live.status === "draft" || live.status === "queued") && await depsSatisfied(taskId)) {
+						if (callerRole === "supervisor" && deps.budgets?.supervisorFrozen(callerSessionId$1)) throw new LedgerError("supervisor-failure-budget", `连续 ${deps.budgets.snapshot(callerSessionId$1).consecutiveDispatchFailures} 次派发失败，你的派发已被冻结：请停止重试，调用 report_blocker 向用户报告阻塞`);
+						try {
+							const { sessionId } = await bridge.dispatchTask(taskId);
+							deps.budgets?.recordDispatchSuccess(callerSessionId$1);
+							if (sessionId !== void 0) driver.onDispatched(sessionId);
+							driver.onDispatched(callerSessionId$1);
+							const dispatched = ledger.get(taskId);
+							await afterDispatch(dispatched, sessionId, dispatched.projectId.startsWith("cwd:") ? void 0 : dispatched.projectId);
+						} catch (error) {
+							deps.budgets?.recordDispatchFailure(callerSessionId$1);
+							const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId$1);
+							await refreshSnapshot();
+							throw new LedgerError("dispatch-failed", `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === "blocked" ? "blocked" : live.status}）: ${error instanceof Error ? error.message : String(error)}`);
+						}
 					}
 				}
-				await refreshSnapshot();
-				return pendingFrom !== void 0 ? {
-					accepted: completed.status === "completed",
-					status: completed.status,
-					pendingFrom
-				} : {
-					accepted: completed.status === "completed",
-					status: completed.status
-				};
-			},
-			async reportBlocker(callerSessionId$1, taskId, reason) {
-				mustOwn(callerSessionId$1, taskId);
-				const blocked = ledger.get(taskId);
-				await ledger.reportBlocker(taskId, reason);
-				await deps.notifications?.push({
-					kind: "anomaly",
-					taskId,
-					title: blocked?.title ?? taskId,
-					summary: reason,
-					actions: anomalyActions()
-				});
-				await refreshSnapshot();
-				return { status: "blocked" };
-			},
-			getTask(taskId) {
-				return ledger.get(taskId);
-			},
-			callerRoleOf
+				return bumped;
+			});
+			await refreshSnapshot();
+			return { docVersion: newVersion };
 		},
+		async queryTasks(filter, viewerSessionId) {
+			const records = await ledger.listAll();
+			const counts = await waitingCounts();
+			let cards = records.map((record) => toCard(record, counts[record.id] ?? 0));
+			if (filter?.status !== void 0 && filter.status.length > 0) {
+				const wanted = new Set(filter.status);
+				cards = cards.filter((card) => wanted.has(card.status));
+			}
+			if (filter?.taskId !== void 0) cards = cards.filter((card) => card.taskId === filter.taskId);
+			const result = { tasks: cards };
+			if (deps.budgets !== void 0 && viewerSessionId !== void 0) result.budgets = deps.budgets.snapshot(viewerSessionId);
+			if (deps.breaker !== void 0) {
+				const breakerState = await deps.breaker.state();
+				const view = { frozen: breakerState.frozen };
+				if (breakerState.frozen) {
+					if (breakerState.reason !== void 0) view.reason = breakerState.reason;
+					if (breakerState.frozenAt !== void 0) view.frozenAt = breakerState.frozenAt;
+				}
+				result.breaker = view;
+			}
+			return result;
+		},
+		async controlTask(callerSessionId$1, taskId, action) {
+			const record = ledger.get(taskId);
+			if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
+			if (action === "pause") {
+				await ledger.transition(taskId, "paused");
+				if (record.sessionId !== void 0) await bridge.notify(record.sessionId, `pause-${taskId}`, `任务 ${taskId}「${record.title}」已暂停。请停止推进，等待恢复指示；不要提交完成。`);
+			} else if (action === "resume") {
+				await ledger.transition(taskId, "running");
+				if (record.sessionId !== void 0) await bridge.notify(record.sessionId, `resume-${taskId}`, `任务 ${taskId}「${record.title}」已恢复，请继续按任务书当前版本推进。`);
+			} else {
+				await ledger.cancel(taskId, `cancelled by ${callerSessionId$1}`);
+				await bridge.notifyCancel(taskId);
+			}
+			await refreshSnapshot();
+			return { status: ledger.get(taskId)?.status ?? record.status };
+		},
+		async searchHistory(_callerSessionId, query, scope) {
+			if (deps.memory === void 0) return {
+				hits: [],
+				note: "记忆服务未配置"
+			};
+			try {
+				return { hits: await deps.memory.search(query, scope) };
+			} catch (error) {
+				deps.logger?.warn(`记忆检索失败: ${error instanceof Error ? error.message : String(error)}`);
+				return {
+					hits: [],
+					note: "记忆检索失败"
+				};
+			}
+		},
+		async reportProgress(callerSessionId$1, taskId, progress) {
+			const record = mustOwn(callerSessionId$1, taskId);
+			await ledger.updateProgress(taskId, progress);
+			await deps.docsFor(record.cwd).writeProgress(taskId, progress);
+			await refreshSnapshot();
+			return { ok: true };
+		},
+		async completeTask(callerSessionId$1, taskId, input) {
+			const record = mustOwn(callerSessionId$1, taskId);
+			const wasTerminal = isTerminal(record.status);
+			const completed = await ledger.complete(taskId, {
+				docVersion: input.docVersion,
+				summary: input.summary,
+				deliverables: input.deliverables,
+				acceptanceEvidence: input.acceptanceEvidence,
+				openIssues: input.leftovers,
+				...input.deliveryOrigin !== void 0 ? { deliveryOrigin: input.deliveryOrigin } : {}
+			});
+			if (completed.result !== void 0) await deps.docsFor(record.cwd).writeResult(taskId, completed.result);
+			let pendingFrom;
+			if (completed.status === "review-pending") pendingFrom = completed.acceptancePolicy === "user" ? "user" : "supervisor";
+			if (completed.status === "completed" && !wasTerminal) {
+				await deps.breaker?.recordCompletion(taskId, now());
+				const cacheLine = completed.firstRequestCacheReadTokens !== void 0 ? `\n首请求缓存命中 ${completed.firstRequestCacheReadTokens} tok` : "";
+				await deps.notifications?.push({
+					kind: "completion",
+					taskId,
+					title: record.title,
+					summary: `${input.summary}${cacheLine}`,
+					actions: completionActions(),
+					deliveryOrigin: input.deliveryOrigin ?? "worker"
+				});
+				deps.memory?.onTaskCompleted({
+					taskId,
+					title: record.title,
+					summary: input.summary,
+					resultRelPath: `${deps.tasksDir ?? ".router"}/tasks/${taskId}/result.md`,
+					sessionId: record.sessionId
+				});
+				const parent = completed.parentId !== void 0 ? ledger.get(completed.parentId) : void 0;
+				if (parent?.sessionId !== void 0 && parent.sessionId !== callerSessionId$1) await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${input.summary}`);
+				const unlocked = await scheduler.onCompleted(taskId);
+				for (const nextTask of unlocked) try {
+					await withTaskLock(nextTask.id, async () => {
+						const delivered = await bridge.dispatchTask(nextTask.id);
+						const workspace = nextTask.projectId.startsWith("cwd:") ? void 0 : nextTask.projectId;
+						await afterDispatch(nextTask, delivered.sessionId, workspace);
+					});
+				} catch (error) {
+					await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId);
+					await refreshSnapshot();
+					deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（retryCount=${ledger.get(nextTask.id)?.retryCount}）: ${error instanceof Error ? error.message : String(error)}`);
+				}
+				if (parent?.status === "review-pending" && parent.sessionId !== void 0 && parent.sessionId !== callerSessionId$1 && parent.result !== void 0) {
+					if (!(await ledger.listAll()).some((t) => t.parentId === parent.id && !isTerminal(t.status))) await core.completeTask(parent.sessionId, parent.id, {
+						docVersion: parent.docVersion,
+						summary: parent.result.summary,
+						deliverables: parent.result.deliverables,
+						acceptanceEvidence: parent.result.acceptanceEvidence,
+						leftovers: parent.result.openIssues
+					});
+				}
+			}
+			await refreshSnapshot();
+			return pendingFrom !== void 0 ? {
+				accepted: completed.status === "completed",
+				status: completed.status,
+				pendingFrom
+			} : {
+				accepted: completed.status === "completed",
+				status: completed.status
+			};
+		},
+		async reportBlocker(callerSessionId$1, taskId, reason) {
+			mustOwn(callerSessionId$1, taskId);
+			const blocked = ledger.get(taskId);
+			await ledger.reportBlocker(taskId, reason);
+			await deps.notifications?.push({
+				kind: "anomaly",
+				taskId,
+				title: blocked?.title ?? taskId,
+				summary: reason,
+				actions: anomalyActions()
+			});
+			await refreshSnapshot();
+			return { status: "blocked" };
+		},
+		getTask(taskId) {
+			return ledger.get(taskId);
+		},
+		callerRoleOf
+	};
+	return {
+		core,
 		workbench: {
 			async state(workspaceId) {
 				const records = await ledger.listAll();
@@ -7885,6 +8006,7 @@ var MemoryDocStore = class {
 	rootDir;
 	fs;
 	now;
+	writeChain = Promise.resolve();
 	constructor(rootDir, fs, options = {}) {
 		this.rootDir = rootDir;
 		this.fs = fs;
@@ -7910,55 +8032,64 @@ var MemoryDocStore = class {
 		if (scope === "session" && !key) throw new Error("MemoryDocStore: appendSummary session 作用域需要 key=sessionId");
 		const text = flattenText(entry.text);
 		if (text.length < LOW_INFO_MIN_CHARS) return { skipped: "low-info" };
-		const at = this.now();
-		const doc = await this.readDoc(scope, key) ?? this.emptyDoc(scope, key, at);
-		const anchor = nextAnchor(doc.entries);
-		const conflictsWith = scope === "session" || key === void 0 ? void 0 : [...doc.entries].reverse().find((e) => e.key === key)?.anchor;
-		doc.entries.push({
-			anchor,
-			kind: entry.kind,
-			key: scope === "session" ? void 0 : key,
-			sourceRefs: [...entry.sourceRefs],
-			at,
-			text,
-			conflictsWith
+		const flatKey = key === void 0 ? void 0 : flattenText(key);
+		return this.serialized(async () => {
+			const at = this.now();
+			const doc = await this.readDoc(scope, key) ?? this.emptyDoc(scope, key, at);
+			const anchor = nextAnchor(doc.entries);
+			const conflictsWith = scope === "session" || flatKey === void 0 ? void 0 : [...doc.entries].reverse().find((e) => e.key === flatKey)?.anchor;
+			doc.entries.push({
+				anchor,
+				kind: entry.kind,
+				key: scope === "session" ? void 0 : flatKey,
+				sourceRefs: [...entry.sourceRefs],
+				at,
+				text,
+				conflictsWith
+			});
+			doc.updatedAt = at;
+			await this.writeDoc(scope, key, doc);
+			return conflictsWith === void 0 ? {
+				written: true,
+				anchor
+			} : {
+				written: true,
+				anchor,
+				conflictsWith
+			};
 		});
-		doc.updatedAt = at;
-		await this.writeDoc(scope, key, doc);
-		return conflictsWith === void 0 ? {
-			written: true,
-			anchor
-		} : {
-			written: true,
-			anchor,
-			conflictsWith
-		};
 	}
 	/** 推进会话摘要的增量位（已处理到的事件 seq）。文档不存在则创建只有头部的文档。 */
 	async setLastSummarizedSeq(sessionId, seq) {
-		const at = this.now();
-		const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
-		doc.lastSummarizedSeq = seq;
-		doc.updatedAt = at;
-		await this.writeDoc("session", sessionId, doc);
+		return this.serialized(async () => {
+			const at = this.now();
+			const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
+			doc.lastSummarizedSeq = seq;
+			doc.updatedAt = at;
+			await this.writeDoc("session", sessionId, doc);
+		});
 	}
 	/** 写会话标题（头部 title 字段；单行化）。文档不存在则创建。 */
 	async setSessionTitle(sessionId, title) {
-		const at = this.now();
-		const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
-		doc.title = flattenText(title);
-		doc.updatedAt = at;
-		await this.writeDoc("session", sessionId, doc);
+		return this.serialized(async () => {
+			const at = this.now();
+			const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
+			doc.title = flattenText(title);
+			doc.updatedAt = at;
+			await this.writeDoc("session", sessionId, doc);
+		});
 	}
 	/** 替换会话摘要节（最近一次增量总结的条目化文本，整体替换；传空白即清除）。 */
 	async setSessionSummary(sessionId, summary) {
-		const at = this.now();
-		const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
-		const trimmed = summary.trim();
-		if (trimmed === "") delete doc.summary;
-		else doc.summary = trimmed;
-		doc.updatedAt = at;
-		await this.writeDoc("session", sessionId, doc);
+		return this.serialized(async () => {
+			const at = this.now();
+			const doc = await this.readDoc("session", sessionId) ?? this.emptyDoc("session", sessionId, at);
+			const trimmed = summary.trim();
+			if (trimmed === "") delete doc.summary;
+			else doc.summary = trimmed;
+			doc.updatedAt = at;
+			await this.writeDoc("session", sessionId, doc);
+		});
 	}
 	/** 列出已有会话文档的 sessionId（文件名解码回原值）；sessions 目录不存在返回空数组。 */
 	async listSessionIds() {
@@ -7989,6 +8120,15 @@ var MemoryDocStore = class {
 			doc.sessionId = key;
 		}
 		return doc;
+	}
+	/**
+	* 读改写串行化：并发的 append/setTitle/setSummary 若各自「读→改→写」，
+	* 后写会覆盖先写的增量（丢条目/丢标题）。全 store 一条写链，逐个执行。
+	*/
+	serialized(fn) {
+		const run = this.writeChain.then(fn, fn);
+		this.writeChain = run.then(() => void 0, () => void 0);
+		return run;
 	}
 	async writeDoc(scope, key, doc) {
 		await this.fs.mkdirp(scope === "session" ? join(this.rootDir, "sessions") : this.rootDir);
@@ -8686,6 +8826,7 @@ var CircuitBreaker = class {
 		completions: []
 	};
 	loaded = false;
+	loadPromise;
 	constructor(deps) {
 		this.fs = deps.fs;
 		this.path = deps.path;
@@ -8696,8 +8837,14 @@ var CircuitBreaker = class {
 		this.logger = deps.logger;
 	}
 	/** 首次访问时从持久化装载（构造函数保持同步；坏文件/版本不符从空白开始）。 */
-	async ensureLoaded() {
-		if (this.loaded) return;
+	ensureLoaded() {
+		if (this.loaded) return Promise.resolve();
+		this.loadPromise ??= this.loadFromDisk().then(() => {
+			this.loaded = true;
+		});
+		return this.loadPromise;
+	}
+	async loadFromDisk() {
 		try {
 			const parsed = JSON.parse(await this.fs.readFile(this.path));
 			if (parsed !== null && typeof parsed === "object" && parsed.schemaVersion === 1) this.file = {
@@ -8710,7 +8857,6 @@ var CircuitBreaker = class {
 				completions: sanitizeEvents(parsed.completions)
 			};
 		} catch {}
-		this.loaded = true;
 	}
 	/** 状态落盘（mkdirp 父目录；失败只告警，内存熔断仍生效）。 */
 	async save() {
@@ -9169,11 +9315,29 @@ function resolveRootConfig(raw) {
 		templates: templatesOr(source.templates)
 	};
 }
+/** 原子写序号：与 pid 一起保证同目录临时文件名唯一，并发写不互踩临时文件。 */
+let atomicTmpSeq = 0;
+/**
+* 原子写：写同目录临时文件再 rename 覆盖。rename 原子性保证崩溃时目标文件
+* 要么旧版完整、要么新版完整，绝不留下半写截断的 JSON（账本/索引/类型文件
+* 一旦截断，load 解析失败返 null 会静默清零全部数据）。
+*/
+async function atomicWriteFile(path, content) {
+	await mkdir(join(path, ".."), { recursive: true });
+	const tmp = `${path}.tmp-${process.pid}-${++atomicTmpSeq}`;
+	try {
+		await writeFile(tmp, content, "utf8");
+		await rename(tmp, path);
+	} catch (error) {
+		await rm(tmp, { force: true }).catch(() => {});
+		throw error;
+	}
+}
 /** node:fs/promises 适配成 FsAdapter。 */
 function fsAdapter() {
 	return {
 		readFile: (p) => readFile(p, "utf8"),
-		writeFile: (p, content) => writeFile(p, content, "utf8"),
+		writeFile: (p, content) => atomicWriteFile(p, content),
 		mkdirp: async (p) => {
 			await mkdir(p, { recursive: true });
 		},
@@ -9205,8 +9369,7 @@ function jsonFilePersistence(path) {
 			}
 		},
 		async save(value) {
-			await mkdir(join(path, ".."), { recursive: true });
-			await writeFile(path, JSON.stringify(value, null, 2), "utf8");
+			await atomicWriteFile(path, JSON.stringify(value, null, 2));
 		}
 	};
 }

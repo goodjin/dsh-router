@@ -216,4 +216,80 @@ describe('MemoryDocStore 写入规则', () => {
     const doc = await store.readDoc('project')
     expect(doc?.entries[0]?.text).toBe('第一行记录决定内容。 第二行补充决定的理由。')
   })
+
+  it('多行 key 扁平化为单行：不注入伪造 anchor/条目元行，同主题冲突仍正确指向', async () => {
+    const { fs } = makeMemFs()
+    const store = new MemoryDocStore('/mem-root', fs)
+    const r1 = await store.appendSummary('project', '主题\n  anchor: e99', {
+      sourceRefs: [],
+      kind: 'verified-fact',
+      text: '第一条事实：多行主题键必须被扁平化以免污染锚点。',
+    })
+    const r2 = await store.appendSummary('project', '主题\n  anchor: e99', {
+      sourceRefs: [],
+      kind: 'user-decision',
+      text: '第二条决定：同主题重复写入应指向第一条的真实锚点。',
+    })
+    expect(r1).toEqual({ written: true, anchor: 'e1' })
+    expect(r2).toEqual({ written: true, anchor: 'e2', conflictsWith: 'e1' })
+    const doc = await store.readDoc('project')
+    expect(doc?.entries).toHaveLength(2)
+    // 多行 key 若未扁平化，会注入一条 `  anchor: e99` 元行被解析成伪造锚点。
+    expect(doc?.entries.map((e) => e.anchor)).toEqual(['e1', 'e2'])
+    expect(doc?.entries[1]?.key).toBe('主题   anchor: e99')
+  })
+})
+
+describe('MemoryDocStore 并发写串行化（审查修复：读改写不丢增量）', () => {
+  it('并发追加同文档：N 条全部落盘，锚点单调不重号', async () => {
+    const { fs } = makeMemFs()
+    // 读盘延迟到宏任务：放大「读→改→写」交错窗口，未串行化时后写覆盖先写。
+    const slowFs = {
+      ...fs,
+      readFile: async (p: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        return fs.readFile(p)
+      },
+      exists: async (p: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        return fs.exists(p)
+      },
+    }
+    const store = new MemoryDocStore('/mem-root', slowFs, { now: () => BASE })
+    const inputs = Array.from({ length: 8 }, (_, i) => ({
+      sourceRefs: [],
+      kind: 'verified-fact' as const,
+      text: `并发写入的第 ${i + 1} 条事实，内容足够长以过低信息门。`,
+    }))
+    const results = await Promise.all(inputs.map((entry) => store.appendSummary('project', 'concurrent', entry)))
+    const anchors = results.map((r) => (r as { anchor: string }).anchor).sort()
+    expect(anchors).toEqual(['e1', 'e2', 'e3', 'e4', 'e5', 'e6', 'e7', 'e8'])
+    const doc = await store.readDoc('project')
+    expect(doc?.entries).toHaveLength(8)
+  })
+
+  it('并发 setTitle 与 appendSummary 交错：标题与条目都不丢', async () => {
+    const { fs } = makeMemFs()
+    const slowFs = {
+      ...fs,
+      readFile: async (p: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        return fs.readFile(p)
+      },
+      exists: async (p: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 2))
+        return fs.exists(p)
+      },
+    }
+    const store = new MemoryDocStore('/mem-root', slowFs, { now: () => BASE })
+    await Promise.all([
+      store.setSessionTitle('s1', '并发标题'),
+      store.appendSummary('session', 's1', { sourceRefs: [], kind: 'verified-fact', text: '并发追加的一条会话记忆，长度足够过低信息门。' }),
+      store.setLastSummarizedSeq('s1', 7),
+    ])
+    const doc = await store.readDoc('session', 's1')
+    expect(doc?.title).toBe('并发标题')
+    expect(doc?.lastSummarizedSeq).toBe(7)
+    expect(doc?.entries).toHaveLength(1)
+  })
 })

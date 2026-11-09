@@ -153,6 +153,36 @@ describe('CircuitBreaker：持久化与解除（规格 §2 解除仅用户）', 
   })
 })
 
+describe('CircuitBreaker：并发首访装载不丢增量（审查修复）', () => {
+  it('盘上已有 1 次 infra 失败，两个并发 recordFailure 后计数为 3（装载去重，不互相覆盖）', async () => {
+    const memfs = makeMemFs()
+    await memfs.fs.mkdirp('/guard')
+    memfs.files.set('/guard/guard-state.json', JSON.stringify({
+      schemaVersion: 1,
+      frozen: false,
+      infraFailures: [{ taskId: 'T-seed', at: 1 }],
+      creations: [],
+      completions: [],
+    }))
+    // 读盘延迟到一个宏任务：确保两个并发调用都在装载完成前进入 ensureLoaded，
+    // 复现「各自读盘→后完成者覆盖先完成者增量」的竞态。
+    const slowFs = {
+      ...memfs.fs,
+      readFile: async (p: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        return memfs.fs.readFile(p)
+      },
+    }
+    const breaker = new CircuitBreaker({ fs: slowFs, path: '/guard/guard-state.json', now: () => 1000 })
+    await Promise.all([
+      breaker.recordFailure({ taskId: 'T-a', at: 1000, class: 'infra' }),
+      breaker.recordFailure({ taskId: 'T-b', at: 1001, class: 'infra' }),
+    ])
+    const state = await breaker.state()
+    expect(state.counts.infraFailures).toBe(3)
+  })
+})
+
 /* ────────────────────────── 故障分类器 ────────────────────────── */
 
 describe('classifyDispatchFailure：infra/task 分类（规格 §1）', () => {

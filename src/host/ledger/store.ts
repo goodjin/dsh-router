@@ -68,13 +68,18 @@ function formatTaskId(n: number): string {
  * 未创建的依赖 ID 没有出边，不参与成环。
  */
 function findDependencyCycle(edges: Map<string, string[]>, start: string): string[] | null {
+  // visiting = 当前 DFS 栈上的节点（命中即真环）；done = 已完整探索且无环的节点。
+  // 二者必须分开：菱形依赖（A、B 同依赖 C）里 C 被访问两次，若只用一个只增不删
+  // 的集合，第二次访问 C 会误命中、stack.indexOf=-1 → slice(-1) 造出伪环。
   const visiting = new Set<string>()
+  const done = new Set<string>()
   const stack: string[] = []
   const visit = (node: string): string[] | null => {
     if (visiting.has(node)) {
       const from = stack.indexOf(node)
       return [...stack.slice(from), node]
     }
+    if (done.has(node)) return null
     visiting.add(node)
     stack.push(node)
     for (const dep of edges.get(node) ?? []) {
@@ -82,6 +87,8 @@ function findDependencyCycle(edges: Map<string, string[]>, start: string): strin
       if (cycle) return cycle
     }
     stack.pop()
+    visiting.delete(node)
+    done.add(node)
     return null
   }
   return visit(start)
@@ -95,6 +102,8 @@ export class TaskLedger {
   private nextTaskNumber = 1
   private questions: QuestionRecord[] = []
   private loaded = false
+  /** 写串行化链：所有 commit 依次排队，杜绝并发写互抹与 save 乱序覆盖。 */
+  private writeChain: Promise<unknown> = Promise.resolve()
 
   constructor(persistence: LedgerPersistence, clock: () => number = Date.now) {
     this.persistence = persistence
@@ -127,21 +136,39 @@ export class TaskLedger {
    * 写操作统一通道：备份 → 校验并变更内存（校验抛错则状态未动、不触发保存）
    * → 保存新状态 → 保存失败回滚内存并抛 persistence-failed。
    */
-  private async commit<T>(mutate: () => T): Promise<T> {
-    await this.ensureLoaded()
-    const backupTasks = structuredClone(this.tasks)
-    const backupNext = this.nextTaskNumber
-    const backupQuestions = structuredClone(this.questions)
-    const value = mutate()
-    try {
-      await this.persistence.save(this.currentFile())
-    } catch (cause) {
-      this.tasks = backupTasks
-      this.nextTaskNumber = backupNext
-      this.questions = backupQuestions
-      throw new LedgerError('persistence-failed', `账本保存失败，内存已回滚: ${String(cause)}`, { cause })
-    }
-    return value
+  private commit<T>(mutate: () => T): Promise<T> {
+    const run = this.writeChain.then(async () => {
+      await this.ensureLoaded()
+      const backupTasks = structuredClone(this.tasks)
+      const backupNext = this.nextTaskNumber
+      const backupQuestions = structuredClone(this.questions)
+      let value: T
+      try {
+        value = mutate()
+        await this.persistence.save(this.currentFile())
+      } catch (cause) {
+        this.tasks = backupTasks
+        this.nextTaskNumber = backupNext
+        this.questions = backupQuestions
+        // 校验类领域错误原样重抛（保留错误码）；只有保存失败才包 persistence-failed。
+        if (cause instanceof LedgerError) throw cause
+        throw new LedgerError('persistence-failed', `账本保存失败，内存已回滚: ${String(cause)}`, { cause })
+      }
+      return value
+    })
+    // 链上只留「已落定」信号，吞掉 rejection 避免未处理拒绝；返回值仍走 run。
+    this.writeChain = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /** 串行只读判定：与写共用一条链保证一致性，但不保存（纯幂等无变更不落盘）。 */
+  private readLocked<T>(fn: () => T): Promise<T> {
+    const run = this.writeChain.then(async () => {
+      await this.ensureLoaded()
+      return fn()
+    })
+    this.writeChain = run.then(() => undefined, () => undefined)
+    return run
   }
 
   /** 取任务，不存在抛 task-not-found。 */
@@ -170,40 +197,41 @@ export class TaskLedger {
 
   /** 创建任务：分配单调 ID、依赖图查环；依赖未满足落 queued，否则 draft。 */
   async createTask(input: NewTaskInput): Promise<TaskRecord> {
-    await this.ensureLoaded()
-    const id = formatTaskId(this.nextTaskNumber)
     const dependsOn = input.dependsOn ?? []
-    const edges = new Map<string, string[]>(this.tasks.map((t) => [t.id, t.dependsOn]))
-    edges.set(id, dependsOn)
-    const cycle = findDependencyCycle(edges, id)
-    if (cycle) {
-      throw new LedgerError('dependency-cycle', `依赖环: ${cycle.join(' → ')}`)
-    }
-    const depsSatisfied = dependsOn.every((depId) => {
-      const dep = this.tasks.find((t) => t.id === depId)
-      return dep !== undefined && dep.status === 'completed'
-    })
-    const now = this.clock()
-    const record: TaskRecord = {
-      id,
-      title: input.title,
-      goal: input.goal,
-      acceptance: input.acceptance ?? [],
-      constraints: input.constraints ?? [],
-      projectId: input.projectId,
-      cwd: input.cwd,
-      role: input.role,
-      templateId: input.templateId,
-      parentId: input.parentId,
-      dependsOn,
-      status: depsSatisfied ? 'draft' : 'queued',
-      docVersion: 1,
-      retryCount: 0,
-      acceptancePolicy: input.acceptancePolicy ?? 'auto',
-      createdAt: now,
-      updatedAt: now,
-    }
     return this.commit(() => {
+      // ID 分配与自增必须在串行锁内：否则并发 createTask 读到同一 nextTaskNumber，
+      // 分配出重复 T-xxx。环检查也基于锁内最新的依赖图。
+      const id = formatTaskId(this.nextTaskNumber)
+      const edges = new Map<string, string[]>(this.tasks.map((t) => [t.id, t.dependsOn]))
+      edges.set(id, dependsOn)
+      const cycle = findDependencyCycle(edges, id)
+      if (cycle) {
+        throw new LedgerError('dependency-cycle', `依赖环: ${cycle.join(' → ')}`)
+      }
+      const depsSatisfied = dependsOn.every((depId) => {
+        const dep = this.tasks.find((t) => t.id === depId)
+        return dep !== undefined && dep.status === 'completed'
+      })
+      const now = this.clock()
+      const record: TaskRecord = {
+        id,
+        title: input.title,
+        goal: input.goal,
+        acceptance: input.acceptance ?? [],
+        constraints: input.constraints ?? [],
+        projectId: input.projectId,
+        cwd: input.cwd,
+        role: input.role,
+        templateId: input.templateId,
+        parentId: input.parentId,
+        dependsOn,
+        status: depsSatisfied ? 'draft' : 'queued',
+        docVersion: 1,
+        retryCount: 0,
+        acceptancePolicy: input.acceptancePolicy ?? 'auto',
+        createdAt: now,
+        updatedAt: now,
+      }
       this.tasks.push(record)
       this.nextTaskNumber += 1
       return record
@@ -280,21 +308,45 @@ export class TaskLedger {
    * 策略：auto 且无未结子任务 → completed；否则 → review-pending。
    */
   async complete(id: string, input: TaskResultInput): Promise<TaskRecord> {
-    await this.ensureLoaded()
-    const task = this.mustGet(id)
-    // 幂等与版本校验是纯读，不进写通道
-    if (input.docVersion !== task.docVersion) {
-      throw new LedgerError(
-        'stale-version',
-        `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`,
-      )
-    }
-    if (task.status === 'completed') return task
-    if (task.status === 'review-pending' && task.result) return task
-    return this.commit(() => {
+    // 锁内一致判定：纯幂等无变更短路返回，不触发 save（写纪律）；版本校验也在
+    // 锁内，杜绝并发 supplement 升版后旧版验收蒙混过关。
+    const decision = await this.readLocked(() => {
+      const task = this.mustGet(id)
+      if (input.docVersion !== task.docVersion) {
+        throw new LedgerError(
+          'stale-version',
+          `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`,
+        )
+      }
+      if (task.status === 'completed') return { task, write: false }
       const openSubtasks = this.tasks.filter((t) => t.parentId === id && !isTerminal(t.status))
-      const target: TaskStatus =
-        task.acceptancePolicy === 'auto' && openSubtasks.length === 0 ? 'completed' : 'review-pending'
+      const canComplete = task.acceptancePolicy === 'auto' && openSubtasks.length === 0
+      if (task.status === 'review-pending' && task.result && !canComplete) return { task, write: false }
+      return { task, write: true }
+    })
+    if (!decision.write) return decision.task
+    return this.commit(() => {
+      const task = this.mustGet(id)
+      // 锁内复核：readLocked 与 commit 之间可能有并发写改变了版本/状态。
+      if (input.docVersion !== task.docVersion) {
+        throw new LedgerError(
+          'stale-version',
+          `完成提交版本 v${input.docVersion} 与当前任务版本 v${task.docVersion} 不符: ${id}`,
+        )
+      }
+      if (task.status === 'completed') return task
+      const openSubtasks = this.tasks.filter((t) => t.parentId === id && !isTerminal(t.status))
+      const canComplete = task.acceptancePolicy === 'auto' && openSubtasks.length === 0
+      // 待验收重提：子任务结清则转 completed（修死锁），否则保持待验收。
+      if (task.status === 'review-pending' && task.result) {
+        if (canComplete) {
+          assertTransition(task.status, 'completed')
+          task.status = 'completed'
+          task.updatedAt = this.clock()
+        }
+        return task
+      }
+      const target: TaskStatus = canComplete ? 'completed' : 'review-pending'
       assertTransition(task.status, target)
       const result: TaskResult = {
         summary: input.summary,

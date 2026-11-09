@@ -388,7 +388,10 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       assertTemplateUsable(input.templateId, enabledTemplates())
       const callerTask = await taskBySession(callerSessionId)
       const callerRole: RoleKind = callerTask?.role ?? 'router'
-      const parentTaskId = input.parentTaskId
+      // 父任务必须取调用方会话真实绑定的任务，不能信模型入参 input.parentTaskId：
+      // 否则主管省略/伪报浅层 parentTaskId 即可让 depth=0、祖先链为空，绕过深度
+      // 限制与 cycle-risk。Router 无绑定任务 → undefined（根派发）。
+      const parentTaskId = callerTask?.id
       const verdict = scheduler.dispatchGuard(
         { sessionIdRole: callerRole, parentTaskId, depth: parentTaskId !== undefined ? depthOf(ledger, parentTaskId) : 0 },
         { role: input.role, dependsOn: input.dependsOn?.map((ref) => ref.taskId) },
@@ -464,83 +467,99 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     },
 
     async supplementTask(callerSessionId, taskId, additions) {
+      // 冻结时一切派发被拦（规格 §2）：supplement 内部含重派路径，若不设闸，
+      // 全局冻结后对 draft/queued 任务调 supplement 即可绕过熔断重派成功。
+      await assertDispatchOpen()
+      const callerRole: RoleKind = (await taskBySession(callerSessionId))?.role ?? 'router'
       const record = ledger.get(taskId)
       if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
       if (isTerminal(record.status)) {
         throw new LedgerError('illegal-transition', `终态任务不可补充: ${taskId}（${record.status}）`)
       }
-      const fromVersion = record.docVersion
-      const newVersion = await ledger.supplement(taskId, additions)
-      await deps.docsFor(record.cwd).supplement(taskId, fromVersion, additions)
-      let delivered: { sessionId: string | undefined }
-      try {
-        delivered = await bridge.supplementTo(taskId)
-      } catch (error) {
-        const live = ledger.get(taskId)!
-        // 首发未完成的任务（draft/queued）重投失败：与首发失败同口径记账——
-        // retryCount 朝上限累计，达 3 自动 blocked；running 等任务照原样抛。
-        if (live.sessionId !== undefined && (live.status === 'draft' || live.status === 'queued')) {
-          deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重投失败同口径计入失败预算
-          const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
-          await refreshSnapshot()
-          throw new LedgerError(
-            'dispatch-failed',
-            `任务 ${taskId} 重投失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
-          )
+      // 升版 + 写文档 + 投递/重派整体串行化：并发补充同一任务时，源版本必须取
+      // 本次升版实际产出的前一版（bumped-1），且文档写与重派按任务排队——否则两
+      // 个并发补充读到同一陈旧 fromVersion、撞写同一 task.vN.md，封顶计数被破坏。
+      const newVersion = await withTaskLock(taskId, async () => {
+        const bumped = await ledger.supplement(taskId, additions)
+        await deps.docsFor(record.cwd).supplement(taskId, bumped - 1, additions)
+        let delivered: { sessionId: string | undefined }
+        try {
+          delivered = await bridge.supplementTo(taskId)
+        } catch (error) {
+          const live = ledger.get(taskId)!
+          // 首发未完成的任务（draft/queued）重投失败：与首发失败同口径记账——
+          // retryCount 朝上限累计，达 3 自动 blocked；running 等任务照原样抛。
+          if (live.sessionId !== undefined && (live.status === 'draft' || live.status === 'queued')) {
+            deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重投失败同口径计入失败预算
+            const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
+            await refreshSnapshot()
+            throw new LedgerError(
+              'dispatch-failed',
+              `任务 ${taskId} 重投失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
+            )
+          }
+          throw error
         }
-        throw error
-      }
-      if (delivered.sessionId !== undefined) {
-        deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重投成功清连败
-        driver.onDispatched(delivered.sessionId)
-        driver.onDispatched(callerSessionId)
-        const live = ledger.get(taskId)!
-        if (live.status === 'draft' || live.status === 'queued') {
-          // 首发投递未完成的任务补投成功：走表边到 dispatched、驱动打标、挂标签，
-          // 不留「有会话却停在 draft」的隐形任务（评审修复）。
-          if (live.status === 'draft') await ledger.transition(taskId, 'queued')
-          await ledger.transition(taskId, 'dispatched')
-          const dispatched = ledger.get(taskId)!
-          await afterDispatch(
-            dispatched,
-            delivered.sessionId,
-            dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
-          )
-        }
-      } else {
-        // 任务还没有执行会话：锁内重新过闸门再决定是否重派（评审修复——闸门
-        // 必须在锁内，并发补充时后到者看到的是前一次落定后的状态）。
-        await withTaskLock(taskId, async () => {
+        if (delivered.sessionId !== undefined) {
+          deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重投成功清连败
+          driver.onDispatched(delivered.sessionId)
+          driver.onDispatched(callerSessionId)
+          const live = ledger.get(taskId)!
+          if (live.status === 'draft' || live.status === 'queued') {
+            // 首发投递未完成的任务补投成功：走表边到 dispatched、驱动打标、挂标签，
+            // 不留「有会话却停在 draft」的隐形任务（评审修复）。
+            if (live.status === 'draft') await ledger.transition(taskId, 'queued')
+            await ledger.transition(taskId, 'dispatched')
+            const dispatched = ledger.get(taskId)!
+            await afterDispatch(
+              dispatched,
+              delivered.sessionId,
+              dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
+            )
+          }
+        } else {
+          // 任务还没有执行会话：外层已持任务锁，直接过闸门重派（不再嵌套
+          // withTaskLock——同 taskId 嵌套会自死锁）。并发补充时后到者看到的是前一
+          // 次落定后的状态。
           const live = ledger.get(taskId)!
           const dispatchable =
             live.sessionId === undefined
             && (live.status === 'draft' || live.status === 'queued')
             && (await depsSatisfied(taskId))
-          if (!dispatchable) return // 依赖未满足 / 已封顶 / 已有会话：只升版，不派发
-          try {
-            const { sessionId } = await bridge.dispatchTask(taskId)
-            deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重派成功清连败
-            if (sessionId !== undefined) {
-              driver.onDispatched(sessionId)
+          if (dispatchable) {
+            // 主管连败冻结同样拦重派（与 dispatch_task 同口径），堵 supplement 绕过失败预算。
+            if (callerRole === 'supervisor' && deps.budgets?.supervisorFrozen(callerSessionId)) {
+              throw new LedgerError(
+                'supervisor-failure-budget',
+                `连续 ${deps.budgets.snapshot(callerSessionId).consecutiveDispatchFailures} 次派发失败，你的派发已被冻结：请停止重试，调用 report_blocker 向用户报告阻塞`,
+              )
             }
-            driver.onDispatched(callerSessionId)
-            const dispatched = ledger.get(taskId)!
-            await afterDispatch(
-              dispatched,
-              sessionId,
-              dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
-            )
-          } catch (error) {
-            deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重派失败同口径计入失败预算
-            const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
-            await refreshSnapshot()
-            throw new LedgerError(
-              'dispatch-failed',
-              `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
-            )
+            try {
+              const { sessionId } = await bridge.dispatchTask(taskId)
+              deps.budgets?.recordDispatchSuccess(callerSessionId) // v1.2：重派成功清连败
+              if (sessionId !== undefined) {
+                driver.onDispatched(sessionId)
+              }
+              driver.onDispatched(callerSessionId)
+              const dispatched = ledger.get(taskId)!
+              await afterDispatch(
+                dispatched,
+                sessionId,
+                dispatched.projectId.startsWith('cwd:') ? undefined : dispatched.projectId,
+              )
+            } catch (error) {
+              deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重派失败同口径计入失败预算
+              const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
+              await refreshSnapshot()
+              throw new LedgerError(
+                'dispatch-failed',
+                `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
+              )
+            }
           }
-        })
-      }
+        }
+        return bumped
+      })
       await refreshSnapshot()
       return { docVersion: newVersion }
     },
@@ -678,6 +697,26 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
             await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId)
             await refreshSnapshot()
             deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（retryCount=${ledger.get(nextTask.id)?.retryCount}）: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        }
+        // 父任务因本子任务未结而待验收：子任务完成后重判。auto 且子任务已结清则
+        // 复用完成协议转 completed（连带广播/解锁/记忆），修 review-pending 死锁。
+        // 沿 parentId 向上级联，必终止于根；sessionId 不等防自环。
+        if (
+          parent?.status === 'review-pending'
+          && parent.sessionId !== undefined
+          && parent.sessionId !== callerSessionId
+          && parent.result !== undefined
+        ) {
+          const stillOpen = (await ledger.listAll()).some((t) => t.parentId === parent.id && !isTerminal(t.status))
+          if (!stillOpen) {
+            await core.completeTask(parent.sessionId, parent.id, {
+              docVersion: parent.docVersion,
+              summary: parent.result.summary,
+              deliverables: parent.result.deliverables,
+              acceptanceEvidence: parent.result.acceptanceEvidence,
+              leftovers: parent.result.openIssues,
+            })
           }
         }
       }

@@ -227,6 +227,7 @@ export class MemoryDocStore {
   private readonly rootDir: string
   private readonly fs: FsAdapter
   private readonly now: () => number
+  private writeChain: Promise<unknown> = Promise.resolve()
 
   constructor(rootDir: string, fs: FsAdapter, options: MemoryDocStoreOptions = {}) {
     this.rootDir = rootDir
@@ -262,56 +263,66 @@ export class MemoryDocStore {
     }
     const text = flattenText(entry.text)
     if (text.length < LOW_INFO_MIN_CHARS) return { skipped: 'low-info' }
-    const at = this.now()
-    const doc = (await this.readDoc(scope, key)) ?? this.emptyDoc(scope, key, at)
-    const anchor = nextAnchor(doc.entries)
-    const conflictsWith =
-      scope === 'session' || key === undefined
-        ? undefined
-        : [...doc.entries].reverse().find((e) => e.key === key)?.anchor
-    doc.entries.push({
-      anchor,
-      kind: entry.kind,
-      key: scope === 'session' ? undefined : key,
-      sourceRefs: [...entry.sourceRefs],
-      at,
-      text,
-      conflictsWith,
+    // key 与 text 一样扁平化：多行 key 会注入伪造 anchor/条目元行，污染锚点与检索。
+    const flatKey = key === undefined ? undefined : flattenText(key)
+    return this.serialized(async () => {
+      const at = this.now()
+      const doc = (await this.readDoc(scope, key)) ?? this.emptyDoc(scope, key, at)
+      const anchor = nextAnchor(doc.entries)
+      const conflictsWith =
+        scope === 'session' || flatKey === undefined
+          ? undefined
+          : [...doc.entries].reverse().find((e) => e.key === flatKey)?.anchor
+      doc.entries.push({
+        anchor,
+        kind: entry.kind,
+        key: scope === 'session' ? undefined : flatKey,
+        sourceRefs: [...entry.sourceRefs],
+        at,
+        text,
+        conflictsWith,
+      })
+      doc.updatedAt = at
+      await this.writeDoc(scope, key, doc)
+      return conflictsWith === undefined
+        ? { written: true, anchor }
+        : { written: true, anchor, conflictsWith }
     })
-    doc.updatedAt = at
-    await this.writeDoc(scope, key, doc)
-    return conflictsWith === undefined
-      ? { written: true, anchor }
-      : { written: true, anchor, conflictsWith }
   }
 
   /** 推进会话摘要的增量位（已处理到的事件 seq）。文档不存在则创建只有头部的文档。 */
   async setLastSummarizedSeq(sessionId: string, seq: number): Promise<void> {
-    const at = this.now()
-    const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
-    doc.lastSummarizedSeq = seq
-    doc.updatedAt = at
-    await this.writeDoc('session', sessionId, doc)
+    return this.serialized(async () => {
+      const at = this.now()
+      const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
+      doc.lastSummarizedSeq = seq
+      doc.updatedAt = at
+      await this.writeDoc('session', sessionId, doc)
+    })
   }
 
   /** 写会话标题（头部 title 字段；单行化）。文档不存在则创建。 */
   async setSessionTitle(sessionId: string, title: string): Promise<void> {
-    const at = this.now()
-    const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
-    doc.title = flattenText(title)
-    doc.updatedAt = at
-    await this.writeDoc('session', sessionId, doc)
+    return this.serialized(async () => {
+      const at = this.now()
+      const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
+      doc.title = flattenText(title)
+      doc.updatedAt = at
+      await this.writeDoc('session', sessionId, doc)
+    })
   }
 
   /** 替换会话摘要节（最近一次增量总结的条目化文本，整体替换；传空白即清除）。 */
   async setSessionSummary(sessionId: string, summary: string): Promise<void> {
-    const at = this.now()
-    const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
-    const trimmed = summary.trim()
-    if (trimmed === '') delete doc.summary
-    else doc.summary = trimmed
-    doc.updatedAt = at
-    await this.writeDoc('session', sessionId, doc)
+    return this.serialized(async () => {
+      const at = this.now()
+      const doc = (await this.readDoc('session', sessionId)) ?? this.emptyDoc('session', sessionId, at)
+      const trimmed = summary.trim()
+      if (trimmed === '') delete doc.summary
+      else doc.summary = trimmed
+      doc.updatedAt = at
+      await this.writeDoc('session', sessionId, doc)
+    })
   }
 
   /** 列出已有会话文档的 sessionId（文件名解码回原值）；sessions 目录不存在返回空数组。 */
@@ -339,6 +350,16 @@ export class MemoryDocStore {
       doc.sessionId = key
     }
     return doc
+  }
+
+  /**
+   * 读改写串行化：并发的 append/setTitle/setSummary 若各自「读→改→写」，
+   * 后写会覆盖先写的增量（丢条目/丢标题）。全 store 一条写链，逐个执行。
+   */
+  private serialized<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(fn, fn)
+    this.writeChain = run.then(() => undefined, () => undefined)
+    return run
   }
 
   private async writeDoc(scope: MemoryScope, key: string | undefined, doc: MemoryDoc): Promise<void> {

@@ -805,6 +805,26 @@ describe('SessionHeaderReader：挂起的 IO 由 timer/AbortSignal 及时打断�
     expect(streamDestroyed).toBe(true)
   })
 
+  it('createStream 同步抛错：归 unreadable 而非 aborted（审查修复：aborted 会被索引当瞬态重排队首，损坏会话饿死队列）', async () => {
+    const root = await tmpRoot()
+    const id = 's-codec-throw'
+    const frame = await zstdCompressAsync(Buffer.from(`${headerLine({ id, version: 4 })}\n`))
+    await writeSession(root, id, { 'session.v4.jsonl.zstd': frame })
+    const base = defaultHeaderIoDeps()
+    const reader = new SessionHeaderReader({
+      ...base,
+      zstd: { createStream: () => { throw new Error('codec unavailable') } } as never,
+    })
+    const outcome = await reader.readSessionHeader(join(root, '--proj--', id), id, {
+      deadlineAt: Date.now() + 5_000,
+      now: () => Date.now(),
+    })
+    expect(outcome.ok).toBe(false)
+    if (outcome.ok) return
+    expect(outcome.reason).toBe('unreadable')
+    expect(outcome.message).toContain('codec unavailable')
+  })
+
   it('AbortSignal 中止在途 open：及时 aborted（真实 addEventListener 通道）', async () => {
     const root = await tmpRoot()
     const id = 's-abort-open'
