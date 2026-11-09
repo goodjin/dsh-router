@@ -75,7 +75,7 @@ const SOURCE_EVENTS = [
 ] as const
 
 interface HarnessOptions {
-  mode: 'cache-priority' | 'minimal-face'
+  mode: 'cache-priority' | 'minimal-face' | (() => 'cache-priority' | 'minimal-face')
   /** 宿主 fork face（cache 模式用；缺省提供成功实现）。 */
   fork?: (request: { sessionId: string }) => Promise<{ sessionId: string }>
   /** 缺省 true = 不给宿主 fork face（旧宿主）。 */
@@ -246,6 +246,24 @@ describe('cache-priority：创建段 = 宿主 fork face（规格 §3.1）', () =
     const error = await h.bridge.dispatchTask(record.id, { forkFrom: 'gone' }).catch((e: unknown) => e)
     expect(classifyDispatchFailure(error).class).toBe('infra')
     expect(h.captured.createCalls).toHaveLength(0)
+  })
+
+  it('M5：mode 传 getter 时每次派发读当前值——设置页切模式后新派发即用新形态', async () => {
+    let current: 'cache-priority' | 'minimal-face' = 'minimal-face'
+    const h = harness({ mode: () => current })
+    const first = await createTask(h)
+    await h.bridge.dispatchTask(first.id, { forkFrom: 'router-session-1' })
+    expect(h.captured.agentsCreateCalls).toHaveLength(1) // minimal 五步
+    expect(h.captured.forkCalls).toHaveLength(0)
+    expect(h.captured.promptCalls[0]!.requestId).toBe(`dispatch-${first.id}-v1`)
+    // 设置页即时切换（不重启、不重建桥）：下一次派发就走 cache-priority
+    current = 'cache-priority'
+    const second = await createTask(h)
+    await h.bridge.dispatchTask(second.id, { forkFrom: 'router-session-1' })
+    expect(h.captured.forkCalls).toHaveLength(1)
+    expect(h.captured.agentsCreateCalls).toHaveLength(1)
+    expect(h.captured.selectModelCalls).toHaveLength(1) // 只有 minimal 那次钉模型
+    expect(h.captured.promptCalls[1]!.requestId).toBe(`switch-${second.id}-v1`)
   })
 })
 

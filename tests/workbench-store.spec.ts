@@ -468,7 +468,8 @@ describe('startWorkbenchPolling：定时器接线', () => {
   })
 })
 
-describe('isRouterSessionView：浮窗只在 Router 会话视图展示（v1.4）', () => {
+describe('isRouterSessionView：通知浮窗（暂停/解冻）只在 Router 会话视图展示', () => {
+  // 问题浮窗不用此门控（全局浮层，切到 worker 标签仍可答，需求 §14.1）。
   // isRouterSessionView 只读 currentSessionId 与 routerState.routerSessions，
   // 测试用最小形状直构（不启完整 store）。
   const view = (current: string | undefined): Parameters<typeof isRouterSessionView>[0] =>

@@ -754,9 +754,15 @@ describe('core 通知接线（规格 §5 完成卡/异常卡的宿主写入）',
     expect(cards[0]!.summary).toContain('缺部署凭据')
     expect(cards[0]!.actions.some((action) => action.action === 'redispatch')).toBe(true)
 
+    // task 类拒绝（role=router 不可执行，桥内未打标 LedgerError）才进 per-task
+    // 重试预算：3 次封顶 blocked → 异常卡（infra 不计重试，需求 §9.1）。
     const sink2 = new NotificationStore({ fs: (await Promise.resolve(makeMemFs())).fs, path: '/guard/notifications.json', newId: () => `card-${Math.random()}`, now: () => 1 })
-    const { core: core2 } = await guardCoreWith({ notifications: sink2, failCreate: () => new Error('boom') })
-    await core2.dispatchTask('router-s-1', { title: '示例', goal: 'g', acceptance: ['a'], role: 'worker', templateId: 'coder' }).catch(() => {})
+    const { core: core2, ledger: ledger2, docs: docs2 } = await guardCoreWith({
+      records: [task({ id: 'T-001', role: 'router', status: 'draft', projectId: 'ws-1', cwd: '/proj' })],
+      notifications: sink2,
+    })
+    await docs2.initTask(ledger2.get('T-001')!, '# 任务书 T-001')
+    await core2.supplementTask('router-s-1', 'T-001', ['再试']).catch(() => {})
     await core2.supplementTask('router-s-1', 'T-001', ['再试']).catch(() => {})
     await core2.supplementTask('router-s-1', 'T-001', ['再试']).catch(() => {}) // 第 3 次失败 → blocked
     cards = await sink2.pending()

@@ -17,7 +17,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import type { ClientPrefsStore } from './client-prefs.ts'
 import { chipClickAction, chipSummary, visibleCards } from './question-state.ts'
 import type { QuestionCardView, QuestionDraftItem } from './question-state.ts'
-import { isRouterSessionView, type WorkbenchStore } from './workbench-store.ts'
+import { type WorkbenchStore } from './workbench-store.ts'
 import { QUESTION_OVERLAY_ID, QUESTION_OVERLAY_ORDER, QUESTION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
@@ -325,8 +325,9 @@ export function QuestionCards(props: QuestionOverlayProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
   const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
   // 门控放在所有 hooks 之后：早退若插在 hooks 之间，会话切换时 hook 数量变化
-  // 会触发 "Rendered more hooks" 整树崩溃。v1.4：浮窗只在 Router 会话视图展示。
-  if (!isRouterSessionView(props.store.get())) return null
+  // 会触发 "Rendered more hooks" 整树崩溃。问题浮窗是全局浮层（需求 §14.1）：
+  // chip 点击会切到 worker 标签，切过去后小窗必须仍悬浮可答——不能按当前会话
+  // 是否 Router 门控（Router-only 门控只属于通知浮窗的暂停/解冻按钮）。
   if (!prefs.overlayEnabled) return null
   const cards = visibleCards(state.board.cards, prefs.maxActiveCards)
   if (cards.length === 0) return null

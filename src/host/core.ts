@@ -30,8 +30,8 @@ import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../
 import type { CircuitBreaker, BreakerVisibility } from './guard/breaker.ts'
 import { runScopedPause, scopedPauseTargets } from './guard/emergency.ts'
 import type { DispatchBudgets, BudgetSnapshot } from './guard/budgets.ts'
-import { classifyDispatchFailure } from './guard/classify.ts'
-import { anomalyActions, completionActions, pausedActions, type NotificationSink } from './guard/notifications.ts'
+import { classifyDispatchFailure, type DispatchFailureClass } from './guard/classify.ts'
+import { acceptanceActions, anomalyActions, completionActions, pausedActions, type NotificationSink } from './guard/notifications.ts'
 import type {
   AskUserQuestionAnswerItem,
   QuestionCard,
@@ -232,7 +232,7 @@ export function assertTemplateUsable(templateId: string, enabledTypes: readonly 
   throw error
 }
 
-/** 派发失败的统一处理：分类上报熔断（v1.2 B1）、记账（progress + retryCount，达上限自动 blocked）并通知 Router。 */
+/** 派发失败的统一处理：分类上报熔断（v1.2 B1）、记账并通知 Router。infra 不进 per-task 重试预算（需求 §9.1）。 */
 async function recordDispatchFailure(
   deps: RouterCoreAssemblyDeps,
   ledger: TaskLedger,
@@ -240,12 +240,31 @@ async function recordDispatchFailure(
   title: string,
   error: unknown,
   notifyRouterSession: string | undefined,
-): Promise<TaskRecord> {
+): Promise<{ failed: TaskRecord; failureClass: DispatchFailureClass }> {
   // v1.2 规格 §1：失败先分类——infra（会话创建/挂载/投递失败）计入熔断器，
   // task 类只走既有 per-task 重试，不进熔断计数。
   const verdict = classifyDispatchFailure(error)
   await deps.breaker?.recordFailure({ taskId, at: (deps.now ?? (() => Date.now()))(), class: verdict.class })
   const message = error instanceof Error ? error.message : String(error)
+  if (verdict.class === 'infra') {
+    // infra 是系统故障，不是任务的问题：不进 per-task 重试预算（需求 §9.1），
+    // 只把错误落 progress；系统性止损由熔断器负责。立即告知 Router 停止重试
+    //（requestId 按任务去重：重复失败不刷屏）。通知是 best-effort：宿主投递面
+    // 正是故障点，通知失败不能顶包原始的 dispatch-failed。
+    const failed = await ledger.updateProgress(taskId, `派发失败（系统故障，不计任务重试）: ${message}`)
+    if (notifyRouterSession !== undefined) {
+      try {
+        await deps.bridge.notify(
+          notifyRouterSession,
+          `dispatch-infra-${taskId}`,
+          `任务 ${taskId}「${title}」派发失败（系统故障）：${message}。这不是任务本身的问题：不要重试或换模板硬撞，熔断器正在计数；向用户如实报告，若收到「派发已冻结」则等用户解除冻结。`,
+        )
+      } catch (notifyError) {
+        deps.logger?.warn(`任务 ${taskId} 的 infra 失败通知投递失败: ${notifyError instanceof Error ? notifyError.message : String(notifyError)}`)
+      }
+    }
+    return { failed, failureClass: verdict.class }
+  }
   const failed = await ledger.recordDispatchFailure(taskId, `派发失败: ${message}`, { blockAt: DISPATCH_RETRY_CAP })
   if (failed.status === 'blocked') {
     await deps.notifications?.push({
@@ -263,7 +282,7 @@ async function recordDispatchFailure(
       `任务 ${taskId}「${title}」连续 ${failed.retryCount} 次派发失败，已自动受阻（blocked）。请检查模板/环境问题后人工介入；不要继续重试同一模板。最近错误：${message}`,
     )
   }
-  return failed
+  return { failed, failureClass: verdict.class }
 }
 
 export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssembly {
@@ -452,7 +471,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         // 暂停据此圈定「当前 Router 派出的活 + 其下游子任务」。
         dispatchedBySessionId: callerSessionId,
         dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
-        acceptancePolicy: 'auto',
+        acceptancePolicy: input.acceptancePolicy ?? 'auto',
       })
       const docs = deps.docsFor(record.cwd)
       const book = renderTaskBook(record, { materials: input.materials, sourceRef: `router 会话 ${callerSessionId}` })
@@ -472,14 +491,14 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         return { taskId: record.id, docPath, sessionId }
       } catch (error) {
         // 派发失败不留空壳（v1.1 规格 §2-4）：任务回 draft/queued、错误文本写
-        // progress、retryCount+1；达上限自动 blocked 并通知 Router。v1.2：同时
-        // 分类上报熔断、计入调用者的主管失败预算（infra/task 均计）。
+        // progress；task 类 retryCount+1 达上限自动 blocked，infra 类不进重试
+        // 预算（需求 §9.1）只报熔断并告知 Router。主管失败预算 infra/task 均计。
         deps.budgets?.recordDispatchFailure(callerSessionId)
-        const failed = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId)
+        const { failed, failureClass } = await recordDispatchFailure(deps, ledger, record.id, record.title, error, callerSessionId)
         await refreshSnapshot()
         throw new LedgerError(
           'dispatch-failed',
-          `任务 ${record.id} 派发失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : record.status}）: ${error instanceof Error ? error.message : String(error)}`,
+          `任务 ${record.id} 派发失败（任务保持${failed.status === 'blocked' ? 'blocked' : record.status}${failureClass === 'infra' ? '；系统故障不计任务重试' : `，累计失败 ${failed.retryCount ?? 0} 次`}）: ${error instanceof Error ? error.message : String(error)}`,
         )
       }
     },
@@ -506,14 +525,15 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         } catch (error) {
           const live = ledger.get(taskId)!
           // 首发未完成的任务（draft/queued）重投失败：与首发失败同口径记账——
-          // retryCount 朝上限累计，达 3 自动 blocked；running 等任务照原样抛。
+          // task 类 retryCount 朝上限累计（达 3 自动 blocked），infra 类只报熔断；
+          // running 等任务照原样抛。
           if (live.sessionId !== undefined && (live.status === 'draft' || live.status === 'queued')) {
             deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重投失败同口径计入失败预算
-            const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
+            const { failed, failureClass } = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
             await refreshSnapshot()
             throw new LedgerError(
               'dispatch-failed',
-              `任务 ${taskId} 重投失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
+              `任务 ${taskId} 重投失败（任务保持${failed.status === 'blocked' ? 'blocked' : live.status}${failureClass === 'infra' ? '；系统故障不计任务重试' : `，累计失败 ${failed.retryCount ?? 0} 次`}）: ${error instanceof Error ? error.message : String(error)}`,
             )
           }
           throw error
@@ -567,11 +587,11 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
               )
             } catch (error) {
               deps.budgets?.recordDispatchFailure(callerSessionId) // v1.2：重派失败同口径计入失败预算
-              const failed = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
+              const { failed, failureClass } = await recordDispatchFailure(deps, ledger, taskId, live.title, error, callerSessionId)
               await refreshSnapshot()
               throw new LedgerError(
                 'dispatch-failed',
-                `任务 ${taskId} 重派失败（第 ${failed.retryCount} 次，任务保持${failed.status === 'blocked' ? 'blocked' : live.status}）: ${error instanceof Error ? error.message : String(error)}`,
+                `任务 ${taskId} 重派失败（任务保持${failed.status === 'blocked' ? 'blocked' : live.status}${failureClass === 'infra' ? '；系统故障不计任务重试' : `，累计失败 ${failed.retryCount ?? 0} 次`}）: ${error instanceof Error ? error.message : String(error)}`,
               )
             }
           }
@@ -604,7 +624,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       return result
     },
 
-    async controlTask(callerSessionId, taskId, action) {
+    async controlTask(callerSessionId, taskId, action, note) {
       const record = ledger.get(taskId)
       if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
       if (action === 'pause') {
@@ -617,12 +637,81 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         if (record.sessionId !== undefined) {
           await bridge.notify(record.sessionId, `resume-${taskId}`, `任务 ${taskId}「${record.title}」已恢复，请继续按任务书当前版本推进。`)
         }
+      } else if (action === 'accept' || action === 'reject') {
+        // 验收（需求 §7.2）：用户经验收卡（caller='user'）只处理 user 策略；
+        // 模型（control_task 工具）只处理 supervisor 策略，且必须是派发者/上级会话。
+        const isUser = callerSessionId === 'user'
+        if (record.status !== 'review-pending') {
+          throw new LedgerError('illegal-transition', `验收仅适用于待验收任务: ${taskId}（当前 ${record.status}）`)
+        }
+        const expected = isUser ? 'user' : 'supervisor'
+        if (record.acceptancePolicy !== expected) {
+          throw new LedgerError(
+            'bad-request',
+            record.acceptancePolicy === 'user'
+              ? `任务 ${taskId} 的验收策略是 user：须由用户在验收卡上确认，模型不得代验`
+              : `任务 ${taskId} 的验收策略是 ${record.acceptancePolicy}：${isUser ? '用户验收卡只处理 user 策略任务' : 'auto 策略无需验收，supervisor 策略由派发者经 control_task 验收'}`,
+          )
+        }
+        if (!isUser) {
+          const parentSession = record.parentId !== undefined ? ledger.get(record.parentId)?.sessionId : undefined
+          if (record.dispatchedBySessionId !== callerSessionId && parentSession !== callerSessionId) {
+            throw new LedgerError('role-forbidden', `只有派发者或上级任务会话可以验收任务 ${taskId}`)
+          }
+        }
+        if (action === 'accept') {
+          const openSubtasks = (await ledger.listAll()).some((t) => t.parentId === taskId && !isTerminal(t.status))
+          if (openSubtasks) {
+            throw new LedgerError('illegal-transition', `任务 ${taskId} 还有未结子任务，不能验收通过`)
+          }
+          const completed = await ledger.accept(taskId, isUser ? 'user' : 'supervisor')
+          await finalizeCompletion(record, completed, 'worker', callerSessionId)
+        } else {
+          const noteText = note !== undefined && note.trim() !== '' ? note.trim() : '验收驳回：请按验收意见返工后重新提交 complete_task'
+          await ledger.reject(taskId, noteText)
+          // 驳回意见经补充通道投递原 worker（升版 + 重投），任务已回 running。
+          await core.supplementTask(callerSessionId, taskId, [`验收驳回返工：${noteText}`])
+        }
+      } else if (action === 'rework') {
+        // 退回重做（需求 §14.2 完成卡动作）：仅用户可发起；completed → running，
+        // 判定意见经补充通道投递原 worker。
+        if (callerSessionId !== 'user') {
+          throw new LedgerError('role-forbidden', `退回重做是用户在完成卡上的动作: ${taskId}`)
+        }
+        const noteText = note !== undefined && note.trim() !== ''
+          ? note.trim()
+          : '用户退回重做：请核验交付是否真正达成验收条件，补齐后重新提交 complete_task'
+        await ledger.rework(taskId, noteText)
+        await core.supplementTask('user', taskId, [`退回重做：${noteText}`])
       } else {
         await ledger.cancel(taskId, `cancelled by ${callerSessionId}`)
         await bridge.notifyCancel(taskId)
       }
       await refreshSnapshot()
       return { status: ledger.get(taskId)?.status ?? record.status }
+    },
+
+    async dispatchReady() {
+      // 解除冻结后的补派入口：冻结期间解锁的 queued 任务在这里重新出发。
+      await assertDispatchOpen()
+      let dispatched = 0
+      for (const task of await scheduler.readyTasks()) {
+        try {
+          await withTaskLock(task.id, async () => {
+            const live = ledger.get(task.id)
+            if (live?.status !== 'queued') return
+            const delivered = await bridge.dispatchTask(task.id)
+            const workspace = live.projectId.startsWith('cwd:') ? undefined : live.projectId
+            await afterDispatch(live, delivered.sessionId, workspace)
+            dispatched += 1
+          })
+        } catch (error) {
+          const { failureClass } = await recordDispatchFailure(deps, ledger, task.id, task.title, error, ui.routerSessions()[0]?.sessionId)
+          await refreshSnapshot()
+          deps.logger?.warn(`任务 ${task.id} 补派失败（${failureClass}${failureClass === 'task' ? `，retryCount=${ledger.get(task.id)?.retryCount}` : '，不计任务重试'}）: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      return { dispatched }
     },
 
     async searchHistory(_callerSessionId, query, scope) {
@@ -651,6 +740,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       // 账本方法返回活引用：record.status 会在 complete 后被原地改写，
       // 「是否首次完成」必须在调用前取证。
       const wasTerminal = isTerminal(record.status)
+      const priorStatus = record.status
       const completed = await ledger.complete(taskId, {
         docVersion: input.docVersion,
         summary: input.summary,
@@ -667,70 +757,12 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
         pendingFrom = completed.acceptancePolicy === 'user' ? 'user' : 'supervisor'
       }
       if (completed.status === 'completed' && !wasTerminal) {
-        // 首次完成（幂等重提不重复广播）：熔断创建基准清除（v1.2 B1）+ 记忆触发
-        // + 通知上级 + 解锁依赖自动派发
-        await deps.breaker?.recordCompletion(taskId, now())
-        // v1.3 C1：完成卡摘要可选带「首请求缓存命中 X tok」——已上报才带
-        //（未上报不出现该行，不动既有卡结构语义）。
-        const cacheLine = completed.firstRequestCacheReadTokens !== undefined
-          ? `\n首请求缓存命中 ${completed.firstRequestCacheReadTokens} tok`
-          : ''
-        await deps.notifications?.push({
-          kind: 'completion',
-          taskId,
-          title: record.title,
-          summary: `${input.summary}${cacheLine}`,
-          actions: completionActions(),
-          deliveryOrigin: input.deliveryOrigin ?? 'worker',
-        })
-        deps.memory?.onTaskCompleted({
-          taskId,
-          title: record.title,
-          summary: input.summary,
-          resultRelPath: `${deps.tasksDir ?? '.router'}/tasks/${taskId}/result.md`,
-          sessionId: record.sessionId,
-        })
-        const parent = completed.parentId !== undefined ? ledger.get(completed.parentId) : undefined
-        if (parent?.sessionId !== undefined && parent.sessionId !== callerSessionId) {
-          await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${input.summary}`)
-        }
-        const unlocked = await scheduler.onCompleted(taskId)
-        for (const nextTask of unlocked) {
-          try {
-            // 与 supplement 重派共用同一把任务锁：并发补充/解锁不重复派发
-            await withTaskLock(nextTask.id, async () => {
-              const delivered = await bridge.dispatchTask(nextTask.id)
-              const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
-              await afterDispatch(nextTask, delivered.sessionId, workspace)
-            })
-          } catch (error) {
-            // 单个解锁任务的派发失败不拖垮完成本身：失败记账（retryCount 累计、
-            // 达上限自动 blocked 并通知 Router），任务保持 queued 等下次解锁重试。
-            await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId)
-            await refreshSnapshot()
-            deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（retryCount=${ledger.get(nextTask.id)?.retryCount}）: ${error instanceof Error ? error.message : String(error)}`)
-          }
-        }
-        // 父任务因本子任务未结而待验收：子任务完成后重判。auto 且子任务已结清则
-        // 复用完成协议转 completed（连带广播/解锁/记忆），修 review-pending 死锁。
-        // 沿 parentId 向上级联，必终止于根；sessionId 不等防自环。
-        if (
-          parent?.status === 'review-pending'
-          && parent.sessionId !== undefined
-          && parent.sessionId !== callerSessionId
-          && parent.result !== undefined
-        ) {
-          const stillOpen = (await ledger.listAll()).some((t) => t.parentId === parent.id && !isTerminal(t.status))
-          if (!stillOpen) {
-            await core.completeTask(parent.sessionId, parent.id, {
-              docVersion: parent.docVersion,
-              summary: parent.result.summary,
-              deliverables: parent.result.deliverables,
-              acceptanceEvidence: parent.result.acceptanceEvidence,
-              leftovers: parent.result.openIssues,
-            })
-          }
-        }
+        await finalizeCompletion(record, completed, input.deliveryOrigin ?? 'worker', callerSessionId)
+      }
+      // 新进入待验收（幂等重提不重发卡/通知）：user 策略出验收卡，supervisor
+      // 策略通知验收人；auto 带未结子任务的由级联重判收尾，不发卡。
+      if (completed.status === 'review-pending' && priorStatus !== 'review-pending') {
+        await announceAcceptance(completed)
       }
       await refreshSnapshot()
       // pendingFrom 只在待验收时进输出：undefined 值的键会被 JSON 序列化蒸发
@@ -796,6 +828,114 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     },
 
     callerRoleOf,
+  }
+
+  /**
+   * 完成副作用统一执行（需求 §7.2）：worker 提交被直接接受、验收通过都走这里——
+   * 熔断创建基准清除、完成卡、记忆、通知上级、解锁依赖自动派发、父任务级联重判。
+   * Router 不在生成也能推进。
+   */
+  async function finalizeCompletion(
+    record: TaskRecord,
+    completed: TaskRecord,
+    deliveryOrigin: 'worker' | 'system-judged',
+    callerSessionId: string,
+  ): Promise<void> {
+    const result = completed.result
+    if (result === undefined) return
+    const taskId = completed.id
+    await deps.breaker?.recordCompletion(taskId, now())
+    // v1.3 C1：完成卡摘要可选带「首请求缓存命中 X tok」——已上报才带。
+    const cacheLine = completed.firstRequestCacheReadTokens !== undefined
+      ? `\n首请求缓存命中 ${completed.firstRequestCacheReadTokens} tok`
+      : ''
+    await deps.notifications?.push({
+      kind: 'completion',
+      taskId,
+      title: record.title,
+      summary: `${result.summary}${cacheLine}`,
+      actions: completionActions(),
+      deliveryOrigin,
+    })
+    deps.memory?.onTaskCompleted({
+      taskId,
+      title: record.title,
+      summary: result.summary,
+      resultRelPath: `${deps.tasksDir ?? '.router'}/tasks/${taskId}/result.md`,
+      sessionId: record.sessionId,
+    })
+    const parent = completed.parentId !== undefined ? ledger.get(completed.parentId) : undefined
+    if (parent?.sessionId !== undefined && parent.sessionId !== callerSessionId) {
+      await bridge.notify(parent.sessionId, `notice-${taskId}-completed`, `子任务 ${taskId}「${record.title}」已完成：${result.summary}`)
+    }
+    const unlocked = await scheduler.onCompleted(taskId)
+    for (const nextTask of unlocked) {
+      // 解锁自动派发同受全局熔断闸（需求 §9.2：冻结时一切派发被拒）：冻结期间
+      // 任务保持 queued，解除冻结后由 dispatchReady 补派，不绕过冻结语义。
+      if (deps.breaker !== undefined && (await deps.breaker.state()).frozen) {
+        deps.logger?.warn(`派发已冻结：任务 ${nextTask.id} 解锁后保持 queued，解除冻结后补派`)
+        continue
+      }
+      try {
+        // 与 supplement 重派共用同一把任务锁：并发补充/解锁不重复派发
+        await withTaskLock(nextTask.id, async () => {
+          const delivered = await bridge.dispatchTask(nextTask.id)
+          const workspace = nextTask.projectId.startsWith('cwd:') ? undefined : nextTask.projectId
+          await afterDispatch(nextTask, delivered.sessionId, workspace)
+        })
+      } catch (error) {
+        // 单个解锁任务的派发失败不拖垮完成本身：失败分类记账（task 类 retryCount
+        // 累计达上限自动 blocked；infra 类只报熔断），任务保持 queued 等下次重试。
+        const { failureClass } = await recordDispatchFailure(deps, ledger, nextTask.id, nextTask.title, error, ui.routerSessions()[0]?.sessionId)
+        await refreshSnapshot()
+        deps.logger?.warn(`任务 ${nextTask.id} 解锁后派发失败（${failureClass}${failureClass === 'task' ? `，retryCount=${ledger.get(nextTask.id)?.retryCount}` : '，不计任务重试'}）: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    // 父任务因本子任务未结而待验收：子任务完成后重判。auto 且子任务已结清则
+    // 复用完成协议转 completed（连带广播/解锁/记忆），修 review-pending 死锁。
+    // 沿 parentId 向上级联，必终止于根；sessionId 不等防自环。
+    if (
+      parent?.status === 'review-pending'
+      && parent.sessionId !== undefined
+      && parent.sessionId !== callerSessionId
+      && parent.result !== undefined
+    ) {
+      const stillOpen = (await ledger.listAll()).some((t) => t.parentId === parent.id && !isTerminal(t.status))
+      if (!stillOpen) {
+        await core.completeTask(parent.sessionId, parent.id, {
+          docVersion: parent.docVersion,
+          summary: parent.result.summary,
+          deliverables: parent.result.deliverables,
+          acceptanceEvidence: parent.result.acceptanceEvidence,
+          leftovers: parent.result.openIssues,
+        })
+      }
+    }
+  }
+
+  /** 新进入 review-pending 的验收通知（需求 §7.2）：user 出验收卡，supervisor 通知验收人。 */
+  async function announceAcceptance(task: TaskRecord): Promise<void> {
+    if (task.acceptancePolicy === 'user') {
+      await deps.notifications?.push({
+        kind: 'completion',
+        taskId: task.id,
+        title: `待验收：${task.title}`,
+        summary: `${task.result?.summary ?? ''}\n验收策略：用户确认——验收通过后完成；驳回将退回原执行者返工。`,
+        actions: acceptanceActions(),
+      })
+      return
+    }
+    if (task.acceptancePolicy === 'supervisor') {
+      const parentSession = task.parentId !== undefined ? ledger.get(task.parentId)?.sessionId : undefined
+      const target = task.dispatchedBySessionId ?? parentSession
+      if (target !== undefined) {
+        await bridge.notify(
+          target,
+          `acceptance-${task.id}`,
+          `任务 ${task.id}「${task.title}」已提交交付，等你验收：control_task action=accept 通过（有未结子任务会被拒），action=reject 附 note 驳回返工。结果摘要：${task.result?.summary ?? ''}`,
+        )
+      }
+    }
   }
 
   const workbench: RouterWorkbench = {

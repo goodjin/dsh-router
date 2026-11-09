@@ -202,22 +202,20 @@ export class CircuitBreaker {
     }
   }
 
-  /** 阈值判定 + 自动冻结（锁存；已冻结时不覆盖首次原因）。 */
-  private async evaluateAutoFreeze(nowAt: number): Promise<void> {
+  /** 阈值判定 + 自动冻结（锁存；已冻结时不覆盖首次原因）。落盘由调用方统一做。 */
+  private evaluateAutoFreeze(nowAt: number): void {
     if (this.file.frozen) return
     const counts = this.inWindowCounts()
     if (counts.infraFailures >= this.infraThreshold) {
       this.file.frozen = true
       this.file.reason = `infra 失败 ${counts.infraFailures} 次（${Math.round(this.windowMs / 60_000)} 分钟窗口）`
       this.file.frozenAt = nowAt
-      await this.save()
       return
     }
     if (counts.creations >= this.creationThreshold && counts.completions === 0) {
       this.file.frozen = true
       this.file.reason = `窗口内创建 ${counts.creations} 个任务零完成（疑似创建风暴）`
       this.file.frozenAt = nowAt
-      await this.save()
     }
   }
 
@@ -228,7 +226,9 @@ export class CircuitBreaker {
     const at = event.at ?? this.now()
     this.prune(at)
     this.file.infraFailures.push({ taskId: event.taskId, at })
-    await this.evaluateAutoFreeze(at)
+    this.evaluateAutoFreeze(at)
+    // 未达阈值的窗口事件也落盘：否则重启清零计数，「重启不重置计数」名存实亡。
+    await this.save()
   }
 
   /** 记录一次任务创建（集合语义：同任务重记只刷新时间）。 */
@@ -238,7 +238,8 @@ export class CircuitBreaker {
     this.prune(at2)
     this.file.creations = this.file.creations.filter((entry) => entry.taskId !== taskId)
     this.file.creations.push({ taskId, at: at2 })
-    await this.evaluateAutoFreeze(at2)
+    this.evaluateAutoFreeze(at2)
+    await this.save()
   }
 
   /** 记录一次完成：清该任务的创建计数基准，并把「零完成」信号破掉。 */

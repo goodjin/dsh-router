@@ -12,6 +12,8 @@ import { SessionBridge, type SessionBridgeHost, type WorkspaceInfo } from '../sr
 import { AnswerRelay } from '../src/host/bridge/questions.ts'
 import { CompactionDriver, type CompactionDeps } from '../src/host/context/compaction-driver.ts'
 import { createRouterCore, type RouterCoreAssemblyDeps, type RouterCoreHosts, type RouterMemory } from '../src/host/core.ts'
+import { CircuitBreaker } from '../src/host/guard/breaker.ts'
+import { NotificationStore } from '../src/host/guard/notifications.ts'
 import { UiStateStore, type UiStatePersistence, type UiStateFile } from '../src/host/bridge/tabs.ts'
 import type { FsAdapter } from '../src/shared/fs-adapter.ts'
 import type { TaskRecord } from '../src/shared/types.ts'
@@ -206,6 +208,9 @@ async function coreWith(
     failSelectModel?: Error
     failCreate?: (attempt: number) => Error | undefined
     failPrompt?: Error | ((attempt: number) => Error | undefined)
+    /** 验收/冻结测试用：通知存储与熔断器（缺省 = 防护面未接线）。 */
+    notifications?: NotificationStore
+    breaker?: CircuitBreaker
   } = {},
 ) {
   const persistence = new MemoryPersistence()
@@ -259,10 +264,43 @@ async function coreWith(
     isRunning: () => false,
     memory,
     tasksDir: '.router',
+    notifications: opts.notifications,
+    breaker: opts.breaker,
   }
   const assembled = createRouterCore(assemblyDeps)
   await assembled.refreshSnapshot()
   return { ledger, docs, bridge, relay, driver, events, modelSelects, ui, memoryState, ...assembled }
+}
+
+/** 内存 FsAdapter（熔断器/通知存储的落盘假件）。 */
+function memoryFs(): FsAdapter {
+  const files = new Map<string, string>()
+  return {
+    async readFile(p) {
+      const content = files.get(p)
+      if (content === undefined) throw new LedgerError('doc-not-found', `文件不存在: ${p}`)
+      return content
+    },
+    async writeFile(p, content) {
+      files.set(p, content)
+    },
+    async mkdirp() {},
+    async exists(p) {
+      return files.has(p)
+    },
+    async readdir() {
+      return [...files.keys()]
+    },
+  }
+}
+
+function fakeNotifications(): NotificationStore {
+  let seq = 0
+  return new NotificationStore({ fs: memoryFs(), path: '/notifications.json', newId: () => `n-${++seq}`, now: () => 1 })
+}
+
+function fakeBreaker(): CircuitBreaker {
+  return new CircuitBreaker({ fs: memoryFs(), path: '/guard-state.json', now: () => 1000 })
 }
 
 /* ────────────────────────── 派发 ────────────────────────── */
@@ -396,64 +434,79 @@ describe('createRouterCore：派发失败语义（v1.1 A4）', () => {
     templateId: 'coder',
   }
 
-  it('建会话失败：任务回 draft、错误落 progress、retryCount+1，不留 cancelled 空壳', async () => {
-    const { core, ledger, ui } = await coreWith([], { failCreate: () => new Error('preset row never started') })
+  it('建会话失败（infra）：任务回 draft、错误落 progress、不计任务重试，通知 Router 停止重试', async () => {
+    const { core, ledger, ui, events } = await coreWith([], { failCreate: () => new Error('preset row never started') })
     await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     const record = ledger.get('T-001')
     expect(record?.status).toBe('draft')
-    expect(record?.retryCount).toBe(1)
+    expect(record?.retryCount ?? 0).toBe(0) // §9.1：infra 不进 per-task 重试预算
     expect(record?.progress).toContain('preset row never started')
     expect(record?.sessionId).toBeUndefined()
     expect(ui.tabs('ws-1')).toEqual([])
+    const notice = events.prompts.find((p) => p.requestId === 'dispatch-infra-T-001')
+    expect(notice).toBeDefined()
+    expect(notice!.sessionId).toBe('router-s-1')
+    expect(notice!.text).toContain('不要重试')
   })
 
-  it('投递失败（会话已建）：session 保留供重试、状态仍 draft、retryCount+1', async () => {
-    const { core, ledger } = await coreWith([], { failPrompt: new Error('prompt rejected by host') })
+  it('投递失败（infra，会话已建）：session 保留、状态仍 draft、不计任务重试并通知 Router', async () => {
+    // 只让首发投递失败（attempt 1）；infra 通知（attempt 2）要能送达才可断言。
+    const { core, ledger, events } = await coreWith([], { failPrompt: (attempt) => (attempt === 1 ? new Error('prompt rejected by host') : undefined) })
     await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     const record = ledger.get('T-001')
     expect(record?.status).toBe('draft')
     expect(record?.sessionId).toBe('session-1')
-    expect(record?.retryCount).toBe(1)
+    expect(record?.retryCount ?? 0).toBe(0)
     expect(record?.progress).toContain('prompt rejected by host')
+    expect(events.prompts.some((p) => p.requestId === 'dispatch-infra-T-001')).toBe(true)
   })
 
-  it('同一任务重试累计：dispatch 失败后经 supplement 重派，3 次失败自动 blocked 并通知', async () => {
-    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
-    // 第 1 次：dispatch_task 失败 → draft、rc=1
-    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+  it('同一任务重试累计（task 类拒绝）：supplement 重派 3 次失败自动 blocked 并通知', async () => {
+    // role=router 的任务不可执行：桥 presetFor 抛未打标 LedgerError（task 类），
+    // 走 per-task 重试预算；infra 类（建会话/投递失败）不在此列。
+    const records = [task({ id: 'T-001', role: 'router', status: 'draft', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    // 第 1 次：supplement 重派失败 → draft、rc=1、不通知
+    await expect(core.supplementTask('router-s-1', 'T-001', ['改用稳态模板'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     expect(ledger.get('T-001')?.status).toBe('draft')
     expect(ledger.get('T-001')?.retryCount).toBe(1)
-    // 第 2 次：supplement_task 重派（任务无会话）→ 仍失败、rc=2、不通知
-    await expect(core.supplementTask('router-s-1', 'T-001', ['改用稳态模板'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    expect(events.prompts.some((p) => p.requestId.startsWith('dispatch-blocked'))).toBe(false)
+    // 第 2 次：仍失败、rc=2、不通知
+    await expect(core.supplementTask('router-s-1', 'T-001', ['再试一次'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     expect(ledger.get('T-001')?.status).toBe('draft')
     expect(ledger.get('T-001')?.retryCount).toBe(2)
     expect(events.prompts.some((p) => p.requestId.startsWith('dispatch-blocked'))).toBe(false)
     // 第 3 次：达上限 → blocked + 通知调用方
-    await expect(core.supplementTask('router-s-1', 'T-001', ['再试一次'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    await expect(core.supplementTask('router-s-1', 'T-001', ['最后一试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     expect(ledger.get('T-001')?.status).toBe('blocked')
     expect(ledger.get('T-001')?.retryCount).toBe(3)
     const notice = events.prompts.find((p) => p.requestId === 'dispatch-blocked-T-001')
     expect(notice).toBeDefined()
     expect(notice!.sessionId).toBe('router-s-1')
     expect(notice!.text).toContain('3')
+    // task 类不发 infra 通知（两类口径不混）
+    expect(events.prompts.some((p) => p.requestId.startsWith('dispatch-infra'))).toBe(false)
   })
 
   it('封顶后不再重试：blocked 任务的 supplement 只升版不派发，retryCount 停在 3', async () => {
-    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
-    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+    const records = [task({ id: 'T-001', role: 'router', status: 'draft', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
     await expect(core.supplementTask('router-s-1', 'T-001', ['第一次重试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     await expect(core.supplementTask('router-s-1', 'T-001', ['第二次重试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
+    await expect(core.supplementTask('router-s-1', 'T-001', ['第三次重试'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     expect(ledger.get('T-001')?.status).toBe('blocked')
     expect(ledger.get('T-001')?.retryCount).toBe(3)
     expect(events.prompts.filter((p) => p.requestId === 'dispatch-blocked-T-001')).toHaveLength(1)
-    // 封顶后的 supplement：只升版（前两次补充已到 v3，这次到 v4），不再派发
+    // 封顶后的 supplement：只升版（前三次补充已到 v4，这次到 v5），不再派发
     const result = await core.supplementTask('router-s-1', 'T-001', ['后续补充'])
-    expect(result.docVersion).toBe(4)
+    expect(result.docVersion).toBe(5)
     expect(ledger.get('T-001')?.retryCount).toBe(3)
     expect(events.prompts.filter((p) => p.requestId === 'dispatch-blocked-T-001')).toHaveLength(1)
   })
 
-  it('解锁派发失败：queued 任务记账（rc=1、progress 落错）保持 queued 不留空壳', async () => {
+  it('解锁派发失败（infra）：queued 任务 progress 落错、不计重试、保持 queued 不留空壳', async () => {
     const records = [
       task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' }),
       task({ id: 'T-010', role: 'worker', status: 'queued', dependsOn: ['T-001'], projectId: 'ws-1', cwd: '/proj', title: '解锁后失败' }),
@@ -462,7 +515,7 @@ describe('createRouterCore：派发失败语义（v1.1 A4）', () => {
     await docs.initTask(ledger.get('T-010')!, '# 任务书 T-010')
     await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '依赖完' })
     expect(ledger.get('T-010')?.status).toBe('queued')
-    expect(ledger.get('T-010')?.retryCount).toBe(1)
+    expect(ledger.get('T-010')?.retryCount ?? 0).toBe(0)
     expect(ledger.get('T-010')?.progress).toContain('boom')
     expect(ledger.get('T-001')?.status).toBe('completed')
   })
@@ -797,15 +850,16 @@ describe('createRouterCore：评审修复（重派记账 / 依赖闸门 / 并发
     expect(events.created).toEqual([])
   })
 
-  it('会话已建的 draft 任务：重投失败同口径记账（rc+1、dispatch-failed）', async () => {
+  it('会话已建的 draft 任务：重投失败（infra）同口径——不计重试、progress 落错、dispatch-failed', async () => {
+    // 投递是奇数次 prompt、infra 通知是偶数次：只 fail 投递（1、3），通知放行。
     const { core, ledger } = await coreWith([], {
-      failPrompt: (attempt) => (attempt <= 2 ? new Error('prompt down') : undefined),
+      failPrompt: (attempt) => (attempt <= 3 && attempt % 2 === 1 ? new Error('prompt down') : undefined),
     })
     await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     expect(ledger.get('T-001')?.sessionId).toBe('session-1')
-    expect(ledger.get('T-001')?.retryCount).toBe(1)
+    expect(ledger.get('T-001')?.retryCount ?? 0).toBe(0)
     await expect(core.supplementTask('router-s-1', 'T-001', ['修正后重投'])).rejects.toMatchObject({ code: 'dispatch-failed' })
-    expect(ledger.get('T-001')?.retryCount).toBe(2)
+    expect(ledger.get('T-001')?.retryCount ?? 0).toBe(0) // infra 两次都不计任务重试
     expect(ledger.get('T-001')?.status).toBe('draft')
     expect(ledger.get('T-001')?.progress).toContain('prompt down')
   })
@@ -834,9 +888,11 @@ describe('createRouterCore：评审修复（重派记账 / 依赖闸门 / 并发
     expect(ledger.get('T-001')?.docVersion).toBe(2)
   })
 
-  it('并发补充同一任务：串行化重派，封顶不破（rc 停 3、只通知一次、无非法迁移）', async () => {
-    const { core, ledger, events } = await coreWith([], { failCreate: () => new Error('boom') })
-    await expect(core.dispatchTask('router-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
+  it('并发补充同一任务（task 类拒绝）：串行化重派，封顶不破（rc 停 3、只通知一次、无非法迁移）', async () => {
+    const records = [task({ id: 'T-001', role: 'router', status: 'draft', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    await expect(core.supplementTask('router-s-1', 'T-001', ['首次重派'])).rejects.toMatchObject({ code: 'dispatch-failed' })
     // 串行化后两次补充都获得重派机会（rc 1→2→3），但计数封顶、状态只封一次
     const outcomes = await Promise.allSettled([
       core.supplementTask('router-s-1', 'T-001', ['并发一']),
@@ -988,5 +1044,173 @@ describe('createRouterCore：Router 默认值钉定', () => {
     const empty = await coreWith([], { routerDefaults: { get: async () => ({ routerSystemPrompt: 'x', routerModel: '' }) } })
     await empty.workbench.createRouterSession('ws-1')
     expect(empty.modelSelects).toHaveLength(0)
+  })
+})
+
+/* ────────────────────────── 验收协议（需求 §7，H2 修复） ────────────────────────── */
+
+describe('createRouterCore：验收协议（需求 §7）', () => {
+  const INPUT = {
+    title: '写发布文档',
+    goal: '发布说明完整',
+    acceptance: ['文档过审'],
+    role: 'worker' as const,
+    templateId: 'coder',
+  }
+
+  it('dispatch_task 的 acceptancePolicy 落账本；缺省 auto', async () => {
+    const { core, ledger } = await coreWith()
+    const userTask = await core.dispatchTask('router-s-1', { ...INPUT, acceptancePolicy: 'user' })
+    expect(ledger.get(userTask.taskId)?.acceptancePolicy).toBe('user')
+    const supTask = await core.dispatchTask('router-s-1', { ...INPUT, title: '二号', acceptancePolicy: 'supervisor' })
+    expect(ledger.get(supTask.taskId)?.acceptancePolicy).toBe('supervisor')
+    const autoTask = await core.dispatchTask('router-s-1', { ...INPUT, title: '三号' })
+    expect(ledger.get(autoTask.taskId)?.acceptancePolicy).toBe('auto')
+  })
+
+  it('user 策略提交 → review-pending + 验收卡（accept/reject 动作）；幂等重提不重发卡', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'user', projectId: 'ws-1', cwd: '/proj' })]
+    const notifications = fakeNotifications()
+    const { core, ledger } = await coreWith(records, { notifications })
+    const result = await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    expect(result).toEqual({ accepted: false, status: 'review-pending', pendingFrom: 'user' })
+    expect(ledger.get('T-001')?.status).toBe('review-pending')
+    const cards = await notifications.pending()
+    expect(cards).toHaveLength(1)
+    expect(cards[0]!.title).toBe('待验收：示例任务')
+    expect(cards[0]!.taskId).toBe('T-001')
+    expect(cards[0]!.actions.map((a) => a.action)).toEqual(['accept', 'reject', 'open-session', 'ack'])
+    // 幂等重提：不重复发卡
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    expect(await notifications.pending()).toHaveLength(1)
+  })
+
+  it('supervisor 策略提交 → review-pending + 通知派发者验收（不发给用户卡）', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'supervisor', dispatchedBySessionId: 'router-s-1', projectId: 'ws-1', cwd: '/proj' })]
+    const notifications = fakeNotifications()
+    const { core, events } = await coreWith(records, { notifications })
+    const result = await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    expect(result).toEqual({ accepted: false, status: 'review-pending', pendingFrom: 'supervisor' })
+    const notice = events.prompts.find((p) => p.requestId === 'acceptance-T-001')
+    expect(notice?.sessionId).toBe('router-s-1')
+    expect(notice?.text).toContain('accept')
+    expect(notice?.text).toContain('reject')
+    expect(await notifications.pending()).toHaveLength(0)
+  })
+
+  it('user 验收通过：completed + 完成副作用全套（完成卡/记忆）；模型不得代验', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'user', projectId: 'ws-1', cwd: '/proj' })]
+    const notifications = fakeNotifications()
+    const { core, ledger, memoryState } = await coreWith(records, { notifications })
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    // 模型代验被拒（user 策略只认用户通道）
+    await expect(core.controlTask('router-s-1', 'T-001', 'accept')).rejects.toMatchObject({ code: 'bad-request' })
+    const result = await core.controlTask('user', 'T-001', 'accept')
+    expect(result.status).toBe('completed')
+    expect(ledger.get('T-001')?.status).toBe('completed')
+    expect(memoryState.completed).toHaveLength(1)
+    const cards = await notifications.pending()
+    // 验收卡 + 完成卡各一张
+    expect(cards.map((c) => c.title)).toEqual(['示例任务', '待验收：示例任务'])
+    expect(cards[0]!.actions.map((a) => a.action)).toContain('rework')
+  })
+
+  it('supervisor 验收：派发者可 accept；无关会话 role-forbidden；用户卡不越权', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'supervisor', dispatchedBySessionId: 'router-s-1', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger } = await coreWith(records)
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    await expect(core.controlTask('stranger-s', 'T-001', 'accept')).rejects.toMatchObject({ code: 'role-forbidden' })
+    await expect(core.controlTask('user', 'T-001', 'accept')).rejects.toMatchObject({ code: 'bad-request' })
+    const result = await core.controlTask('router-s-1', 'T-001', 'accept')
+    expect(result.status).toBe('completed')
+    expect(ledger.get('T-001')?.status).toBe('completed')
+  })
+
+  it('有未结子任务时 accept 被拒（illegal-transition）', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'user', projectId: 'ws-1', cwd: '/proj' }),
+      task({ id: 'T-002', role: 'worker', sessionId: 'session-2', status: 'running', parentId: 'T-001' }),
+    ]
+    const { core } = await coreWith(records)
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '主体完成' })
+    await expect(core.controlTask('user', 'T-001', 'accept')).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('非待验收任务 accept/reject 照抛 illegal-transition', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'user' })]
+    const { core } = await coreWith(records)
+    await expect(core.controlTask('user', 'T-001', 'accept')).rejects.toMatchObject({ code: 'illegal-transition' })
+    await expect(core.controlTask('user', 'T-001', 'reject')).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('user 驳回返工：回 running + 驳回意见经补充通道重投原 worker', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'user', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    const result = await core.controlTask('user', 'T-001', 'reject', '缺变更日志章节')
+    expect(result.status).toBe('running')
+    expect(ledger.get('T-001')?.status).toBe('running')
+    expect(ledger.get('T-001')?.progress).toBe('缺变更日志章节')
+    expect(ledger.get('T-001')?.docVersion).toBe(2)
+    const redelivery = events.prompts.find((p) => p.requestId === 'dispatch-T-001-v2')
+    expect(redelivery?.sessionId).toBe('session-9')
+    expect(redelivery?.text).toContain('验收驳回返工')
+    expect(redelivery?.text).toContain('缺变更日志章节')
+  })
+
+  it('supervisor 驳回返工：派发者经 control_task reject 同语义', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', acceptancePolicy: 'supervisor', dispatchedBySessionId: 'router-s-1', projectId: 'ws-1', cwd: '/proj' })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '文档写完' })
+    const result = await core.controlTask('router-s-1', 'T-001', 'reject', '验收依据不足')
+    expect(result.status).toBe('running')
+    expect(ledger.get('T-001')?.progress).toBe('验收依据不足')
+    expect(events.prompts.some((p) => p.requestId === 'dispatch-T-001-v2' && p.text.includes('验收驳回返工'))).toBe(true)
+  })
+
+  it('rework（完成卡退回重做）：仅用户可发起；completed → running + 返工意见重投', async () => {
+    const records = [task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'completed', projectId: 'ws-1', cwd: '/proj', result: { summary: '已完成', docRef: 'result.md' } })]
+    const { core, ledger, docs, events } = await coreWith(records)
+    await docs.initTask(ledger.get('T-001')!, '# 任务书 T-001')
+    await expect(core.controlTask('router-s-1', 'T-001', 'rework')).rejects.toMatchObject({ code: 'role-forbidden' })
+    const result = await core.controlTask('user', 'T-001', 'rework', '验收条件没真正达成')
+    expect(result.status).toBe('running')
+    expect(ledger.get('T-001')?.status).toBe('running')
+    expect(ledger.get('T-001')?.progress).toBe('验收条件没真正达成')
+    const redelivery = events.prompts.find((p) => p.requestId === 'dispatch-T-001-v2')
+    expect(redelivery?.sessionId).toBe('session-9')
+    expect(redelivery?.text).toContain('退回重做')
+  })
+})
+
+/* ────────────────────────── 冻结与补派（需求 §9.2，M1 修复） ────────────────────────── */
+
+describe('createRouterCore：冻结期间的解锁派发与解冻补派（M1）', () => {
+  it('冻结时解锁任务保持 queued 不派发；dispatchReady 补派成功', async () => {
+    const records = [
+      task({ id: 'T-001', role: 'worker', sessionId: 'session-9', status: 'running', projectId: 'ws-1', cwd: '/proj' }),
+      task({ id: 'T-010', role: 'worker', status: 'queued', dependsOn: ['T-001'], projectId: 'ws-1', cwd: '/proj', title: '解锁后待派' }),
+    ]
+    const breaker = fakeBreaker()
+    await breaker.freeze('测试冻结')
+    const { core, ledger, docs, events } = await coreWith(records, { breaker })
+    await docs.initTask(ledger.get('T-010')!, '# 任务书 T-010')
+    await core.completeTask('session-9', 'T-001', { docVersion: 1, summary: '依赖完' })
+    // 冻结闸：完成本身成功，解锁任务不派发
+    expect(ledger.get('T-001')?.status).toBe('completed')
+    expect(ledger.get('T-010')?.status).toBe('queued')
+    expect(events.created).toEqual([])
+    // 冻结未解时补派也被拒
+    await expect(core.dispatchReady()).rejects.toMatchObject({ code: 'dispatch-frozen' })
+    // 解冻后补派：queued → dispatched
+    await breaker.unfreeze()
+    const report = await core.dispatchReady()
+    expect(report.dispatched).toBe(1)
+    expect(ledger.get('T-010')?.status).toBe('dispatched')
+    expect(ledger.get('T-010')?.sessionId).toBe('session-1')
+    // 幂等：再补一轮无任务可派
+    expect((await core.dispatchReady()).dispatched).toBe(0)
   })
 })

@@ -2,7 +2,7 @@
  * 控制路由 + 紧急暂停测试（v1.2 计划 Task B4，规格 §2 熔断/§Review Focus 5）。
  *
  * 三条新 exact 路由：
- *   POST /router/tasks/control    {taskId, action:'pause'|'resume'|'cancel'|'redispatch'} → {status}
+ *   POST /router/tasks/control    {taskId, action:'pause'|'resume'|'cancel'|'redispatch'|'accept'|'reject'|'rework', note?} → {status}
  *   POST /router/breaker/unfreeze → {before, after}（冻结前/后可见投影）
  *   POST /router/emergency-pause  → {frozen, reason?, interrupted[], failedCount, notification?}
  *
@@ -189,7 +189,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
     },
     async saveSessionPrompt() {},
     /* ── B4 三条（与 entry.ts 逐字同构） ── */
-    controlTask: async (taskId, action) => {
+    controlTask: async (taskId, action, note) => {
       if (action === 'redispatch') {
         const state = await breaker.state()
         if (state.frozen) {
@@ -201,7 +201,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
         await h.core.supplementTask('user', taskId, ['用户重派：请按任务书当前版本推进'])
         return { status: h.core.getTask(taskId)?.status ?? 'failed' }
       }
-      return h.core.controlTask('user', taskId, action)
+      return h.core.controlTask('user', taskId, action, note)
     },
     unfreezeBreaker: async () => {
       const beforeState = await breaker.state()
@@ -212,6 +212,8 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
       }
       await breaker.unfreeze()
       const afterState = await breaker.state()
+      // 与 entry.ts 同构：解冻后补派冻结期间解锁的 queued 任务（M1）。
+      await h.core.dispatchReady()
       return { before, after: { frozen: afterState.frozen } }
     },
     scopedPause: async (routerSessionId: string) => h.core.scopedPause(routerSessionId),
@@ -223,6 +225,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
 async function dispatchWorkerTask(
   h: Awaited<ReturnType<typeof controlHarness>>,
   title: string,
+  acceptancePolicy: 'auto' | 'supervisor' | 'user' = 'auto',
 ): Promise<{ taskId: string; sessionId: string }> {
   const result = await h.core.dispatchTask('router-s-1', {
     title,
@@ -230,6 +233,7 @@ async function dispatchWorkerTask(
     acceptance: ['完成'],
     role: 'worker',
     templateId: 'coder',
+    acceptancePolicy,
   })
   return { taskId: result.taskId, sessionId: result.sessionId ?? '' }
 }
@@ -505,6 +509,96 @@ describe('POST /router/tasks/control（B4）', () => {
     expect(exchange.captured.status).toBe(409)
     expect(JSON.parse(exchange.captured.body!)).toMatchObject({ error: expect.stringContaining('终态') })
   })
+
+  /* ── 验收动作（需求 §7，H2）：accept/reject/rework 经用户控制路由 ── */
+
+  it('accept：user 策略待验收任务 → completed，完成卡入统一通知存储', async () => {
+    const h = await controlHarness()
+    const { taskId, sessionId } = await dispatchWorkerTask(h, '要验收的活', 'user')
+    await h.ledger.transition(taskId, 'running')
+    await h.core.completeTask(sessionId, taskId, { docVersion: 1, summary: '做完了' })
+    expect(h.ledger.get(taskId)?.status).toBe('review-pending')
+    const acceptanceCards = (await h.notifications.pending()).filter((c) => c.title.startsWith('待验收'))
+    expect(acceptanceCards).toHaveLength(1)
+    expect(acceptanceCards[0]!.actions.map((a) => a.action)).toContain('accept')
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId, action: 'accept' }))
+    await handlerOf(routes, '/router/tasks/control')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    expect(JSON.parse(exchange.captured.body!)).toEqual({ status: 'completed' })
+    expect(h.ledger.get(taskId)?.status).toBe('completed')
+    const completionCards = (await h.notifications.pending()).filter((c) => c.title === '要验收的活')
+    expect(completionCards).toHaveLength(1)
+  })
+
+  it('reject：带 note 驳回 → running + note 落 progress + 返工约束重投原会话', async () => {
+    const h = await controlHarness()
+    const { taskId, sessionId } = await dispatchWorkerTask(h, '要驳回的活', 'user')
+    await h.ledger.transition(taskId, 'running')
+    await h.core.completeTask(sessionId, taskId, { docVersion: 1, summary: '做完了' })
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId, action: 'reject', note: '缺变更日志' }))
+    await handlerOf(routes, '/router/tasks/control')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    expect(JSON.parse(exchange.captured.body!)).toEqual({ status: 'running' })
+    expect(h.ledger.get(taskId)?.status).toBe('running')
+    expect(h.ledger.get(taskId)?.progress).toBe('缺变更日志')
+    const redelivery = h.events.prompts.find((p) => p.requestId === `dispatch-${taskId}-v2`)
+    expect(redelivery?.sessionId).toBe(sessionId)
+    expect(redelivery?.text).toContain('验收驳回返工')
+    expect(redelivery?.text).toContain('缺变更日志')
+  })
+
+  it('rework：completed 任务退回重做 → running + 返工意见重投', async () => {
+    const h = await controlHarness()
+    const { taskId, sessionId } = await dispatchWorkerTask(h, '完成后返工的活')
+    await h.ledger.transition(taskId, 'running')
+    await h.ledger.complete(taskId, { docVersion: 1, summary: 'done' })
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId, action: 'rework', note: '验收条件没达成' }))
+    await handlerOf(routes, '/router/tasks/control')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    expect(JSON.parse(exchange.captured.body!)).toEqual({ status: 'running' })
+    expect(h.ledger.get(taskId)?.status).toBe('running')
+    const redelivery = h.events.prompts.find((p) => p.requestId === `dispatch-${taskId}-v2`)
+    expect(redelivery?.sessionId).toBe(sessionId)
+    expect(redelivery?.text).toContain('退回重做')
+  })
+
+  it('验收守卫：非待验收 accept → 409；user 路由验 supervisor 策略 → 400；note 非字符串 → 400', async () => {
+    const h = await controlHarness()
+    const running = await dispatchWorkerTask(h, '还在跑的活', 'user')
+    await h.ledger.transition(running.taskId, 'running')
+    const supTask = await dispatchWorkerTask(h, '主管验收的活', 'supervisor')
+    await h.ledger.transition(supTask.taskId, 'running')
+    await h.core.completeTask(supTask.sessionId, supTask.taskId, { docVersion: 1, summary: '做完了' })
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const handler = handlerOf(routes, '/router/tasks/control')
+
+    const notPending = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId: running.taskId, action: 'accept' }))
+    await handler(notPending.req, notPending.res)
+    expect(notPending.captured.status).toBe(409)
+
+    const wrongPolicy = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId: supTask.taskId, action: 'accept' }))
+    await handler(wrongPolicy.req, wrongPolicy.res)
+    expect(wrongPolicy.captured.status).toBe(400)
+    expect(h.ledger.get(supTask.taskId)?.status).toBe('review-pending')
+
+    const badNote = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId: running.taskId, action: 'reject', note: 42 }))
+    await handler(badNote.req, badNote.res)
+    expect(badNote.captured.status).toBe(400)
+  })
 })
 
 /* ────────────────────────── 解除冻结（POST /router/breaker/unfreeze） ────────────────────────── */
@@ -552,6 +646,39 @@ describe('POST /router/breaker/unfreeze（B4）', () => {
     const exchange = fakeExchange('GET', '/router/breaker/unfreeze')
     await handlerOf(routes, '/router/breaker/unfreeze')(exchange.req, exchange.res)
     expect(exchange.captured.status).toBe(405)
+  })
+
+  it('解冻即补派（M1）：冻结期间解锁的 queued 任务在 unfreeze 后自动出发', async () => {
+    const h = await controlHarness()
+    const dep = await dispatchWorkerTask(h, '依赖任务')
+    await h.ledger.transition(dep.taskId, 'running')
+    const created = await h.ledger.createTask({
+      title: '解锁后待派的活',
+      goal: '做完',
+      acceptance: ['完成'],
+      projectId: 'cwd:/proj',
+      cwd: '/proj',
+      role: 'worker',
+      templateId: 'coder',
+      dependsOn: [dep.taskId],
+      acceptancePolicy: 'auto',
+    })
+    // 带未结依赖的任务创建即 queued，无需再迁移
+    expect(h.ledger.get(created.id)?.status).toBe('queued')
+    await h.docs.initTask(h.ledger.get(created.id)!, '# 任务书\n解锁后待派的活')
+    await h.breaker.freeze('测试冻结')
+    // 冻结期间完成依赖：解锁任务保持 queued（不绕闸）
+    await h.core.completeTask(dep.sessionId, dep.taskId, { docVersion: 1, summary: '依赖完' })
+    expect(h.ledger.get(created.id)?.status).toBe('queued')
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/breaker/unfreeze')
+    await handlerOf(routes, '/router/breaker/unfreeze')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    expect(h.ledger.get(created.id)?.status).toBe('dispatched')
+    expect(h.ledger.get(created.id)?.sessionId).toBeDefined()
   })
 })
 
@@ -722,6 +849,18 @@ describe('POST /router/emergency-pause（v1.4：只停当前 Router 派出去的
     const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({}))
     await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
     expect(exchange.captured.status).toBe(400)
+  })
+
+  it('坏 JSON / 非对象请求体 → 400（M4：统一 readJsonBody，不落 500）', async () => {
+    const h = await controlHarness()
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const handler = handlerOf(routes, '/router/emergency-pause')
+    for (const body of ['{broken', 'null', '42', '"str"', '[]']) {
+      const exchange = fakeExchange('POST', '/router/emergency-pause', body)
+      await handler(exchange.req, exchange.res)
+      expect(exchange.captured.status, `body=${body}`).toBe(400)
+    }
   })
 
   it('未登记的会话 id → 400（不拿任意会话 id 圈范围）', async () => {

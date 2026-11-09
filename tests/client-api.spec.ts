@@ -68,6 +68,26 @@ describe('POST /router/emergency-pause（v1.4 作用域暂停）', () => {
   })
 })
 
+describe('POST /router/tasks/control（验收动作扩展，H2）', () => {
+  it('accept/reject/rework 透传；note 只在给出时上送', async () => {
+    const bodies: Array<Record<string, unknown>> = []
+    const api = createRouterApi({
+      fetch: jsonFetch((_input, init) => {
+        bodies.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>)
+        return jsonResponse(200, { status: 'completed' })
+      }),
+    })
+    expect(await api.controlTask('T-001', 'accept')).toEqual({ status: 'completed' })
+    await api.controlTask('T-001', 'reject', '缺章节')
+    await api.controlTask('T-001', 'rework')
+    expect(bodies).toEqual([
+      { taskId: 'T-001', action: 'accept' },
+      { taskId: 'T-001', action: 'reject', note: '缺章节' },
+      { taskId: 'T-001', action: 'rework' },
+    ])
+  })
+})
+
 describe('GET /router/state', () => {
   it('带 workspaceId 查询参数，解析 RouterState', async () => {
     const seen: string[] = []

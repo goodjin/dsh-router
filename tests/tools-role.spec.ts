@@ -87,8 +87,8 @@ function coreOf(calls: string[] = []): RouterCore {
         ],
       }
     },
-    async controlTask(caller, taskId, action) {
-      calls.push(`control:${caller}:${taskId}:${action}`)
+    async controlTask(caller, taskId, action, note) {
+      calls.push(`control:${caller}:${taskId}:${action}${note !== undefined ? `:${note}` : ''}`)
       return { status: action === 'cancel' ? 'cancelled' : action === 'pause' ? 'paused' : 'running' }
     },
     async searchHistory(_caller, query, scope) {
@@ -122,6 +122,10 @@ function coreOf(calls: string[] = []): RouterCore {
     async scopedPause(routerSessionId: string) {
       calls.push(`scoped-pause:${routerSessionId}`)
       return { tasks: [], pausedCount: 0, failedCount: 0, notified: true }
+    },
+    async dispatchReady() {
+      calls.push('dispatch-ready')
+      return { dispatched: 0 }
     },
   }
 }
@@ -413,17 +417,21 @@ describe('buildToolDefinitions：薄壳行为', () => {
     expect(calls[0]).toContain('query:')
   })
 
-  it('control_task：pause/resume/cancel 逐个转交', async () => {
+  it('control_task：pause/resume/cancel/accept/reject 逐个转交（reject 带 note）', async () => {
     const calls: string[] = []
     const core = coreOf(calls)
-    for (const action of ['pause', 'resume', 'cancel'] as const) {
+    for (const action of ['pause', 'resume', 'cancel', 'accept'] as const) {
       const def = buildToolDefinitions(core, 'router').find((d) => d.name === 'control_task')!
       await run(def, { taskId: 'T-001', action }, execOf('router-s-1'))
     }
+    const rejectDef = buildToolDefinitions(core, 'router').find((d) => d.name === 'control_task')!
+    await run(rejectDef, { taskId: 'T-001', action: 'reject', note: '缺章节' }, execOf('router-s-1'))
     expect(calls).toEqual([
       'control:router-s-1:T-001:pause',
       'control:router-s-1:T-001:resume',
       'control:router-s-1:T-001:cancel',
+      'control:router-s-1:T-001:accept',
+      'control:router-s-1:T-001:reject:缺章节',
     ])
   })
 

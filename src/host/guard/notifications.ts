@@ -24,6 +24,16 @@ export function completionActions(): NotificationAction[] {
   ]
 }
 
+/** 验收卡动作集（需求 §7.2 user 策略：验收通过 / 驳回返工 + 打开会话 / 确认）。 */
+export function acceptanceActions(): NotificationAction[] {
+  return [
+    { action: 'accept', label: '验收通过' },
+    { action: 'reject', label: '驳回返工' },
+    { action: 'open-session', label: '打开会话' },
+    { action: 'ack', label: '知道了' },
+  ]
+}
+
 /** 异常卡动作集（规格 §5：重派 / 取消 + 确认；unfreeze 由 B4 冻结卡追加）。 */
 export function anomalyActions(): NotificationAction[] {
   return [

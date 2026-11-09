@@ -57,8 +57,8 @@ export const ROUTER_EMERGENCY_PAUSE_PATH = '/router/emergency-pause'
 /** 轻量诊断（v1.4）：索引 + 收编计数口径，无私有内容。 */
 export const ROUTER_HEALTH_PATH = '/router/health'
 
-/** 用户侧任务控制动作（前三个镜像 control_task 工具；redispatch 仅用户通道）。 */
-export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'redispatch'
+/** 用户侧任务控制动作（pause/resume/cancel 镜像 control_task；redispatch/accept/reject/rework 用户通道）。 */
+export type TaskControlAction = 'pause' | 'resume' | 'cancel' | 'redispatch' | 'accept' | 'reject' | 'rework'
 
 /** 解除冻结的报告：冻结前/后的可见投影（lossless，reason/frozenAt 只在冻结时出现）。 */
 export interface BreakerUnfreezeReport {
@@ -108,9 +108,11 @@ export interface RouterRoutesDeps {
   /**
    * 用户发起的任务控制（v1.2 B4）：pause/resume/cancel 镜像 control_task 工具
    * 语义（尊重既有状态机），redispatch = 补充「用户重派」+ 重派（受熔断约束，
-   * 冻结时以 dispatch-frozen 拒绝并提示先解除）。用户动作绕过模型侧预算。
+   * 冻结时以 dispatch-frozen 拒绝并提示先解除）。accept/reject 走验收协议
+   * （仅 user policy；reject 带 note 驳回返工），rework 把 completed 拉回返工。
+   * 用户动作绕过模型侧预算。
    */
-  controlTask(taskId: string, action: TaskControlAction): Promise<{ status: TaskStatus }>
+  controlTask(taskId: string, action: TaskControlAction, note?: string): Promise<{ status: TaskStatus }>
   /** 用户解除派发冻结（v1.2 B4）：返回冻结前/后的可见投影。 */
   unfreezeBreaker(): Promise<BreakerUnfreezeReport>
   /** 作用域紧急暂停（v1.4）：只停该 Router 会话派出的任务 + 其下游子任务；逐项如实。 */
@@ -400,15 +402,17 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   /* ── 用户控制与紧急暂停（v1.2 Task B4）：逻辑在 deps（根服务组装），此处只折叠 HTTP ── */
 
   handle(ROUTER_TASKS_CONTROL_PATH, ['POST'], async (request) => {
-    const body = await readJsonBody(request) as { taskId?: unknown; action?: unknown }
+    const body = await readJsonBody(request) as { taskId?: unknown; action?: unknown; note?: unknown }
     if (typeof body.taskId !== 'string' || body.taskId === '') {
       throw new LedgerError('bad-request', 'taskId 必填')
     }
     const action = body.action
-    if (action !== 'pause' && action !== 'resume' && action !== 'cancel' && action !== 'redispatch') {
-      throw new LedgerError('bad-request', "action 必须是 'pause' | 'resume' | 'cancel' | 'redispatch' 之一")
+    if (action !== 'pause' && action !== 'resume' && action !== 'cancel' && action !== 'redispatch'
+      && action !== 'accept' && action !== 'reject' && action !== 'rework') {
+      throw new LedgerError('bad-request', "action 必须是 'pause' | 'resume' | 'cancel' | 'redispatch' | 'accept' | 'reject' | 'rework' 之一")
     }
-    const result = await deps.controlTask(body.taskId, action)
+    const note = pickString(body, 'note')
+    const result = await deps.controlTask(body.taskId, action, note)
     return { status: 200, body: JSON.stringify(result) }
   })
 
@@ -420,7 +424,7 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
   handle(ROUTER_EMERGENCY_PAUSE_PATH, ['POST'], async (request) => {
     // v1.4：作用域暂停——必须指明「哪个 Router 会话」（界面取当前 Router 会话视图
     // 的会话 id）。没有它就无法圈定范围（用户指示：只停当前 router 派出去的活）。
-    const body = JSON.parse(await readBody(request)) as { routerSessionId?: unknown }
+    const body = await readJsonBody(request) as { routerSessionId?: unknown }
     if (typeof body.routerSessionId !== 'string' || body.routerSessionId === '') {
       throw new LedgerError('bad-request', 'routerSessionId 必填（当前 Router 会话 id）')
     }

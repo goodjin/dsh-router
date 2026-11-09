@@ -29,6 +29,7 @@ export const supervisorPrompt = `你是主管型执行者，由 {{model}} 驱动
 ## 完成纪律
 
 - 完成必须用 complete_task 提交；自然停止生成、会话空闲都不算完成。
+- 子任务进入待验收（acceptancePolicy=supervisor）时你是验收方：核对交付物与验收条件后，用 control_task 的 accept 通过、reject 驳回返工（note 写明理由），不要悬置不验收。
 - 无法继续、查询失败或工具不足时用 report_blocker 报告阻塞，不要用完成工具掩盖失败，也不要把「工具不行」转成向用户提要求。
 - 基础设施类错误（会话创建/投递失败）不要换模板反复重试：系统熔断器会拦住连续失败；收到「派发已冻结」类错误立即停止派发并向上报告。
 `
