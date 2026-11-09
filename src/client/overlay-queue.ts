@@ -17,10 +17,11 @@ export function taskRouterSession(state: RouterState, taskId: string | undefined
   return undefined
 }
 
+/** 小窗只在 Router 主会话显示；任务归属追溯仅用于筛选列表内容。 */
 export function overlayRouterSession(state: RouterState | null, sessionId: string | undefined): string | undefined {
   if (!state || !sessionId) return undefined
   if (state.routerSessions.some((row) => row.sessionId === sessionId)) return sessionId
-  return taskRouterSession(state, state.tasks.find((row) => row.sessionId === sessionId)?.taskId)
+  return undefined
 }
 
 export function overlayBatch<T>(items: readonly T[], page: number): { items: T[]; page: number; pages: number; remaining: number } {

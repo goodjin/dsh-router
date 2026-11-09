@@ -31,7 +31,12 @@ describe('浮窗排队与隔离', () => {
   it('父任务与来源会话都能追溯；普通会话与环不串入', () => {
     const state = routerState()
     expect(taskRouterSession(state, 'child')).toBe('r1')
-    expect(overlayRouterSession(state, 's-t2')).toBe('r2')
+    expect(overlayRouterSession(state, 'r1')).toBe('r1')
+    expect(overlayRouterSession(state, 'r2')).toBe('r2')
+    for (const id of ['s-t1', 's-t2', 's-child', undefined]) {
+      expect(overlayRouterSession(state, id)).toBeUndefined()
+    }
+    expect(overlayRouterSession(null, 'r1')).toBeUndefined()
     expect(overlayRouterSession(state, 'ordinary')).toBeUndefined()
     state.tasks.push(task('cycle', 's-cycle', 'cycle'))
     expect(taskRouterSession(state, 'cycle')).toBeUndefined()
@@ -141,6 +146,16 @@ it('会话卡三项分页、隐藏只改可见性、点击窗口即切换会话�
   const count = () => container.querySelectorAll('[data-router-session-window]').length
   try {
     await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, uiWorkspace: { openSession: openMain } })) })
+    expect(count()).toBe(3)
+    // 直属 worker、下游 worker、其他 Router 的 worker 均不显示整组窗口。
+    for (const id of ['s-t1', 's-child', 's-foreign', 'ordinary']) {
+      await switchTo(id)
+      expect(container.innerHTML).toBe('')
+      // 后续轮询刷新不得把窗口重新带回 worker 视图。
+      await act(async () => { state = { ...state, routerState: { ...data } }; emit() })
+      expect(container.innerHTML).toBe('')
+    }
+    await switchTo('r1')
     expect(count()).toBe(3)
     expect(container.querySelector('[data-overlay-pagination]')?.textContent).toContain('1/2 页 · 共 5')
     expect(container.querySelector('[data-router-session-window="s-foreign"]')).toBeNull()

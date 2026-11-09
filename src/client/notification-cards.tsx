@@ -1,6 +1,6 @@
 /**
  * Router 待处理浮窗：问题与完成/异常通知共用右侧队列，每页最多 3 个真实派发会话。
- * 按派发来源隔离 Router，派发会话继续显示所属队列；普通会话不显示。
+ * 按派发来源隔离 Router，仅 Router 主会话显示队列；派发及普通会话不显示。
  * 卡片状态在批次之外保留，收起/翻页不触发提交或确认。
  */
 
@@ -160,7 +160,7 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
   }, [props, workbench.routerState, commitBoard, scope])
 
   // 门控必须放在所有 hooks 之后——早退若插在 hooks 之间，会话切换时 hook 数量
-  // 变化会触发 "Rendered more hooks" 崩溃。Router/派发会话使用同一归属队列。
+  // 变化会触发 "Rendered more hooks" 崩溃。仅 Router 主会话显示其归属队列。
   if (scope === undefined) return null
   // 按钮恒驻在通知列顶部（不再是「有卡才出现」）：用户被冻结锁死时恰恰最需要
   // 「解除冻结/紧急暂停」按钮，没卡也要渲染。故只按 state 门控，不按卡数门控。
