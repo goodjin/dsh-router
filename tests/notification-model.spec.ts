@@ -2,10 +2,10 @@
  * 统一通知卡纯逻辑（v1.2 Task C1 Step 1：动作映射 + 卡片队列 reducer）。
  *
  * 规则（计划 Task C1 接口 + 规格 §5）：
- * - 动作集 open-session|view-result|rework|cancel|redispatch|unfreeze|ack，
+ * - 动作集 open-session|view-result|rework|cancel|redispatch|accept|reject|unfreeze|ack，
  *   映射成对宿主控制路由的请求或本地导航；view-result 无宿主路由（置灰，
- *   如实注释）；rework 与重派共用控制路由的 redispatch 动作（宿主侧 =
- *   supplement「用户重派」+ 回 running + 重派，即 rework 语义）。
+ *   如实注释）；rework 走宿主验收协议返工（completed→running + 返工约束重派），
+ *   redispatch 是异常卡重派；accept/reject 是待验收卡的验收动作。
  * - 卡片队列多卡排队（新在前），动作提交 submitting → 成功补 ack 后消失、
  *   失败保留可重试；动作已生效但确认失败的卡只补确认、不再重发动作。
  * 全部断言打在纯函数上，不启 React、不启宿主、不发网络。
@@ -89,14 +89,33 @@ function routerState(overrides: Partial<RouterState> = {}): RouterState {
 /* ────────────────────────── 动作 → 宿主请求映射 ────────────────────────── */
 
 describe('cardActionPlan：动作 → 请求/本地行为映射', () => {
-  it('rework → 控制路由 redispatch（宿主 supplement「用户重派」+ 回 running + 重派 = rework 语义）', () => {
+  it('rework → 控制路由 rework（宿主验收协议：completed→running + 返工约束重派）', () => {
     const plan = cardActionPlan(card('K-1'), 'rework')
+    expect(plan).toEqual({ type: 'request', request: { channel: 'control', taskId: 'T-001', action: 'rework' } })
+  })
+
+  it('redispatch → 控制路由 redispatch（异常卡的「重派」）', () => {
+    const plan = cardActionPlan(card('K-1', { kind: 'anomaly' }), 'redispatch')
     expect(plan).toEqual({ type: 'request', request: { channel: 'control', taskId: 'T-001', action: 'redispatch' } })
   })
 
-  it('redispatch → 同一条控制路由 redispatch（异常卡的「重派」与 rework 共用宿主动作）', () => {
-    const plan = cardActionPlan(card('K-1', { kind: 'anomaly' }), 'redispatch')
-    expect(plan).toEqual({ type: 'request', request: { channel: 'control', taskId: 'T-001', action: 'redispatch' } })
+  it('accept → 控制路由 accept（待验收卡验收通过）', () => {
+    const plan = cardActionPlan(card('K-1'), 'accept')
+    expect(plan).toEqual({ type: 'request', request: { channel: 'control', taskId: 'T-001', action: 'accept' } })
+  })
+
+  it('reject → 控制路由 reject（待验收卡驳回返工）', () => {
+    const plan = cardActionPlan(card('K-1'), 'reject')
+    expect(plan).toEqual({ type: 'request', request: { channel: 'control', taskId: 'T-001', action: 'reject' } })
+  })
+
+  it('accept/reject 无关联任务 → 置灰（与 cancel 同款守卫）', () => {
+    for (const action of ['accept', 'reject'] as const) {
+      expect(cardActionPlan(card('K-1', { taskId: undefined }), action))
+        .toEqual({ type: 'disabled', reason: '该卡未关联任务，无法执行此动作' })
+      expect(actionAvailable(card('K-1', { taskId: undefined }), action, undefined, false).available).toBe(false)
+      expect(actionAvailable(card('K-1'), action, undefined, false).available).toBe(true)
+    }
   })
 
   it('cancel → 控制路由 cancel', () => {

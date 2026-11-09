@@ -107,6 +107,7 @@ export class TaskLedger {
   private nextTaskNumber = 1
   private questions: QuestionRecord[] = []
   private loaded = false
+  private loadPromise: Promise<void> | undefined
   /** 写串行化链：所有 commit 依次排队，杜绝并发写互抹与 save 乱序覆盖。 */
   private writeChain: Promise<unknown> = Promise.resolve()
 
@@ -117,14 +118,21 @@ export class TaskLedger {
 
   /** 首次访问时从持久化装载（构造函数保持同步）。 */
   private async ensureLoaded(): Promise<void> {
-    if (this.loaded) return
+    if (this.loaded) return Promise.resolve()
+    // 并发首访共用同一次装载：否则一个只读调用（listAll/openQuestions 不走
+    // writeChain）与一次 commit 同时进入 loaded=false 各自读盘，后完成者会把
+    // 先完成者已提交的内存变更整片覆盖回磁盘快照（M6，与熔断器同款修复）。
+    this.loadPromise ??= this.loadFromPersistence().then(() => { this.loaded = true })
+    return this.loadPromise
+  }
+
+  private async loadFromPersistence(): Promise<void> {
     const file = await this.persistence.load()
     if (file) {
       this.tasks = structuredClone(file.tasks)
       this.nextTaskNumber = file.nextTaskNumber
       this.questions = file.questions ?? []
     }
-    this.loaded = true
   }
 
   /** 当前状态的落盘快照（深拷贝，之后内存再变不影响这份）。 */
@@ -392,6 +400,24 @@ export class TaskLedger {
       const task = this.mustGet(id)
       if (task.status !== 'review-pending') {
         throw new LedgerError('illegal-transition', `驳回仅适用于 review-pending: ${id}（当前 ${task.status}）`)
+      }
+      task.status = 'running'
+      task.progress = note
+      task.updatedAt = this.clock()
+      return task
+    })
+  }
+
+  /**
+   * 退回重做（需求 §14.2 完成卡动作）：completed → running，note 落 progress。
+   * 与 reject 同款「完成协议专属操作不走表边」：终态在迁移表里仍无出边，
+   * 只有用户经完成卡发起的 rework 能把已完成任务 reopen。
+   */
+  async rework(id: string, note: string): Promise<TaskRecord> {
+    return this.commit(() => {
+      const task = this.mustGet(id)
+      if (task.status !== 'completed') {
+        throw new LedgerError('illegal-transition', `退回重做仅适用于 completed: ${id}（当前 ${task.status}）`)
       }
       task.status = 'running'
       task.progress = note

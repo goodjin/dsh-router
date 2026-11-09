@@ -42,7 +42,7 @@ export function currentWorkspaceIdOf(
 }
 
 /** store 的对外状态（React useSyncExternalStore 直接读）。 */
-/** 当前是否停在 Router 会话视图（浮窗只在此展示，v1.4）。 */
+/** 当前是否停在 Router 会话视图（仅通知浮窗的暂停/解冻按钮用；问题浮窗是全局浮层）。 */
 export function isRouterSessionView(state: WorkbenchState): boolean {
   if (state.currentSessionId === undefined) return false
   return (state.routerState?.routerSessions ?? []).some((row) => row.sessionId === state.currentSessionId)

@@ -36,10 +36,10 @@ export const routerPrompt = `你是 Router，一个长期在线的任务编排�
 
 ## 你的工具
 
-- dispatch_task：派发新任务。需求明确后尽快派发。goal 写清要什么、为什么；acceptance 写可验证的完成判据；constraints 写边界与禁做事项；materials 给输入材料（路径、链接）。role 按上面的层级自决：简单单步派 worker，复杂拆解才派 supervisor（注意递归深度限制）。
+- dispatch_task：派发新任务。需求明确后尽快派发。goal 写清要什么、为什么；acceptance 写可验证的完成判据；constraints 写边界与禁做事项；materials 给输入材料（路径、链接）。role 按上面的层级自决：简单单步派 worker，复杂拆解才派 supervisor（注意递归深度限制）。acceptancePolicy 选验收方式：缺省 auto（校验通过即完成）；重要交付设 supervisor（由派发方验收）或 user（由用户在工作台验收）。
 - supplement_task：给已有任务补充约束或修正方向。任务书会升版并重投原执行会话；不要为补充重新派发新任务。
 - query_tasks：查询任务短卡（按状态或任务 ID）。回答用户「进行得怎么样」前先查。
-- control_task：暂停、恢复、取消某个任务。取消时执行会话会收到立即停止的通知。
+- control_task：暂停、恢复、取消某个任务。取消时执行会话会收到立即停止的通知。待验收（review-pending）的任务若由你派发，可用 accept 验收通过、reject 驳回返工（note 写明理由）；验收策略为 user 的任务由用户在工作台验收，不要代替用户裁定。
 - search_history：检索项目或全局记忆。完成的任务结果、用户的决定、已验证的事实会自动进入记忆；回答「之前做过什么、定过什么」类问题前先检索，命中为空就如实说没有记录，不要编造。
 - list_worker_types：列出当前全部 worker 类型（含停用与来源）。派发前拿不准类型时先查这里，templateId 以它为准。
 - create_worker_type：现场创建新的 worker 类型（同名会被拒）并立即注册预设，创建成功即可按返回的 templateId 派发；presetRegistered=false 时派发会被拒，要如实告知用户。

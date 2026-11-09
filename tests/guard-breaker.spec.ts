@@ -151,6 +151,30 @@ describe('CircuitBreaker：持久化与解除（规格 §2 解除仅用户）', 
     expect(state.reason).toBeUndefined()
     expect(state.frozenAt).toBeUndefined()
   })
+
+  it('未达阈值的 infra 失败也落盘（M3）：重启后计数保留，再 1 次即冻结', async () => {
+    const { breaker, memfs, clock } = await breakerWith()
+    await breaker.recordFailure({ taskId: 'T-001', at: 1, class: 'infra' })
+    await breaker.recordFailure({ taskId: 'T-002', at: 2, class: 'infra' })
+    expect((await breaker.state()).frozen).toBe(false) // 2 < 3，未触发
+    const restored = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    const state = await restored.state()
+    expect(state.counts.infraFailures).toBe(2) // 重启不清零
+    await restored.recordFailure({ taskId: 'T-003', at: 3, class: 'infra' })
+    expect((await restored.state()).frozen).toBe(true)
+  })
+
+  it('未达阈值的创建事件也落盘（M3）：重启后集合计数保留，第 10 个冻结', async () => {
+    const { breaker, memfs, clock } = await breakerWith()
+    for (let i = 1; i <= 9; i += 1) {
+      await breaker.recordCreation(`T-${i}`, i)
+    }
+    expect((await breaker.state()).frozen).toBe(false) // 9 < 10，未触发
+    const restored = new CircuitBreaker({ fs: memfs.fs, path: '/guard/guard-state.json', now: clock.now })
+    expect((await restored.state()).counts.creations).toBe(9)
+    await restored.recordCreation('T-10', 10)
+    expect((await restored.state()).frozen).toBe(true)
+  })
 })
 
 describe('CircuitBreaker：并发首访装载不丢增量（审查修复）', () => {

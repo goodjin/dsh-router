@@ -188,6 +188,28 @@ describe('transition：非法迁移拒绝、合法链通过', () => {
   })
 })
 
+describe('R-1：worker 在 dispatched 上直接交付（需求 §3）', () => {
+  it('auto 策略：draft→queued→dispatched 后直接 complete → completed（不必先转 running）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput())
+    await ledger.transition(t.id, 'queued')
+    await ledger.transition(t.id, 'dispatched')
+    const done = await ledger.complete(t.id, { docVersion: 1, summary: '完成' })
+    expect(done.status).toBe('completed')
+    expect(done.result?.summary).toBe('完成')
+  })
+
+  it('有未结子任务：dispatched 上直接 complete → review-pending（同样不被缺边卡死）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const parent = await ledger.createTask(taskInput({ role: 'supervisor' }))
+    await ledger.createTask(taskInput({ parentId: parent.id }))
+    await ledger.transition(parent.id, 'queued')
+    await ledger.transition(parent.id, 'dispatched')
+    const pending = await ledger.complete(parent.id, { docVersion: 1, summary: '父任务交付' })
+    expect(pending.status).toBe('review-pending')
+  })
+})
+
 describe('complete：auto 策略、幂等、stale-version', () => {
   it('policy auto 且无未结子任务 → completed，result 落库带完成时间', async () => {
     const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
@@ -263,6 +285,36 @@ describe('accept / reject：验收协议', () => {
     await expect(ledger.reject(t.id, '再驳一次')).rejects.toMatchObject({ code: 'illegal-transition' })
     const resubmitted = await ledger.complete(t.id, { docVersion: 1, summary: '第二版' })
     expect(resubmitted.status).toBe('review-pending')
+  })
+})
+
+describe('rework：退回重做（需求 §14.2 完成卡动作，协议专属不走表边）', () => {
+  it('completed → running，note 落 progress；返工后可重新 complete', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'auto' }))
+    await completeFromDraft(ledger, t.id)
+    const reopened = await ledger.rework(t.id, '用户退回：验收条件没达成')
+    expect(reopened.status).toBe('running')
+    expect(reopened.progress).toBe('用户退回：验收条件没达成')
+    const redone = await ledger.complete(t.id, { docVersion: 1, summary: '返工后完成' })
+    expect(redone.status).toBe('completed')
+    expect(redone.result?.summary).toBe('返工后完成')
+  })
+
+  it('非 completed 起点照抛 illegal-transition（running / review-pending）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'user' }))
+    await driveToRunning(ledger, t.id)
+    await expect(ledger.rework(t.id, '还没完成就退')).rejects.toMatchObject({ code: 'illegal-transition' })
+    await ledger.complete(t.id, { docVersion: 1, summary: '待验收' })
+    await expect(ledger.rework(t.id, '待验收不能退')).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('迁移表终态仍无出边：transition(completed→running) 照抛（rework 是唯一 reopen 通道）', async () => {
+    const ledger = new TaskLedger(new MemoryPersistence(), stepClock().now)
+    const t = await ledger.createTask(taskInput({ acceptancePolicy: 'auto' }))
+    await completeFromDraft(ledger, t.id)
+    await expect(ledger.transition(t.id, 'running')).rejects.toMatchObject({ code: 'illegal-transition' })
   })
 })
 
@@ -361,6 +413,33 @@ describe('listActive / listAll / 持久化形状', () => {
 })
 
 describe('persistence 失败：内存回滚', () => {
+  it('M6：并发首访共用同一次装载——只读与写并发时后完成的装载不覆盖已提交的增量', async () => {
+    // 先用真实路径造一个盘上快照（1 个种子任务）。
+    const p = new MemoryPersistence()
+    p.file = { schemaVersion: 1, tasks: [], nextTaskNumber: 1, questions: [] }
+    const warm = new TaskLedger(p, stepClock().now)
+    await warm.createTask(taskInput({ title: '种子任务' }))
+    // 读盘时立刻取快照、延迟返回：复现「各自读盘→后完成者把先提交的增量整片
+    // 覆盖回磁盘快照」的竞态（只读首访不走 writeChain，与 commit 并发时成立）。
+    const slowP = {
+      load: async () => {
+        const snapshot = await p.load()
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        return snapshot
+      },
+      save: (f: LedgerFile) => p.save(f),
+    }
+    const ledger = new TaskLedger(slowP as LedgerPersistence, stepClock().now)
+    const creating = ledger.createTask(taskInput({ title: '并发新建' }))
+    await new Promise((resolve) => setTimeout(resolve, 0)) // 让 commit 先进入装载
+    const listing = ledger.listAll()
+    await Promise.all([creating, listing])
+    const names = (await ledger.listAll()).map((t) => t.title)
+    expect(names).toContain('种子任务')
+    expect(names).toContain('并发新建') // 未被第二次装载覆盖回快照
+    expect(await ledger.listAll()).toHaveLength(2)
+  })
+
   it('createTask 保存失败抛 persistence-failed，内存与 ID 计数器回滚', async () => {
     const p = new MemoryPersistence()
     const ledger = new TaskLedger(p, stepClock().now)

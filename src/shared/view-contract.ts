@@ -199,6 +199,8 @@ export type NotificationActionKind =
   | 'open-session'
   | 'view-result'
   | 'rework'
+  | 'accept'
+  | 'reject'
   | 'cancel'
   | 'redispatch'
   | 'unfreeze'

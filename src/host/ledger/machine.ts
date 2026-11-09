@@ -17,7 +17,9 @@ const TRANSITIONS: Record<TaskStatus, readonly TaskStatus[]> = {
   queued: ['dispatched', 'blocked', 'cancelled'],
   // dispatched → paused：作用域紧急暂停（v1.4）。活着的任务是 dispatched（不是 running），
   // 没有这条边就暂停落不下去。
-  dispatched: ['running', 'paused', 'blocked', 'failed', 'cancelled'],
+  // dispatched → completed/review-pending：worker 主动交付（需求 §3 R-1）。常态就是
+  // dispatched，缺这两条边时 complete_task 必抛非法迁移——现场账本 0 条 completed 的根因。
+  dispatched: ['running', 'completed', 'review-pending', 'paused', 'blocked', 'failed', 'cancelled'],
   running: ['waiting-user', 'blocked', 'paused', 'review-pending', 'completed', 'failed', 'cancelled'],
   'waiting-user': ['running', 'blocked', 'failed', 'cancelled'],
   blocked: ['running', 'failed', 'cancelled'],

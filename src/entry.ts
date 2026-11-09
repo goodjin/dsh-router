@@ -514,7 +514,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     logger: { warn: (message: string) => log.warn(message) },
     signal: undefined,
     // v1.3 A2：worker 生成模式与身份卡已发标记（Review Focus 5 幂等）。
-    mode: spawnMode(),
+    // 传 getter 而非快照：设置页改模式后新派发即用新值（M5）。
+    mode: spawnMode,
     identityCards: {
       has: (sessionId: string) => ui.hasIdentityCard(sessionId),
       mark: (sessionId: string) => ui.markIdentityCardSent(sessionId),
@@ -1035,7 +1036,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       ackNotification: (cardId: string) => notifications.ack(cardId),
 
       /* ── 用户控制与紧急暂停（v1.2 B4）：用户发起，绕过模型侧预算；caller 记 'user' ── */
-      controlTask: async (taskId, action) => {
+      controlTask: async (taskId, action, note) => {
         if (action === 'redispatch') {
           // redispatch 是再派发：受熔断约束（冻结时明确提示先解除；其余闸门
           // ——状态机/依赖/深度——由 supplementTask 的既有路径把守）。
@@ -1050,7 +1051,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
           const record = assembled.core.getTask(taskId)
           return { status: record?.status ?? 'failed' }
         }
-        return assembled.core.controlTask('user', taskId, action)
+        return assembled.core.controlTask('user', taskId, action, note)
       },
       unfreezeBreaker: async () => {
         const beforeState = await breaker.state()
@@ -1061,6 +1062,9 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         }
         await breaker.unfreeze()
         const afterState = await breaker.state()
+        // 冻结期间被跳过的就绪任务（M1）：解冻后立即补派一轮，不靠下一次
+        // 完成事件碰巧触发。dispatchReady 内部自带冻结/预算闸门，重复安全。
+        await assembled.core.dispatchReady()
         return { before, after: { frozen: afterState.frozen } }
       },
       // v1.4：紧急暂停改成**作用域**——只停该 Router 会话派出的任务 + 其下游

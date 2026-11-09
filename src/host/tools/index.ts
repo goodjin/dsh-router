@@ -248,6 +248,7 @@ const TOOL_SPECS: Record<
         parentTaskId: { type: 'string', description: '父任务 ID（主管再拆分时填写）' },
         dependsOn: { type: 'array', items: TASK_REF_SCHEMA, description: '依赖任务：全部完成后本任务才派发' },
         materials: stringArray('输入材料：需求链接、文档路径等'),
+        acceptancePolicy: { type: 'string', enum: ['auto', 'supervisor', 'user'], description: '验收策略：auto 校验过即完成（默认）；supervisor 由你验收（control_task accept/reject）；user 由用户在验收卡确认' },
       },
       required: ['title', 'goal', 'acceptance', 'role', 'templateId'],
     },
@@ -272,6 +273,7 @@ const TOOL_SPECS: Record<
         parentTaskId: args.parentTaskId as string | undefined,
         dependsOn: args.dependsOn as DispatchTaskInput['dependsOn'],
         materials: args.materials as string[] | undefined,
+        acceptancePolicy: args.acceptancePolicy as DispatchTaskInput['acceptancePolicy'],
       }
       return core.dispatchTask(sid, input)
     },
@@ -373,13 +375,15 @@ const TOOL_SPECS: Record<
     },
   },
   control_task: {
-    description: '控制任务：pause（仅执行中可暂停）、resume（恢复执行）、cancel（取消并通知执行会话停止）。',
+    description:
+      '控制任务：pause（仅执行中可暂停）、resume（恢复执行）、cancel（取消并通知执行会话停止）、accept/reject（验收待验收任务：仅 acceptancePolicy=supervisor 且你是派发者/上级会话时可用；user 策略须由用户在验收卡确认，不得代验；reject 附 note 驳回意见，任务退回原执行者返工）。',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         taskId: TASK_ID_PARAM,
-        action: { type: 'string', enum: ['pause', 'resume', 'cancel'], description: '控制动作' },
+        action: { type: 'string', enum: ['pause', 'resume', 'cancel', 'accept', 'reject'], description: '控制动作' },
+        note: { type: 'string', description: '驳回意见（action=reject 时给，会作为补充要求投递给原执行者）' },
       },
       required: ['taskId', 'action'],
     },
@@ -390,7 +394,7 @@ const TOOL_SPECS: Record<
       required: ['status'],
     },
     async run(core, sid, args) {
-      return core.controlTask(sid, String(args.taskId), args.action as 'pause' | 'resume' | 'cancel')
+      return core.controlTask(sid, String(args.taskId), args.action as 'pause' | 'resume' | 'cancel' | 'accept' | 'reject', args.note as string | undefined)
     },
     render(_args, value) {
       const v = value as { status: TaskStatus }

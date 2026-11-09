@@ -24,6 +24,8 @@ export interface DispatchTaskInput {
   parentTaskId?: string
   dependsOn?: { taskId: string; version?: number }[]
   materials?: string[]
+  /** 验收策略（需求 §7.2）：缺省 auto；supervisor 由派发者验收，user 由用户在验收卡确认。 */
+  acceptancePolicy?: 'auto' | 'supervisor' | 'user'
 }
 
 /** query_tasks 的过滤条件（都不给 = 全量）。 */
@@ -65,8 +67,14 @@ export interface RouterCore {
    * 可见）；两者都只在防护面接线时出现。
    */
   queryTasks(filter?: QueryTasksFilter, viewerSessionId?: string): Promise<{ tasks: TaskCard[]; budgets?: BudgetSnapshot; breaker?: BreakerVisibility }>
-  /** 暂停 / 恢复 / 取消一个任务。 */
-  controlTask(callerSessionId: string, taskId: string, action: 'pause' | 'resume' | 'cancel'): Promise<{ status: TaskStatus }>
+  /**
+   * 控制任务：暂停 / 恢复 / 取消；accept/reject 验收（模型侧仅 supervisor 策略，
+   * user 策略走用户验收卡即 caller='user'）；rework 仅用户（完成卡退回重做）。
+   * note 是驳回/退回意见（缺省用通用文案）。
+   */
+  controlTask(callerSessionId: string, taskId: string, action: 'pause' | 'resume' | 'cancel' | 'accept' | 'reject' | 'rework', note?: string): Promise<{ status: TaskStatus }>
+  /** 派发全部「queued 且依赖已满足」的任务（解除冻结后的补派入口）。 */
+  dispatchReady(): Promise<{ dispatched: number }>
   /** 检索记忆（B8 起接真实现；检索失败时返回空命中与失败注记）。 */
   searchHistory(callerSessionId: string, query: string, scope: 'project' | 'global'): Promise<{ hits: { memoryRef: string; snippet: string }[]; note?: string }>
   /** worker/主管汇报一句话进度。 */

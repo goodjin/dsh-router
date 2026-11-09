@@ -36,7 +36,8 @@ const LEGAL: Record<string, string[]> = {
   queued: ['dispatched', 'blocked', 'cancelled'],
   // dispatched → paused：作用域紧急暂停（v1.4）。活着的任务是 dispatched（不是 running），
   // 没有这条边就暂停落不下去。
-  dispatched: ['running', 'paused', 'blocked', 'failed', 'cancelled'],
+  // dispatched → completed/review-pending：worker 主动交付（需求 §3 R-1）。
+  dispatched: ['running', 'completed', 'review-pending', 'paused', 'blocked', 'failed', 'cancelled'],
   running: ['waiting-user', 'blocked', 'paused', 'review-pending', 'completed', 'failed', 'cancelled'],
   'waiting-user': ['running', 'blocked', 'failed', 'cancelled'],
   blocked: ['running', 'failed', 'cancelled'],
@@ -58,9 +59,9 @@ describe('迁移表：合法对', () => {
     }
   })
 
-  it('合法对总数符合计划表（3+3+5+7+4+3+2+2 = 29 条；v1.1 A4 增 draft/queued→blocked，v1.4 增 dispatched→paused）', () => {
+  it('合法对总数符合计划表（3+3+7+7+4+3+2+2 = 31 条；v1.1 A4 增 draft/queued→blocked，v1.4 增 dispatched→paused，R-1 增 dispatched→completed/review-pending）', () => {
     const total = Object.values(LEGAL).reduce((sum, tos) => sum + tos.length, 0)
-    expect(total).toBe(29)
+    expect(total).toBe(31)
   })
 })
 

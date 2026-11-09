@@ -430,18 +430,17 @@ describe('预算 ×既有失败语义：两层不互相替代', () => {
     await expect(core.dispatchTask('worker-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'role-forbidden' })
   })
 
-  it('基础设施故障仍按 v1.1 记账（retryCount/progress/draft 不变），同时冻结主管——两层并存', async () => {
+  it('基础设施故障不进 per-task 重试预算（需求 §9.1）：progress 落错、保持 draft，主管失败预算同点冻结', async () => {
     const records = [task({ id: 'T-100', role: 'supervisor', sessionId: 'sup-s-1', status: 'running' })]
     const { core, ledger, budgets } = await guardCoreWith({ records, breaker: null, failCreate: () => new Error('boom') })
     for (let i = 0; i < 3; i += 1) {
       await expect(core.dispatchTask('sup-s-1', { ...INPUT })).rejects.toMatchObject({ code: 'dispatch-failed' })
     }
-    // v1.1 层：每个任务各记一次失败（rc=1、错误落 progress、任务保持 draft）——
-    // 连续派发是三个独立任务，v1.1 的 3 次封顶只在同一任务重试时触发（不动）。
+    // §9.1：infra 是系统故障，不计任务重试（retryCount 不动），错误如实落 progress。
     const created = (await ledger.listAll()).filter((record) => record.id !== 'T-100')
     expect(created).toHaveLength(3)
     for (const record of created) {
-      expect(record.retryCount).toBe(1)
+      expect(record.retryCount ?? 0).toBe(0)
       expect(record.status).toBe('draft')
       expect(record.progress).toContain('boom')
     }

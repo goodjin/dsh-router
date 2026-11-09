@@ -120,9 +120,10 @@ export interface SessionBridgeDeps {
   /**
    * worker 生成模式（v1.3 A2/A3；缺省 minimal-face）。决定投递内容形态：
    * cache-priority = 切换卡+任务书（重投只带任务书）；minimal-face = 简化身份头
-   * + 任务书 + 执行指引（现行格式加头）。
+   * + 任务书 + 执行指引（现行格式加头）。可传 getter：设置页改模式即时生效，
+   * 每次派发读当前值（M5：构造时拍死会让切换只对新装配生效）。
    */
-  mode?: WorkerSpawnMode
+  mode?: WorkerSpawnMode | (() => WorkerSpawnMode)
   /**
    * Router 身份卡已发标记（v1.3 A2，Review Focus 5；entry 接 UiStateStore）。
    * 缺席 = 无幂等标记面（照发——宿主 requestId 去重仍兜底）。
@@ -201,7 +202,7 @@ export class SessionBridge {
   private interruptFace: SessionBridgeDeps['interruptFace']
   private logger: SessionBridgeDeps['logger']
   private workerInstructions: () => string
-  private mode: WorkerSpawnMode
+  private mode: () => WorkerSpawnMode
   private identityCards: SessionBridgeDeps['identityCards']
   private onDelivered: SessionBridgeDeps['onDelivered']
   private signal: AbortSignal | undefined
@@ -219,7 +220,8 @@ export class SessionBridge {
     this.interruptFace = deps.interruptFace
     this.logger = deps.logger
     this.workerInstructions = deps.workerInstructions
-    this.mode = deps.mode ?? 'minimal-face'
+    const mode = deps.mode
+    this.mode = typeof mode === 'function' ? mode : () => mode ?? 'minimal-face'
     this.identityCards = deps.identityCards
     this.onDelivered = deps.onDelivered
     this.signal = deps.signal
@@ -427,7 +429,7 @@ export class SessionBridge {
   private async firstDeliveryText(record: TaskRecord, book: string): Promise<string> {
     const identity = await this.typeIdentity(record.templateId ?? '')
     const role = record.role === 'supervisor' ? 'supervisor' : 'worker'
-    if (this.mode === 'cache-priority') {
+    if (this.mode() === 'cache-priority') {
       return `${switchCard(identity, role)}\n${book}`
     }
     return `${minimalSwitchHeader(identity, role)}\n${book}\n\n${this.workerInstructions()}`
@@ -462,13 +464,15 @@ export class SessionBridge {
   async dispatchTask(taskId: string, opts?: { forkFrom?: string }): Promise<{ sessionId: string | undefined }> {
     const record = this.ledger.get(taskId)
     if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)
+    // 每次派发读当前模式（设置页即改即生效）；单次派发内取值一致，不在中途换形。
+    const mode = this.mode()
     const book = await this.docsFor(record.cwd).readDoc(taskId, 'task', record.docVersion)
     let sessionId = record.sessionId
     if (sessionId === undefined) {
       const workspace = this.resolveWorkspace(record)
       const title = await this.sessionTitle(record)
       const forkSource = this.resolveForkSource(record, opts?.forkFrom)
-      if (this.mode === 'cache-priority') {
+      if (mode === 'cache-priority') {
         // cache 模式：宿主分叉（继承来源历史/组合/模型）；无源回退创建（不钉模型）。
         sessionId = await this.createByFork(record, title, forkSource)
       } else {
@@ -491,13 +495,13 @@ export class SessionBridge {
       // 模型钉定（v1.1 §5 / Review Focus 3）：minimal（含回退创建与五步）钉类型
       // models[0]；cache 模式绝不调 selectModel——分叉继承来源模型（调用即缓存断裂），
       // 类型 models 仅作展示。
-      if (this.mode !== 'cache-priority') {
+      if (mode !== 'cache-priority') {
         await this.pinDefaultModel(sessionId, record.templateId ?? '')
       }
     }
     const deliverySessionId: string = sessionId
     const firstText = await this.firstDeliveryText(record, book)
-    const requestId = this.mode === 'cache-priority'
+    const requestId = mode === 'cache-priority'
       ? `switch-${taskId}-v${record.docVersion}`
       : `dispatch-${taskId}-v${record.docVersion}`
     await this.tagged('任务书投递失败', () =>
@@ -531,7 +535,7 @@ export class SessionBridge {
     const existingSessionId: string = record.sessionId
     // 重投正文（v1.3 A2 裁定）：cache-priority = 任务书全文（身份已在会话历史，
     // 不重发切换卡与指引）；minimal-face = 现行格式（任务书 + 执行指引）。
-    const supplementText = this.mode === 'cache-priority' ? book : `${book}\n\n${this.workerInstructions()}`
+    const supplementText = this.mode() === 'cache-priority' ? book : `${book}\n\n${this.workerInstructions()}`
     await this.tagged('任务书投递失败', () =>
       this.host.prompt(
         {

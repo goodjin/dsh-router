@@ -1,9 +1,9 @@
 /**
  * 统一通知卡纯逻辑（v1.2 Task C1，规格 §5）。
  *
- * 动作映射（cardActionPlan）：rework/redispatch/cancel → 控制路由；unfreeze →
- * 熔断解除；ack → 通知确认；open-session → 本地导航；view-result → 如实置灰
- * （宿主无结果文档查看路由）。卡片队列 reducer：多卡排队新在前、UI 状态跨
+ * 动作映射（cardActionPlan）：rework/redispatch/cancel/accept/reject → 控制路由；
+ * unfreeze → 熔断解除；ack → 通知确认；open-session → 本地导航；view-result →
+ * 如实置灰（宿主无结果文档查看路由）。卡片队列 reducer：多卡排队新在前、UI 状态跨
  * 轮询保持、提交窗口 submitting→acking→移除、失败保留可重试；动作已生效但
  * 确认失败只补确认不重发动作（actionApplied 防重复退回重做）。
  *
@@ -36,7 +36,7 @@ export function emptyNotifications(): NotificationBoard {
 
 /** 请求通道（UI 层据此调 api；模型层不发网络）。 */
 export type NotificationRequest =
-  | { channel: 'control'; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'redispatch' }
+  | { channel: 'control'; taskId: string; action: 'pause' | 'resume' | 'cancel' | 'redispatch' | 'accept' | 'reject' | 'rework'; note?: string }
   | { channel: 'unfreeze' }
   | { channel: 'ack'; cardId: string }
 
@@ -51,13 +51,15 @@ export function cardActionPlan(cardData: NotificationCard, action: NotificationA
   switch (action) {
     case 'rework':
     case 'redispatch':
-    case 'cancel': {
+    case 'cancel':
+    case 'accept':
+    case 'reject': {
       if (cardData.taskId === undefined) {
         return { type: 'disabled', reason: '该卡未关联任务，无法执行此动作' }
       }
-      // rework 与异常卡的「重派」共用控制路由的 redispatch（宿主侧 =
-      // supplement「用户重派」+ 回 running + 重派，即退回重做语义）。
-      return { type: 'request', request: { channel: 'control', taskId: cardData.taskId, action: action === 'cancel' ? 'cancel' : 'redispatch' } }
+      // rework = 宿主验收协议返工（completed→running + 补充返工约束重派）；
+      // redispatch = 异常卡重派；accept/reject = 待验收卡的验收通过/驳回返工。
+      return { type: 'request', request: { channel: 'control', taskId: cardData.taskId, action } }
     }
     case 'unfreeze':
       return { type: 'request', request: { channel: 'unfreeze' } }
@@ -101,7 +103,7 @@ export function actionAvailable(
     if (cardData.taskId === undefined) return { available: false, reason: '该卡未关联任务' }
     return sessionTarget === undefined ? { available: false, reason: '未找到该任务的会话' } : { available: true }
   }
-  if (action === 'cancel') {
+  if (action === 'cancel' || action === 'accept' || action === 'reject') {
     return cardData.taskId === undefined ? { available: false, reason: '该卡未关联任务' } : { available: true }
   }
   return { available: true }

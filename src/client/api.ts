@@ -51,8 +51,8 @@ export interface RouterApiDeps {
 export interface RouterApi {
   /** 通知确认（v1.2 C1）：消费后服务端从 pending 移除。 */
   ackNotification(cardId: string): Promise<void>
-  /** 任务控制（v1.2 C2）：pause/resume/cancel/redispatch；用户发起绕过模型侧预算。 */
-  controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch'): Promise<{ status: string }>
+  /** 任务控制（v1.2 C2）：pause/resume/cancel/redispatch/accept/reject/rework；用户发起绕过模型侧预算。 */
+  controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch' | 'accept' | 'reject' | 'rework', note?: string): Promise<{ status: string }>
   /** 熔断解除（v1.2 C2）。 */
   unfreezeBreaker(): Promise<{ before: { frozen: boolean }; after: { frozen: boolean } }>
   /** 紧急暂停（v1.2 C2）：冻结 + 逐会话中断 + 逐项结果。 */
@@ -302,8 +302,8 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       await postJson(ROUTER_NOTIFICATIONS_ACK_PATH, { cardId })
     },
 
-    async controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch'): Promise<{ status: string }> {
-      const body = await postJson(ROUTER_TASKS_CONTROL_PATH, { taskId, action })
+    async controlTask(taskId: string, action: 'pause' | 'resume' | 'cancel' | 'redispatch' | 'accept' | 'reject' | 'rework', note?: string): Promise<{ status: string }> {
+      const body = await postJson(ROUTER_TASKS_CONTROL_PATH, note !== undefined ? { taskId, action, note } : { taskId, action })
       if (body === null || typeof body !== 'object') throw new RouterApiError('router: control response missing body')
       return body as { status: string }
     },
