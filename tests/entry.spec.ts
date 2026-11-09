@@ -169,7 +169,7 @@ function recordingCtx() {
 describe('浏览器半边 src/client/index.ts：工厂面', () => {
   it('name 与包名一致；inject 按页面真实服务名声明（R3 报告）', () => {
     expect(clientName).toBe('@goodjin2/dsh-router')
-    expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
+    expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces', 'sessions'])
   })
 
   it('apply 注册全部表面：键名正确、id 各自独立（shell.overlay 两项；不再注册提示词视图）', () => {
@@ -179,6 +179,7 @@ describe('浏览器半边 src/client/index.ts：工厂面', () => {
     // 2026-11 提示词 UI 移除：conversation.view 的「提示词」视图不再注册。
     expect([...captured.injected].sort()).toEqual([
       'settings.section',
+      'router.session-window.detail',
       'shell.overlay',
       'shell.overlay',
       'conversation.header.leading',

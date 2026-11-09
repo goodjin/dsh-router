@@ -40,7 +40,7 @@ export const name = '@goodjin2/dsh-router'
  * 'ui-workspace'/'ui-session'——页面注册表里没有连字符名，声明错 = 整条
  * entry 启动失败（启动审计判 failed，整页打不开）。
  */
-export const inject = ['slots', 'uiSession', 'uiWorkspace', 'workspaces'] as const
+export const inject = ['slots', 'uiSession', 'uiWorkspace', 'workspaces', 'sessions'] as const
 
 /** apply 收到的 ctx 的最小面（全部可选：缺失时降级，不抛）。 */
 export interface PluginContext {
@@ -57,6 +57,7 @@ export interface PluginContext {
   }
   uiWorkspace?: { openSession(target: string): void }
   workspaces?: { list?: WorkspacesListLike }
+  sessions?: { retain(id: string, options: { source: string }): import('./session-detail.tsx').RetainedSession }
 }
 
 /** 从 uiSession 的 binding source 读当前主视图会话 id（R3 报告 §5 的用法）。 */
@@ -144,7 +145,7 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace })
+    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace, retainSession: safeCtx.sessions ? (id) => safeCtx.sessions!.retain(id, { source: 'router-session-detail' }) : undefined })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

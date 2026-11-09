@@ -7078,7 +7078,10 @@ function createRouterCore(deps) {
 				const notificationCards = await deps.notifications?.pending() ?? [];
 				return {
 					routerSessions: ui.routerSessions(),
-					tasks: records.map((record) => toCard(record, counts[record.id] ?? 0)),
+					tasks: records.map((record) => ({
+						...toCard(record, counts[record.id] ?? 0),
+						...record.sessionId !== void 0 ? { sessionRunning: deps.isRunning(record.sessionId) } : {}
+					})),
 					questions: relay.pendingCards(),
 					tabs: tabRows.filter((row) => !isHuskTask(row.taskId !== void 0 ? byId.get(row.taskId) : void 0)).map((row) => {
 						const taskRecord = bySession.get(row.sessionId);

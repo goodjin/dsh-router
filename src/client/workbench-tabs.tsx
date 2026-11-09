@@ -28,6 +28,7 @@ export interface SlotsHost {
     label?: () => string
     locale?: string
     inject?: () => unknown
+    children?: Record<string, { kind: 'single'; scope: 'session' }>
   }, component: unknown): unknown
 }
 

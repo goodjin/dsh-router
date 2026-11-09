@@ -32,6 +32,7 @@ export interface TaskCard {
   firstRequestCacheReadTokens?: number
   parentId?: string
   /** 派发来源，用于浮窗沿任务树隔离到所属 Router。 */
+  sessionRunning?: boolean
   dispatchedBySessionId?: string
   docVersion: number
 }

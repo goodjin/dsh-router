@@ -1,7 +1,7 @@
 import type { CSSProperties } from 'react'
 import type { RouterState } from '../shared/view-contract.ts'
 
-export const OVERLAY_BATCH_SIZE = 5
+export const OVERLAY_BATCH_SIZE = 3
 
 /** 沿父任务/派发会话反查 Router；环或缺失归属不猜测成当前 Router。 */
 export function taskRouterSession(state: RouterState, taskId: string | undefined): string | undefined {

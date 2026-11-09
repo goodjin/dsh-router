@@ -949,7 +949,10 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       const notificationCards = await deps.notifications?.pending() ?? []
       return {
         routerSessions: ui.routerSessions(),
-        tasks: records.map((record) => toCard(record, counts[record.id] ?? 0)),
+        tasks: records.map((record) => ({
+          ...toCard(record, counts[record.id] ?? 0),
+          ...(record.sessionId !== undefined ? { sessionRunning: deps.isRunning(record.sessionId) } : {}),
+        })),
         questions: relay.pendingCards(),
         // 空壳清理（v1.1 规格 §3.7）：指向「cancelled/failed 且无会话」任务的
         // 标签行移出投影；store 里的落盘行与账本记录都不动（Review Focus 5）。
