@@ -28,6 +28,7 @@ export interface NotificationCardEntry {
 /** 通知卡面板状态。 */
 export interface NotificationBoard {
   cards: NotificationCardEntry[]
+  acknowledgedIds?: string[]
 }
 
 export function emptyNotifications(): NotificationBoard {
@@ -115,7 +116,7 @@ function entryFor(cardData: NotificationCard): NotificationCardEntry {
 
 /** 轮询合流：服务端序入队；已存卡保留 UI 状态；在途（submitting/acking）卡即使服务端已移除也保留在前。 */
 export function syncedNotifications(board: NotificationBoard, serverCards: readonly NotificationCard[]): NotificationBoard {
-  const serverById = new Map(serverCards.map((cardData) => [cardData.cardId, cardData]))
+  const serverById = new Map(serverCards.filter((card) => !card.ack && !board.acknowledgedIds?.includes(card.cardId)).map((cardData) => [cardData.cardId, cardData]))
   const kept: NotificationCardEntry[] = []
   for (const entry of board.cards) {
     const inFlight = entry.phase === 'submitting' || entry.phase === 'acking'
@@ -127,7 +128,7 @@ export function syncedNotifications(board: NotificationBoard, serverCards: reado
   }
   const appended = [...serverById.values()].map(entryFor)
   const cards = [...kept, ...appended]
-  return cards === board.cards ? board : { cards }
+  return cards === board.cards ? board : { ...board, cards }
 }
 
 function mapCard(board: NotificationBoard, cardId: string, fn: (entry: NotificationCardEntry) => NotificationCardEntry | null): NotificationBoard {
@@ -146,7 +147,7 @@ function mapCard(board: NotificationBoard, cardId: string, fn: (entry: Notificat
     cards.push(next)
     if (next !== entry) changed = true
   }
-  return changed ? { cards } : board
+  return changed ? { ...board, cards } : board
 }
 
 /** 动作开始：idle/failed → submitting；其余相位无操作（返回原引用）。 */
@@ -171,7 +172,8 @@ export function notificationAckStarted(board: NotificationBoard, cardId: string)
 
 /** 确认成功：移除该卡。 */
 export function notificationAckSucceeded(board: NotificationBoard, cardId: string): NotificationBoard {
-  return mapCard(board, cardId, () => null)
+  if (!board.cards.some((entry) => entry.card.cardId === cardId)) return board
+  return { ...mapCard(board, cardId, () => null), acknowledgedIds: [...new Set([...(board.acknowledgedIds ?? []), cardId])] }
 }
 
 /** 确认失败：acking → failed，actionApplied=true（重试只补确认，不重发动作）。 */

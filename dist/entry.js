@@ -6540,6 +6540,7 @@ function toCard(record, waiting) {
 	if (record.progress !== void 0) card.progress = record.progress;
 	if (record.sessionId !== void 0) card.sessionId = record.sessionId;
 	if (record.parentId !== void 0) card.parentId = record.parentId;
+	if (record.dispatchedBySessionId !== void 0) card.dispatchedBySessionId = record.dispatchedBySessionId;
 	if (record.firstRequestCacheReadTokens !== void 0) card.firstRequestCacheReadTokens = record.firstRequestCacheReadTokens;
 	return card;
 }

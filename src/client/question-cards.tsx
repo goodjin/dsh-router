@@ -15,6 +15,7 @@
 import { useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { ClientPrefsStore } from './client-prefs.ts'
+import { OVERLAY_CARD_SIZE } from './overlay-queue.ts'
 import { chipClickAction, chipSummary, visibleCards } from './question-state.ts'
 import type { QuestionCardView, QuestionDraftItem } from './question-state.ts'
 import { type WorkbenchStore } from './workbench-store.ts'
@@ -61,6 +62,7 @@ const STACK_STYLE: CSSProperties = {
 }
 
 const CARD_STYLE: CSSProperties = {
+  ...OVERLAY_CARD_SIZE,
   pointerEvents: 'auto',
   background: '#ffffff',
   color: '#1f2328',
@@ -234,7 +236,7 @@ function QuestionItem(props: { entry: QuestionCardView; item: AskUserQuestionIte
 }
 
 /** 一张问题卡：收起为 chip（任务名 + 计数），展开为逐问表单。 */
-function QuestionCardEntry(props: {
+export function QuestionCardEntry(props: {
   entry: QuestionCardView
   store: WorkbenchStore
   uiWorkspace: { openSession(target: string): void }
@@ -270,6 +272,7 @@ function QuestionCardEntry(props: {
           {chipSummary(entry.card)}
         </span>
         <span style={COUNT_BADGE_STYLE}>{entry.card.questions.length}</span>
+        <span>展开</span>
       </div>
     )
   }
@@ -291,7 +294,7 @@ function QuestionCardEntry(props: {
             {...collapseBind}
             onClick={() => store.toggleCollapsed(questionId)}
           >
-            ▾
+            收起
           </button>
         </LightTooltip>
       </div>

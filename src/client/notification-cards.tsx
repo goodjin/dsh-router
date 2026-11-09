@@ -1,13 +1,7 @@
 /**
- * 统一通知卡浮窗（v1.2 规格 §5，计划 Task C1/C2）。
- *
- * 挂点 `shell.overlay`（与问题卡同槽位的独立登记项）：每张完成/异常卡一枚
- * 收起 chip，点击展开动作按钮排（打开会话/查看结果(置灰)/退回重做/重派/
- * 取消/解除冻结/知道了）；提交 → 对应控制路由，成功即补 ack 后消失，失败
- * 保留可重试；动作已生效只补确认不重发。列顶部是「紧急暂停」按钮（裁定：
- * 常驻右列全局可见——worker 视图里也能一键刹车，优于仅 Router 顶部）；
- * 已冻结（出现带 unfreeze 动作的异常卡）时并列「解除冻结」。样式走 ui-kit
- * 基线（浅色提示、hover 稍深）。纯逻辑全部在 notification-model.ts。
+ * Router 待处理浮窗：问题与完成/异常通知共用右侧队列，每批最多挂载 5 项。
+ * 按派发来源隔离 Router，派发会话继续显示所属队列；普通会话不显示。
+ * 卡片状态在批次之外保留，收起/翻页不触发提交或确认。
  */
 
 import { useSyncExternalStore } from 'react'
@@ -36,12 +30,16 @@ import type { NotificationActionKind } from '../shared/view-contract.ts'
 import { isRouterSessionView, type WorkbenchStore } from './workbench-store.ts'
 import { NOTIFICATION_OVERLAY_ID, NOTIFICATION_OVERLAY_ORDER, NOTIFICATION_OVERLAY_SLOT } from './surface-ids.ts'
 import type { SlotsHost } from './workbench-tabs.tsx'
+import { QuestionCardEntry } from './question-cards.tsx'
+import type { ClientPrefsStore } from './client-prefs.ts'
+import { overlayBatch, overlayRouterSession, taskRouterSession, OVERLAY_STACK_STYLE, OVERLAY_CARD_SIZE } from './overlay-queue.ts'
 import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 
 /** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
 export interface NotificationOverlayFace {
   store: WorkbenchStore
   api: RouterApi
+  prefs: ClientPrefsStore
   uiWorkspace: { openSession(target: string): void }
 }
 
@@ -55,24 +53,8 @@ export function registerNotificationCards(slots: SlotsHost, face: NotificationOv
   ))
 }
 
-const STACK_STYLE: CSSProperties = {
-  position: 'fixed',
-  // 问题卡列（right:16）左侧的第二列：right 352（320 宽 + 16 间距），互不覆盖。
-  top: 88,
-  right: 352,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 8,
-  alignItems: 'stretch',
-  maxWidth: 320,
-  maxHeight: 'calc(100vh - 72px)',
-  overflowY: 'auto',
-  overscrollBehavior: 'contain',
-  pointerEvents: 'auto',
-  zIndex: 40,
-}
-
 const CARD_STYLE: CSSProperties = {
+  ...OVERLAY_CARD_SIZE,
   pointerEvents: 'auto',
   background: '#ffffff',
   color: '#1f2328',
@@ -112,14 +94,22 @@ function kindLabel(kind: 'completion' | 'anomaly'): string {
   return kind === 'completion' ? '任务完成' : '异常'
 }
 
-function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
+export function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
   const workbench = useSyncExternalStore(props.store.subscribe, props.store.get)
   const state = workbench.routerState
+  const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
+  const scope = overlayRouterSession(state, workbench.currentSessionId)
+  const [pages, setPages] = useState<Record<string, number>>({})
+  const [collapsedScopes, setCollapsedScopes] = useState<Record<string, boolean>>({})
   const [emergencyDarken, emergencyBind] = useHoverDarken()
   const [actionDarken, actionBind] = useHoverDarken()
   const [chipDarken, chipBind] = useHoverDarken()
   const [board, setBoard] = useState<NotificationBoard>(emptyNotifications)
-  const [pauseResult, setPauseResult] = useState<string | undefined>(undefined)
+  const [pauseResults, setPauseResults] = useState<Record<string, string>>({})
+  const pauseResult = scope === undefined ? undefined : pauseResults[scope]
+  const setPauseResult = (message: string): void => {
+    if (scope !== undefined) setPauseResults((current) => ({ ...current, [scope]: message }))
+  }
   // boardRef 与 board 同步：副作用（导航/POST）必须放在 setState 更新器之外——
   // StrictMode 会双调用更新器探纯，更新器里发 POST 会重复提交。所有写经 commitBoard
   // 同步推进 ref，runAction 读 ref 取最新板并做幂等门（已在提交中即返回）。
@@ -176,8 +166,8 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
   }, [props, workbench.routerState, commitBoard])
 
   // 门控必须放在所有 hooks 之后——早退若插在 hooks 之间，会话切换时 hook 数量
-  // 变化会触发 "Rendered more hooks" 崩溃。v1.4：浮窗只在 Router 会话视图展示。
-  if (!isRouterSessionView(props.store.get())) return null
+  // 变化会触发 "Rendered more hooks" 崩溃。Router/派发会话使用同一归属队列。
+  if (scope === undefined) return null
   // 按钮恒驻在通知列顶部（不再是「有卡才出现」）：用户被冻结锁死时恰恰最需要
   // 「解除冻结/紧急暂停」按钮，没卡也要渲染。故只按 state 门控，不按卡数门控。
   if (state === null) return null
@@ -190,12 +180,33 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
   // 那里 currentSessionId 就是那个 Router 会话 id）。
   const routerSessionId = props.store.get().currentSessionId
 
+  const ownQuestions = prefs.overlayEnabled ? workbench.board.cards.filter((entry) =>
+    taskRouterSession(state, entry.card.taskId) === scope || entry.card.sessionId === scope) : []
+  const ownNotifications = board.cards.filter((entry) => !entry.card.ack &&
+    (entry.card.taskId === undefined || taskRouterSession(state, entry.card.taskId) === scope))
+  const queue = [
+    ...ownQuestions.map((entry) => ({ kind: 'question' as const, entry, at: entry.card.receivedAt })),
+    ...ownNotifications.map((entry) => ({ kind: 'notification' as const, entry, at: entry.card.at })),
+  ].sort((a, b) => a.at - b.at)
+  const batch = overlayBatch(queue, pages[scope] ?? 0)
+  const collapsed = collapsedScopes[scope] ?? false
   return (
-    <div style={STACK_STYLE}>
+    <div data-router-overlay-queue style={OVERLAY_STACK_STYLE}>
+      <button type="button" aria-expanded={!collapsed} data-overlay-toggle
+        style={ACTION_BUTTON_STYLE}
+        onClick={() => setCollapsedScopes((current) => ({ ...current, [scope]: !collapsed }))}>
+        {collapsed ? '展开' : '收起'}待处理事项（{queue.length}）
+      </button>
+      {!collapsed && <>
+      <div data-overlay-pagination style={{ ...CARD_STYLE, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        <span>本批 {batch.items.length} 项，另有 {batch.remaining} 项（{batch.page + 1}/{batch.pages}）</span>
+        <button type="button" disabled={batch.page === 0} onClick={() => setPages((current) => ({ ...current, [scope]: batch.page - 1 }))}>上一批</button>
+        <button type="button" disabled={batch.page + 1 >= batch.pages} onClick={() => setPages((current) => ({ ...current, [scope]: batch.page + 1 }))}>下一批</button>
+      </div>
       {pauseResult !== undefined ? (
         <div style={{ ...CARD_STYLE, ...ANOMALY_BORDER }} data-notification-pause-result>{pauseResult}</div>
       ) : null}
-      <LightTooltip label="只暂停当前 Router 派出的任务及其下游子任务；不影响别的 Router，也不冻结派发">
+      {isRouterSessionView(workbench) && <LightTooltip label="只暂停当前 Router 派出的任务及其下游子任务；不影响别的 Router，也不冻结派发">
         <button
           type="button"
           style={{ ...ACTION_BUTTON_STYLE, ...emergencyDarken, fontWeight: 600 }}
@@ -221,7 +232,7 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
         >
           暂停本 Router 任务
         </button>
-      </LightTooltip>
+      </LightTooltip>}
       {frozen ? (
         <LightTooltip label="解除全局派发冻结（熔断；自动冻结时需手动解除）">
           <button
@@ -244,7 +255,9 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
           </button>
         </LightTooltip>
       ) : null}
-      {board.cards.map((entry) => {
+      {batch.items.map((item) => {
+        if (item.kind === 'question') return <QuestionCardEntry key={`question:${item.entry.card.questionId}`} entry={item.entry} store={props.store} uiWorkspace={props.uiWorkspace} />
+        const entry = item.entry
         const sessionTarget = cardSessionTarget(entry.card.taskId, stateTasks, stateTabs)
         return (
           <div
@@ -262,11 +275,14 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
               >
                 <span style={{ fontWeight: 600 }}>[{kindLabel(entry.card.kind)}]</span>
                 <span>{notificationChipSummary(entry.card)}</span>
+                <span>展开</span>
               </button>
             ) : (
               <div>
+                <button type="button" data-notification-collapse style={ACTION_BUTTON_STYLE}
+                  onClick={() => commitBoard(toggleNotificationCollapsed(boardRef.current, entry.card.cardId))}>收起</button>
                 <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-                  <span style={{ fontWeight: 600 }}>[{kindLabel(entry.card.kind)}){entry.card.deliveryOrigin === 'system-judged' ? '·系统判定' : ''}]</span>
+                  <span style={{ fontWeight: 600 }}>[{kindLabel(entry.card.kind)}{entry.card.deliveryOrigin === 'system-judged' ? '·系统判定' : ''}]</span>
                   <span style={{ fontWeight: 600 }}>{entry.card.title}</span>
                 </div>
                 <div style={{ marginTop: 4 }}>{entry.card.summary}</div>
@@ -300,6 +316,7 @@ function NotificationOverlay(props: NotificationOverlayProps): ReactNode {
           </div>
         )
       })}
+      </>}
     </div>
   )
 }

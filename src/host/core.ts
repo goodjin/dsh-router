@@ -183,6 +183,7 @@ function toCard(record: TaskRecord, waiting: number): TaskCard {
   if (record.progress !== undefined) card.progress = record.progress
   if (record.sessionId !== undefined) card.sessionId = record.sessionId
   if (record.parentId !== undefined) card.parentId = record.parentId
+  if (record.dispatchedBySessionId !== undefined) card.dispatchedBySessionId = record.dispatchedBySessionId
   // v1.3 C1：首请求缓存命中量，未上报不进卡（undefined 键会被 JSON 蒸发，lossless）
   if (record.firstRequestCacheReadTokens !== undefined) card.firstRequestCacheReadTokens = record.firstRequestCacheReadTokens
   return card

@@ -35,6 +35,7 @@ export interface QuestionCardView {
 /** 问题浮窗的整块状态（多卡按到达顺序垂直排队）。 */
 export interface QuestionBoardState {
   cards: QuestionCardView[]
+  answeredIds?: string[]
 }
 
 /** 空板。 */
@@ -59,17 +60,21 @@ function mapCard(
   if (next === current) return state
   const cards = state.cards.slice()
   cards[index] = next
-  return { cards }
+  return { ...state, cards }
 }
 
 /** 新问题按到达顺序入队；默认收起（规格 §3.3：收起 chip）；已有同 id 的卡保持原 UI 状态（重放不重置草稿）。 */
 export function cardsReceived(state: QuestionBoardState, cards: QuestionCard[]): QuestionBoardState {
-  const known = new Set(state.cards.map((entry) => entry.card.questionId))
+  const known = new Set([...state.cards.map((entry) => entry.card.questionId), ...(state.answeredIds ?? [])])
   const additions = cards
-    .filter((card) => !known.has(card.questionId))
+    .filter((card) => {
+      if (known.has(card.questionId)) return false
+      known.add(card.questionId)
+      return true
+    })
     .map((card): QuestionCardView => ({ card, phase: 'received', collapsed: true, draft: {} }))
   if (additions.length === 0) return state
-  return { cards: [...state.cards, ...additions] }
+  return { ...state, cards: [...state.cards, ...additions] }
 }
 
 /**
@@ -79,7 +84,7 @@ export function cardsReceived(state: QuestionBoardState, cards: QuestionCard[]):
 export function syncedWithServer(state: QuestionBoardState, serverCards: QuestionCard[]): QuestionBoardState {
   const serverIds = new Set(serverCards.map((card) => card.questionId))
   const kept = state.cards.filter((entry) => entry.phase === 'submitting' || serverIds.has(entry.card.questionId))
-  return cardsReceived({ cards: kept }, serverCards)
+  return cardsReceived({ ...state, cards: kept }, serverCards)
 }
 
 /** 收起/展开：只翻 collapsed——收起不是回答。未知 id 无操作。 */
@@ -125,7 +130,7 @@ export function submitAccepted(state: QuestionBoardState, questionId: string): Q
   const index = indexOfCard(state, questionId)
   if (index < 0) return state
   if (state.cards[index]!.phase !== 'submitting') return state
-  return { cards: state.cards.filter((entry) => entry.card.questionId !== questionId) }
+  return { ...state, answeredIds: [...(state.answeredIds ?? []), questionId], cards: state.cards.filter((entry) => entry.card.questionId !== questionId) }
 }
 
 /** 提交失败：submitting → failed，卡片与已填答案保留（可改后重试）。 */

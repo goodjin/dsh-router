@@ -25,7 +25,6 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
-import { registerQuestionCards } from './question-cards.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
 import { registerWorkbenchTabs } from './workbench-tabs.tsx'
@@ -137,7 +136,7 @@ export function apply(ctx?: PluginContext): void {
     log.warn('uiSession service unavailable — active tab mapping disabled')
   }
 
-  // 五个表面：各自独立，失败互不牵连（提示词视图已移除，不再注册）。
+  // 四个表面：问题卡并入通知队列，合计最多五项；提示词视图不再注册。
   try {
     registerWorkbenchTabs(slotsHost, { store, uiWorkspace })
   } catch (error) {
@@ -145,12 +144,7 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerQuestionCards(slotsHost, { store, prefs, uiWorkspace })
-  } catch (error) {
-    log.warn(`notification overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
-  }
-  try {
-    registerNotificationCards(slotsHost, { store, api, uiWorkspace })
+    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }
