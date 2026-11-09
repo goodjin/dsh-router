@@ -50,6 +50,32 @@ export const NO_ROUTE_MESSAGE =
   '记忆摘要没有可用的模型路由：配置 summarizationProvider/summarizationModel，或让目标会话先路由过一次请求'
 
 /**
+ * 一次性提示词消息 → 宿主 GenerateOptions 的合法形状（2026-11-09 事故教训）。
+ *
+ * 宿主契约要求 content 是**文本块数组**、系统提示词走专门的 `system` 字段；
+ * 纯字符串 content 会被部分提供方适配器整条丢弃，投影后零轮次时甚至被替换
+ * 成「.」占位——判定/摘要模型因此从未见过提示词（「判定模型返回空白」）。
+ * 这里在插件侧先规整，不再依赖各适配器对越界形状的宽容度。
+ */
+export function toHostOneShotMessages(
+  messages: readonly { role: 'system' | 'user'; content: string }[],
+): { system?: string; messages: { role: 'user'; content: { type: 'text'; text: string }[] }[] } {
+  const systemParts: string[] = []
+  const turns: { role: 'user'; content: { type: 'text'; text: string }[] }[] = []
+  for (const message of messages) {
+    if (message.role === 'system') {
+      if (message.content.trim() !== '') systemParts.push(message.content)
+      continue
+    }
+    turns.push({ role: 'user', content: [{ type: 'text', text: message.content }] })
+  }
+  return {
+    ...(systemParts.length === 0 ? {} : { system: systemParts.join('\n\n') }),
+    messages: turns,
+  }
+}
+
+/**
  * 把 ctx.llm.stream 包成 B6 的 SummaryLlm。只认 text-delta 块（按 index 分桶
  * 保序拼接）；reasoning/usage/finish 一律忽略。resolveTarget 允许异步返回
  * （entry 的兜底链要异步读账本找活会话的路由头）。宿主流或路由缺失的错误
@@ -63,10 +89,12 @@ export function createSummaryLlm(
     async stream(messages, signal) {
       const target = await resolveTarget()
       if (target === undefined) throw new Error(NO_ROUTE_MESSAGE)
+      const oneShot = toHostOneShotMessages(messages as SummaryPromptMessage[])
       const options: Record<string, unknown> = {
         provider: target.provider,
         model: target.model,
-        messages,
+        messages: oneShot.messages,
+        ...(oneShot.system === undefined ? {} : { system: oneShot.system }),
         purpose: 'compaction',
         ...(signal === undefined ? {} : { signal }),
       }

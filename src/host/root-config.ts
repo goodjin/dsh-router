@@ -30,6 +30,12 @@ export interface RouterRootConfig {
   /** 记忆摘要的模型路由对（都非空才生效；缺省用活任务会话的最近路由）。 */
   summarizationProvider?: string
   summarizationModel?: string
+  /**
+   * 三层记忆总开关（2026-11-09 起默认停用）：false 时后台增量摘要、完成记忆
+   * 写入、事故写入、检索注入全部不接线（检索工具如实回「记忆服务未配置」）。
+   * 重新启用前须把摘要通道改为原会话内进行（需求 §12 的既定方向）。
+   */
+  memoryEnabled?: boolean
   /** 每任务澄清提问批次数上限（v1.1 规格 §3.6；缺省 2）。 */
   questionBudget?: number
   /** 判定兜底：派发后无首响超时毫秒（v1.2 规格 §4；缺省 600000）。 */
@@ -59,6 +65,7 @@ export const Config = Schema.object({
   workerSpawnMode: Schema.union(['cache-priority', 'minimal-face']).default('cache-priority').volatile(),
   summarizationProvider: Schema.string().default('').volatile(),
   summarizationModel: Schema.string().default('').volatile(),
+  memoryEnabled: Schema.boolean().default(false).volatile(),
   questionBudget: Schema.number().default(2).volatile(),
   firstResponseTimeoutMs: Schema.number().default(600_000).volatile(),
   adjudicationWallClockMs: Schema.number().default(1_800_000).volatile(),

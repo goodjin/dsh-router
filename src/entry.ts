@@ -35,7 +35,7 @@ import { createRouterAdoptionCache, routerAdoptionDiagnostics, scanAndAdoptRoute
 import { SessionHeaderIndex, type IndexFileState } from './host/session/session-index.ts'
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
-import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts } from './host/core.ts'
+import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts, type RouterMemory } from './host/core.ts'
 import { workerInstructions as WORKER_INSTRUCTIONS } from './host/prompts/worker-instructions.ts'
 import { SessionPromptStore } from './host/prompts/session-prompt.ts'
 import { routerPrompt } from './host/prompts/router.ts'
@@ -179,6 +179,8 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   workerSpawnMode: WorkerSpawnMode
   summarizationProvider: string
   summarizationModel: string
+  /** 三层记忆总开关（默认停用；见 root-config memoryEnabled 注释）。 */
+  memoryEnabled: boolean
   questionBudget: number
   firstResponseTimeoutMs: number
   adjudicationWallClockMs: number
@@ -196,6 +198,17 @@ function nonNegative(value: unknown, fallback: number): number {
 /** 字符串：非空字符串否则回默认。 */
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() !== '' ? value : fallback
+}
+
+/**
+ * 布尔（记忆开关）：volatile 惰性描述符先解引用（同 spawnModeOr 的取证结论），
+ * 只有显式 true 才开——缺省、形状不对一律停用（先屏蔽记忆的既定方向）。
+ */
+function booleanOr(value: unknown): boolean {
+  const resolved = typeof value === 'object' && value !== null && typeof (value as { get?: unknown }).get === 'function'
+    ? (value as { get: () => unknown }).get()
+    : value
+  return resolved === true
 }
 
 /** 模板清单：形状不对逐条丢弃，全部不合法回内置。 */
@@ -250,6 +263,7 @@ export function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
     summarizationProvider: stringOr(source.summarizationProvider, ''),
     summarizationModel: stringOr(source.summarizationModel, ''),
+    memoryEnabled: booleanOr(source.memoryEnabled),
     questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
     firstResponseTimeoutMs: nonNegative(source.firstResponseTimeoutMs, 600_000),
     adjudicationWallClockMs: nonNegative(source.adjudicationWallClockMs, 1_800_000),
@@ -640,62 +654,85 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // 事件读走 observeSession 租约（adapter 内 finally 释放）；摘要流走
   // ctx.llm.stream（purpose:'compaction'）。路由对解析链：配置对 → 活任务
   // 会话最近一次路由头（compaction-basic routedTarget 同款）→ 缺失（触发方 warn）。
-  const memoryStore = new MemoryDocStore(join(config.dataDir, 'memory'), fs)
+  //
+  // 2026-11-09 起默认整体停用（memoryEnabled，默认 false）：后台增量摘要、完成
+  // 记忆写入、事故写入、检索注入全部不接线——那条摘要通道借别的会话路由且
+  // 消息形状曾不合宿主契约（「判定模型返回空白」事故）。判定已改为原会话
+  // 自判，不再依赖此通道；重新启用前须按需求 §12 的既定方向改为原会话内进行。
   const closureIntents = new ClosureIntentStore({ fs, path: join(config.dataDir, 'closure-intents.json'), logger: { warn: (m) => log.warn(m) } })
   const notifications = new NotificationStore({ fs, path: join(config.dataDir, 'notifications.json'), newId: () => randomUUID(), logger: { warn: (m) => log.warn(m) } })
-  const memoryQuery = {
-    observeSession: (sessionId: string) => ctx.sessionQuery.observeSession(sessionId),
+  let memoryStore: MemoryDocStore | undefined
+  let memoryFace: RouterMemory | undefined
+  let summarizer: BackgroundSummarizer | undefined
+  const recordIncident = (entry: { taskId: string; title: string; text: string }): void => {
+    if (!config.memoryEnabled || memoryStore === undefined) return
+    void memoryStore.appendSummary('project', `任务 ${entry.taskId}`, {
+      sourceRefs: [`task:${entry.taskId}`],
+      kind: 'verified-fact',
+      text: entry.text,
+    }).catch((error) => {
+      log.warn(`事故记忆写入失败（${entry.taskId}）: ${error instanceof Error ? error.message : String(error)}`)
+    })
   }
-  const resolveSummaryTarget = async (): Promise<LlmRouteTarget | undefined> => {
-    if (config.summarizationProvider !== '' && config.summarizationModel !== '') {
-      return { provider: config.summarizationProvider, model: config.summarizationModel }
+  if (config.memoryEnabled) {
+    memoryStore = new MemoryDocStore(join(config.dataDir, 'memory'), fs)
+    const memoryQuery = {
+      observeSession: (sessionId: string) => ctx.sessionQuery.observeSession(sessionId),
     }
-    const records = await ledger.listAll()
-    for (const record of records) {
-      if (record.sessionId === undefined) continue
-      const agent = ctx.agents.get(record.sessionId) as
-        | { session?: { requestHeader?: () => { config?: { provider?: unknown; model?: unknown } } } }
-        | undefined
-      const routed = agent?.session?.requestHeader?.()?.config
-      if (
-        routed !== undefined
-        && typeof routed.provider === 'string' && routed.provider !== ''
-        && typeof routed.model === 'string' && routed.model !== ''
-      ) {
-        return { provider: routed.provider, model: routed.model }
+    const resolveSummaryTarget = async (): Promise<LlmRouteTarget | undefined> => {
+      if (config.summarizationProvider !== '' && config.summarizationModel !== '') {
+        return { provider: config.summarizationProvider, model: config.summarizationModel }
       }
+      const records = await ledger.listAll()
+      for (const record of records) {
+        if (record.sessionId === undefined) continue
+        const agent = ctx.agents.get(record.sessionId) as
+          | { session?: { requestHeader?: () => { config?: { provider?: unknown; model?: unknown } } } }
+          | undefined
+        const routed = agent?.session?.requestHeader?.()?.config
+        if (
+          routed !== undefined
+          && typeof routed.provider === 'string' && routed.provider !== ''
+          && typeof routed.model === 'string' && routed.model !== ''
+        ) {
+          return { provider: routed.provider, model: routed.model }
+        }
+      }
+      return undefined
     }
-    return undefined
+    const summaryLlm = createSummaryLlm(ctx.llm, resolveSummaryTarget)
+    const store = memoryStore
+
+    summarizer = new BackgroundSummarizer({
+      maxSeq: (sessionId) => maxSurfaceSeq(memoryQuery, sessionId),
+      run: (sessionId) => summarizeSessionViaQuery(memoryQuery, store, sessionId, summaryLlm),
+      onError: (sessionId, error) => {
+        log.warn(`会话 ${sessionId} 记忆增量摘要失败（下次 idle 或新事件后重试）: ${error instanceof Error ? error.message : String(error)}`)
+      },
+    })
+
+    const recordTaskMemory = createCompletedTaskRecorder({
+      store,
+      query: memoryQuery,
+      llm: summaryLlm,
+      onError: (_stage, error) => {
+        log.warn(`任务完成的记忆写入失败（不阻塞完成协议）: ${error instanceof Error ? error.message : String(error)}`)
+      },
+    })
+
+    /** routerCore.memory（brief 形状：search 直传 retrieval）。 */
+    memoryFace = {
+      search: (query: string, scope: 'project' | 'global') => searchMemory(store, query, scope),
+      onTaskCompleted: (input: Parameters<typeof recordTaskMemory>[0]) => recordTaskMemory(input),
+    }
+  } else {
+    log.info('三层记忆已停用（memoryEnabled=false）：后台摘要/完成写入/事故写入/检索注入均不接线')
   }
-  const summaryLlm = createSummaryLlm(ctx.llm, resolveSummaryTarget)
-
-  const summarizer = new BackgroundSummarizer({
-    maxSeq: (sessionId) => maxSurfaceSeq(memoryQuery, sessionId),
-    run: (sessionId) => summarizeSessionViaQuery(memoryQuery, memoryStore, sessionId, summaryLlm),
-    onError: (sessionId, error) => {
-      log.warn(`会话 ${sessionId} 记忆增量摘要失败（下次 idle 或新事件后重试）: ${error instanceof Error ? error.message : String(error)}`)
-    },
-  })
-
-  const recordTaskMemory = createCompletedTaskRecorder({
-    store: memoryStore,
-    query: memoryQuery,
-    llm: summaryLlm,
-    onError: (_stage, error) => {
-      log.warn(`任务完成的记忆写入失败（不阻塞完成协议）: ${error instanceof Error ? error.message : String(error)}`)
-    },
-  })
 
   /** 该会话是否绑定了任务（= worker/主管会话；Router 会话不做增量摘要）。 */
   const isTaskSession = async (sessionId: string): Promise<boolean> => {
     const records = await ledger.listAll()
     return records.some((record) => record.sessionId === sessionId)
-  }
-
-  /** routerCore.memory（brief 形状：search 直传 retrieval）。 */
-  const memoryFace = {
-    search: (query: string, scope: 'project' | 'global') => searchMemory(memoryStore, query, scope),
-    onTaskCompleted: (input: Parameters<typeof recordTaskMemory>[0]) => recordTaskMemory(input),
   }
 
   // 压缩驱动：压缩引擎取会话 agent 自身作用域的 ctx.compaction（预设在 isolate
@@ -795,7 +832,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     isRunning: (sessionId) => bridge.isRunning(sessionId),
     maxActiveCards: config.maxActiveCards,
     tasksDir: config.tasksDir,
-    memory: memoryFace,
+    // 记忆停用时整个面缺席：search_history 如实回「记忆服务未配置」、完成不写记忆。
+    ...(memoryFace === undefined ? {} : { memory: memoryFace }),
     breaker,
     budgets,
     logger: { warn: (message: string) => log.warn(message) },
@@ -808,7 +846,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     snapshotText: assembled.snapshotText,
     // v1.1 C5：会话级系统提示词文本源（prompt-section 行的 complete section 消费）。
     sessionPromptText,
-    memory: { search: memoryFace.search },
+    ...(memoryFace === undefined ? {} : { memory: { search: memoryFace.search } }),
     callerRoleOf: (sessionId: string) => assembled.core.callerRoleOf!(sessionId),
   })
 
@@ -837,21 +875,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       const agent = ctx.agents.get(sessionId) as { status?: string } | undefined
       return agent === undefined || agent.status === undefined ? undefined : { status: agent.status }
     },
-    llm: summaryLlm,
     core: {
       completeTask: (caller, taskId, input) => assembled.core.completeTask(caller, taskId, input),
       reportBlocker: (caller, taskId, reason) => assembled.core.reportBlocker(caller, taskId, reason),
     },
     intents: closureIntents,
-    recordIncident: (entry) => {
-      void memoryStore.appendSummary('project', `任务 ${entry.taskId}`, {
-        sourceRefs: [`task:${entry.taskId}`],
-        kind: 'verified-fact',
-        text: entry.text,
-      }).catch((error) => {
-        log.warn(`事故记忆写入失败（${entry.taskId}）: ${error instanceof Error ? error.message : String(error)}`)
-      })
-    },
+    recordIncident,
     now: () => Date.now(),
     schedule: (delayMs, fn) => {
       const timer = setTimeout(() => { void fn() }, delayMs)
@@ -875,6 +904,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       if (outcome === 'compacted') log.info(`会话 ${sessionId} 派发后上下文整理完成`)
     })
     void (async () => {
+      if (summarizer === undefined) return
       if (!(await isTaskSession(sessionId))) return
       summarizer.onIdle(sessionId)
     })()

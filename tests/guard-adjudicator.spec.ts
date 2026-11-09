@@ -10,8 +10,11 @@
  *   含 question/approval；CLI 老宿主用 agents.get(id)?.status 兜底。
  * - 第一级 injectClosurePrompt：requestId=closure-<taskId>-<seq>（写前意图账，
  *   重试沿用同 requestId）；文本自报「系统收尾提醒」；错误四码分治。
- * - 第二级 judgeOutcome 三态：completed→completeTask(deliveryOrigin='system-judged')
- *   + 完成卡；partial|failed→blocked + 异常卡；判定失败→blocked「判定不可用」。
+ * - 第二级原会话自判（2026-11-09 起）：提醒轮结束仍无交付 → 向同一会话投
+ *   判定请求（只回一行 JSON）→ 下一轮结束解析回复三态落位：completed→
+ *   completeTask(deliveryOrigin='system-judged') + 完成卡；partial|failed→
+ *   blocked + 异常卡；回复不可解析/请求未处理→blocked「判定不可用」。
+ *   不再发起独立模型调用（旧 llm 通道借别的会话路由，2026-11-09 事故废弃）。
  * - 兜底定时器：firstResponseTimeoutMs（默认 10min）/ adjudicationWallClockMs
  *   （默认 30min）走同一判定入口，状态机防双跑；每任务每周期提醒一次。
  */
@@ -24,6 +27,7 @@ import {
   DEFAULT_ADJUDICATION_WALL_CLOCK_MS,
   DEFAULT_CLOSURE_DEBOUNCE_MS,
   DEFAULT_FIRST_RESPONSE_TIMEOUT_MS,
+  JUDGE_REQUEST_MARKER,
   OutcomeAdjudicator,
   type OutcomeAdjudicatorDeps,
   type SessionObservation,
@@ -124,6 +128,16 @@ function hungTurn(s: number): unknown[] {
   ]
 }
 
+/** 判定请求轮：含标记的用户消息 + 会话自判回复（completed 末轮）。 */
+function judgeReplyTurn(s: number, replyText: string): unknown[] {
+  return [
+    ev(s, 'turn/start', { turn: 2 }),
+    ev(s + 1, 'user/message', { content: [{ type: 'text', text: `${JUDGE_REQUEST_MARKER}任务 T-001 尚未提交交付，请自判三态` }] }),
+    ev(s + 2, 'assistant/message', { message: { content: [{ type: 'text', text: replyText }] } }),
+    ev(s + 3, 'turn/end', { turn: 2, reason: { kind: 'completed' } }),
+  ]
+}
+
 interface RecordedPrompt {
   requestId: string
   sessionId: string
@@ -138,7 +152,6 @@ interface HarnessOptions {
   logs?: Record<string, unknown[]>
   /** prompt 逐次失败（返回 undefined = 成功）。 */
   failPrompt?: (attempt: number) => Error | undefined
-  llm?: (attempt: number) => Promise<string>
   sessionState?: (sessionId: string) => Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
   agentStatus?: string
   firstResponseTimeoutMs?: number
@@ -186,15 +199,6 @@ async function adjudicatorWith(opts: HarnessOptions = {}) {
     return { accepted: true }
   }
 
-  let llmAttempts = 0
-  const llm: SummaryLlm = {
-    async stream() {
-      llmAttempts += 1
-      const produce = opts.llm ?? (async () => JSON.stringify({ verdict: 'completed', summary: '系统判定：登录 500 已修复，活已干完' }))
-      return await produce(llmAttempts)
-    },
-  }
-
   const coreCalls = { completed: [] as unknown[], blocked: [] as unknown[] }
   const core = {
     async completeTask(callerSessionId: string, taskId: string, input: unknown) {
@@ -215,7 +219,6 @@ async function adjudicatorWith(opts: HarnessOptions = {}) {
     prompt,
     ...(opts.sessionState !== undefined ? { sessionState: opts.sessionState } : {}),
     agentsGet: (sessionId: string) => (opts.agentStatus !== undefined ? { status: opts.agentStatus } : { status: 'idle' }),
-    llm,
     core,
     intents,
     recordIncident: (input) => incidents.push(input),
@@ -233,11 +236,11 @@ async function adjudicatorWith(opts: HarnessOptions = {}) {
     timers,
     clock,
     memfs,
+    logs,
     incidents,
     coreCalls,
     intents,
     notifications,
-    llmAttempts: () => llmAttempts,
     promptAttempts: () => promptAttempts,
   }
 }
@@ -491,17 +494,20 @@ describe('OutcomeAdjudicator：第一级 injectClosurePrompt（r9 §3/§5）', (
     const h = await adjudicatorWith()
     await nudgeThrough(h)
     expect(h.prompts).toHaveLength(1)
-    // 首响定时器在 nudged 相位再来 → 不重复提醒、不判定（等提醒轮结束）
+    // 首响定时器在 nudged 相位再来 → 不重复提醒、不投判定请求（等提醒轮结束）
     h.adjudicator.onFirstResponseTimeout('T-001')
     expect(h.prompts).toHaveLength(1)
-    expect(h.llmAttempts()).toBe(0)
-    // 模拟提醒轮结束且已判完（直接推到 judged：llm 返回 completed）
+    // 墙钟（nudged）→ 投判定请求（judging）；再一轮墙钟 → 强制解析（日志无标记轮 → 判定不可用）
     await h.adjudicator.onWallClock('T-001')
-    expect(h.coreCalls.completed).toHaveLength(1)
+    expect(h.prompts).toHaveLength(2)
+    expect(h.prompts[1]!.text).toContain(JUDGE_REQUEST_MARKER)
+    await h.adjudicator.onWallClock('T-001')
+    expect(h.coreCalls.blocked).toHaveLength(1)
+    expect((h.coreCalls.blocked[0] as { reason: string }).reason).toContain('判定不可用')
     // judged 之后任何触发都不再动作
     await nudgeThrough(h)
-    expect(h.prompts).toHaveLength(1)
-    expect(h.coreCalls.completed).toHaveLength(1)
+    expect(h.prompts).toHaveLength(2)
+    expect(h.coreCalls.blocked).toHaveLength(1)
   })
 
   it('gateway/internal：同一 requestId 限时重试；重试耗尽保留 pending（下轮同 id 续投）', async () => {
@@ -569,14 +575,44 @@ describe('OutcomeAdjudicator：第一级 injectClosurePrompt（r9 §3/§5）', (
   })
 })
 
-/* ────────────────────────── OutcomeAdjudicator：第二级判定与兜底定时器 ────────────────────────── */
+/* ────────────────────────── OutcomeAdjudicator：第二级原会话自判与兜底定时器 ────────────────────────── */
 
-describe('OutcomeAdjudicator：第二级 judgeOutcome 三态落位（规格 §4）', () => {
-  it('completed → core.completeTask（deliveryOrigin=system-judged、判定摘要为 result）', async () => {
-    const h = await adjudicatorWith({ llm: async () => JSON.stringify({ verdict: 'completed', summary: '判定：活已干完' }) })
-    await nudgeThrough(h)
-    h.adjudicator.onTurnEnd('session-9') // 提醒轮结束（点读读到 completed 末轮）
+describe('OutcomeAdjudicator：第二级原会话自判三态落位（规格 §8，2026-11-09 起）', () => {
+  /** 提醒轮结束 → 投判定请求（nudged → judging）。 */
+  async function requestJudgeThrough(h: Awaited<ReturnType<typeof adjudicatorWith>>) {
+    h.adjudicator.onTurnEnd('session-9')
     await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
+  }
+
+  /** 补一条「判定请求轮 + 自判回复」进会话日志，再走轮结束 → 解析落位。 */
+  async function replyThrough(h: Awaited<ReturnType<typeof adjudicatorWith>>, replyText: string) {
+    h.logs.get('session-9')!.push(...judgeReplyTurn(10, replyText))
+    h.adjudicator.onTurnEnd('session-9')
+    await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
+  }
+
+  it('判定请求投递：queue 模式、含标记、写前意图账、progress 与事故记账', async () => {
+    const h = await adjudicatorWith()
+    await nudgeThrough(h)
+    await requestJudgeThrough(h)
+    expect(h.prompts).toHaveLength(2)
+    const judgePrompt = h.prompts[1]!
+    expect(judgePrompt.mode).toBe('queue')
+    expect(judgePrompt.text).toContain(JUDGE_REQUEST_MARKER)
+    expect(judgePrompt.text).toContain('complete_task')
+    expect(judgePrompt.requestId).toBe('closure-T-001-2')
+    expect(judgePrompt.intentsAtCall).toContain('closure-T-001-2')
+    expect((await h.ledger.get('T-001'))?.progress).toContain('判定请求已投递')
+    expect(h.incidents.some((entry) => entry.text.includes('判定请求已投递'))).toBe(true)
+    // 投判定请求后重开双定时器（防判定轮零输出且墙钟已耗尽时卡死）
+    expect(h.timers.delays()).toEqual([DEFAULT_FIRST_RESPONSE_TIMEOUT_MS, DEFAULT_ADJUDICATION_WALL_CLOCK_MS])
+  })
+
+  it('completed → core.completeTask（deliveryOrigin=system-judged、判定摘要为 result）', async () => {
+    const h = await adjudicatorWith()
+    await nudgeThrough(h)
+    await requestJudgeThrough(h)
+    await replyThrough(h, JSON.stringify({ verdict: 'completed', summary: '判定：活已干完' }))
     expect(h.coreCalls.completed).toHaveLength(1)
     const call = h.coreCalls.completed[0] as { callerSessionId: string; taskId: string; input: { docVersion: number; summary: string; deliveryOrigin: string } }
     expect(call.callerSessionId).toBe('session-9')
@@ -586,7 +622,6 @@ describe('OutcomeAdjudicator：第二级 judgeOutcome 三态落位（规格 §4�
     expect(call.input.docVersion).toBe(1)
     // dispatched → running 的转接（状态机无 dispatched→completed 直达边）
     expect((await h.ledger.get('T-001'))?.status).toBe('running')
-    // 完成卡由 core 完成路径写入（集成测试另证）；判定路径本身写 progress + 事故
     expect((await h.ledger.get('T-001'))?.progress).toContain('系统判定')
     expect(h.incidents.some((entry) => entry.text.includes('系统判定交付'))).toBe(true)
     // 定时器清理
@@ -594,49 +629,66 @@ describe('OutcomeAdjudicator：第二级 judgeOutcome 三态落位（规格 §4�
   })
 
   it('partial → blocked 附判定 + progress；failed 同理', async () => {
-    const h = await adjudicatorWith({ llm: async () => JSON.stringify({ verdict: 'partial', summary: '还差部署' }) })
+    const h = await adjudicatorWith()
     await nudgeThrough(h)
-    h.adjudicator.onTurnEnd('session-9')
-    await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
+    await requestJudgeThrough(h)
+    await replyThrough(h, JSON.stringify({ verdict: 'partial', summary: '还差部署' }))
     expect(h.coreCalls.blocked).toHaveLength(1)
     const call = h.coreCalls.blocked[0] as { callerSessionId: string; taskId: string; reason: string }
     expect(call.reason).toContain('partial')
     expect(call.reason).toContain('还差部署')
     expect(h.incidents.some((entry) => entry.text.includes('partial'))).toBe(true)
 
-    const h2 = await adjudicatorWith({ llm: async () => JSON.stringify({ verdict: 'failed', summary: '方向错了' }) })
+    const h2 = await adjudicatorWith()
     await nudgeThrough(h2)
-    h2.adjudicator.onTurnEnd('session-9')
-    await h2.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
+    await requestJudgeThrough(h2)
+    await replyThrough(h2, JSON.stringify({ verdict: 'failed', summary: '方向错了' }))
     const call2 = h2.coreCalls.blocked[0] as { reason: string }
     expect(call2.reason).toContain('failed')
     expect(call2.reason).toContain('方向错了')
   })
 
-  it('判定失败（llm 挂）→ blocked 附「判定不可用」', async () => {
-    const h = await adjudicatorWith({ llm: async () => {
-      throw new Error('NO_ADAPTER')
-    } })
+  it('回复不可解析 → blocked 附「判定不可用」+ 回复摘录（不再发起独立模型调用）', async () => {
+    const h = await adjudicatorWith()
     await nudgeThrough(h)
-    h.adjudicator.onTurnEnd('session-9')
-    await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
+    await requestJudgeThrough(h)
+    await replyThrough(h, '我觉得差不多干完了，可以验收')
     expect(h.coreCalls.blocked).toHaveLength(1)
     const call = h.coreCalls.blocked[0] as { reason: string }
     expect(call.reason).toContain('判定不可用')
-    expect(call.reason).toContain('NO_ADAPTER')
+    expect(call.reason).toContain('我觉得差不多干完了')
     expect(h.incidents.some((entry) => entry.text.includes('判定不可用'))).toBe(true)
+    expect(h.pointReads.length).toBeGreaterThanOrEqual(1)
   })
 
-  it('状态机防双跑：并发触发（去抖 + 定时器同时到期）只跑一次判定', async () => {
+  it('判定请求 not-found：会话不存在 → blocked「判定不可用：会话不存在」', async () => {
+    const h = await adjudicatorWith({
+      failPrompt: (attempt) => (attempt === 1 ? undefined : Object.assign(new Error('session not found'), { code: 'session/not-found' })),
+    })
+    await nudgeThrough(h)
+    await requestJudgeThrough(h)
+    expect(h.coreCalls.blocked).toHaveLength(1)
+    expect((h.coreCalls.blocked[0] as { reason: string }).reason).toContain('会话不存在')
+    expect(h.incidents.some((entry) => entry.text.includes('会话不存在'))).toBe(true)
+  })
+
+  it('状态机防双跑：墙钟投出判定请求后，同刻的去抖评估不误判（标记未出现=继续等）', async () => {
     const h = await adjudicatorWith()
     await nudgeThrough(h)
-    // 提醒轮结束（去抖）与墙钟同时到期
+    // 提醒轮结束（去抖挂起）与墙钟同时到期
     h.adjudicator.onTurnEnd('session-9')
     await h.adjudicator.onWallClock('T-001')
     await h.timers.fireDelay(DEFAULT_CLOSURE_DEBOUNCE_MS)
-    expect(h.coreCalls.completed).toHaveLength(1)
+    // 只投了一次判定请求；判定请求还没被执行（队列里）→ 不落任何判定
+    expect(h.prompts).toHaveLength(2)
+    expect(h.coreCalls.completed).toHaveLength(0)
     expect(h.coreCalls.blocked).toHaveLength(0)
-    expect(h.llmAttempts()).toBe(1)
+    // 补上自判回复轮 → 轮结束解析 → 恰好一次落位
+    await replyThrough(h, JSON.stringify({ verdict: 'completed', summary: '判定：活已干完' }))
+    expect(h.coreCalls.completed).toHaveLength(1)
+    // judged 后墙钟再来无动作
+    await h.adjudicator.onWallClock('T-001')
+    expect(h.coreCalls.completed).toHaveLength(1)
   })
 
   it('兜底定时器：首响超时（无任何轮结束）也走同一判定入口（nudge）', async () => {
@@ -646,17 +698,36 @@ describe('OutcomeAdjudicator：第二级 judgeOutcome 三态落位（规格 §4�
     await h.timers.fireDelay(DEFAULT_FIRST_RESPONSE_TIMEOUT_MS)
     expect(h.prompts).toHaveLength(1)
     expect(h.prompts[0]!.requestId).toBe('closure-T-001-1')
-    // 挂死会话不误判：无 turn/end 时首响超时只提醒，不判定
-    expect(h.llmAttempts()).toBe(0)
+    // 挂死会话不误判：无 turn/end 时首响超时只提醒，不投判定请求
+    expect(h.prompts[0]!.text).toContain('系统收尾提醒')
   })
 
-  it('墙钟兜底：nudged 且提醒轮一直没结束 → 墙钟触发判定', async () => {
+  it('墙钟兜底：nudged 且提醒轮一直没结束 → 墙钟投判定请求；再到期强制解析落位', async () => {
     const h = await adjudicatorWith({ logs: { 'session-9': hungTurn(1) } })
     h.adjudicator.onDispatched('T-001')
-    await h.timers.fireDelay(DEFAULT_FIRST_RESPONSE_TIMEOUT_MS) // nudge
+    await h.timers.fireDelay(DEFAULT_FIRST_RESPONSE_TIMEOUT_MS) // nudge（hung 无完整轮，事件路径进不来）
     h.clock.advance(1)
+    await h.timers.fireDelay(DEFAULT_ADJUDICATION_WALL_CLOCK_MS) // 墙钟：nudged → 投判定请求（重开双定时器）
+    expect(h.prompts.at(-1)!.text).toContain(JUDGE_REQUEST_MARKER)
+    h.logs.get('session-9')!.push(...judgeReplyTurn(10, JSON.stringify({ verdict: 'completed', summary: '判定：活已干完' })))
+    await h.timers.fireDelay(DEFAULT_ADJUDICATION_WALL_CLOCK_MS) // 新墙钟：judging → 强制解析
+    expect(h.coreCalls.completed).toHaveLength(1)
+  })
+
+  it('兜底定时器让位（CLI 面）：会话 running → 首响超时/墙钟都不打扰', async () => {
+    const h = await adjudicatorWith({ logs: { 'session-9': hungTurn(1) }, agentStatus: 'running' })
+    h.adjudicator.onDispatched('T-001')
+    await h.timers.fireDelay(DEFAULT_FIRST_RESPONSE_TIMEOUT_MS)
     await h.timers.fireDelay(DEFAULT_ADJUDICATION_WALL_CLOCK_MS)
-    expect(h.coreCalls.completed).toHaveLength(1) // 默认 llm 返回 completed
+    expect(h.prompts).toHaveLength(0)
+    expect(h.coreCalls.completed).toHaveLength(0)
+  })
+
+  it('兜底定时器让位（桌面 sessionState）：running=true → 墙钟不投判定请求', async () => {
+    const h = await adjudicatorWith({ sessionState: async () => ({ running: true }) })
+    await nudgeThrough(h)
+    await h.adjudicator.onWallClock('T-001')
+    expect(h.prompts).toHaveLength(1) // 只有收尾提醒，判定请求未投
   })
 
   it('onDispatched 重置周期：supplement 升版后重新 watching，新周期用新 seq 提醒', async () => {

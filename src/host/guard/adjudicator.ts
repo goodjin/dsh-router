@@ -1,18 +1,23 @@
 /**
- * 事件驱动结果判定（v1.2 规格 §4，计划 Task B3）。
+ * 事件驱动结果判定（v1.2 规格 §4，计划 Task B3；2026-11-09 改原会话自判）。
  *
  * 两级判定：worker 本轮输出结束（running→false，r7 §5.1）且任务未交付且无
  * 待答问题时，先注入一条自报身份的收尾提醒（r9 §5）；提醒轮结束仍无交付，
- * 再用独立总结判定三态（completed/partial/failed，judgeOutcome）。判定
- * 「实际已完成」时以判定摘要代交付并标记 deliveryOrigin='system-judged'
- * （完成卡可退回重做）。兜底定时器（首响超时/墙钟）防事件不来，与事件
- * 触发共用状态机防双跑。
+ * 再向**同一个会话**注入判定请求（只回一行 JSON 的三态自判），下一轮结束
+ * 解析其回复落位（completed/partial/failed，parseOutcomeJudgement）。不再走
+ * 独立 llm 通道——那条通道借别的会话路由、消息形状也曾不合宿主契约
+ * （2026-11-09「判定模型返回空白」事故）。判定「实际已完成」时以判定摘要
+ * 代交付并标记 deliveryOrigin='system-judged'（完成卡可退回重做）。
+ *
+ * 兜底定时器（首响超时/墙钟）防事件不来，与事件触发共用状态机防双跑；
+ * 到期先查会话运行态：仍在跑（模型请求未超时=还在等）就整体让位给
+ * 「轮结束」事件路径，不打扰、不另设计时器。
  *
  * @module @goodjin2/dsh-router/guard/adjudicator
  */
 
 import type { TaskLedger } from '../ledger/store.ts'
-import type { SummaryLlm } from '../memory/summarizer.ts'
+import { parseOutcomeJudgement } from '../memory/adapter.ts'
 import type { FsAdapter } from '../../shared/fs-adapter.ts'
 import type { TaskRecord } from '../../shared/types.ts'
 
@@ -141,7 +146,6 @@ export interface OutcomeAdjudicatorDeps {
   sessionState?(sessionId: string): Promise<{ running?: boolean; pendingInput?: readonly string[] } | undefined>
   /** CLI 兜底：agents.get(id)?.status（'running' 推迟）。 */
   agentsGet(sessionId: string): { status: string } | undefined
-  llm: SummaryLlm
   core: AdjudicatorCoreFace
   intents: ClosureIntentStore
   recordIncident(entry: IncidentEntry): void
@@ -152,8 +156,8 @@ export interface OutcomeAdjudicatorDeps {
   logger?: { warn(message: string): void }
 }
 
-/** 每任务每周期的判定相位。 */
-type CyclePhase = 'watching' | 'nudged' | 'judged'
+/** 每任务每周期的判定相位：watching → nudged → judging → judged。 */
+type CyclePhase = 'watching' | 'nudged' | 'judging' | 'judged'
 
 interface TaskCycle {
   phase: CyclePhase
@@ -173,6 +177,43 @@ function closurePromptText(taskId: string): string {
     '3. 未做完 → 说明剩余工作与计划。',
     '（这是系统自动提醒，不是用户新指令。）',
   ].join('\n')
+}
+
+/** 判定请求的事件内标记（resolveJudge 只认含此标记之后的助手回复）。 */
+export const JUDGE_REQUEST_MARKER = '【系统判定请求】'
+
+function judgePromptText(taskId: string): string {
+  return [
+    `${JUDGE_REQUEST_MARKER}任务 ${taskId} 尚未提交交付。请对本任务的实际交付状态做一次判定，只输出一行 JSON，不要解释、不要调用工具：`,
+    '{"verdict":"completed|partial|failed","summary":"<不超过 200 字的判定摘要>"}',
+    '- completed：任务目标已实际完成（若此刻已可交付，请直接调用 complete_task 提交，忽略本判定）；',
+    '- partial：部分完成——summary 必须说明剩余工作；',
+    '- failed：失败或受阻——summary 必须说明原因。',
+    '（这是系统自动判定请求，不是用户新指令。）',
+  ].join('\n')
+}
+
+/** 一条 surface 事件的可见文本（user/message 的 data 即消息记录；assistant 走 data.message；形状照 memory/adapter 的 eventText，防御式）。 */
+function eventVisibleText(event: unknown): string {
+  if (typeof event !== 'object' || event === null) return ''
+  const { type, data } = event as { type?: unknown; data?: unknown }
+  const record = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+  const message = type === 'user/message' ? record : (typeof record.message === 'object' && record.message !== null ? (record.message as Record<string, unknown>) : {})
+  const content = message.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((block) => {
+        if (typeof block === 'object' && block !== null) {
+          const b = block as { type?: unknown; text?: unknown }
+          if (b.type === 'text' && typeof b.text === 'string') return b.text
+        }
+        return ''
+      })
+      .filter((text) => text !== '')
+      .join(' ')
+  }
+  return typeof message.text === 'string' ? message.text : ''
 }
 
 /** 从事件流解析末轮：返回 { lastTurnStartIdx, lastTurnEnd }；无完整轮 → undefined。 */
@@ -280,21 +321,38 @@ export class OutcomeAdjudicator {
     if (cycle === undefined || cycle.phase !== 'watching') return
     const record = this.deps.ledger.get(taskId)
     if (record === undefined || record.sessionId === undefined || (record.status !== 'dispatched' && record.status !== 'running')) return
+    // 会话仍在跑就不打扰（模型请求自带超时，没超时=还在等；轮结束事件会再进评估）。
+    if (await this.sessionBusy(record.sessionId)) return
     await this.nudge(record)
   }
 
-  /** 墙钟到期：watching → 提醒；nudged → 直接判定；judged → 无动作。 */
+  /** 墙钟到期：watching → 提醒；nudged → 投判定请求；judging → 强制解析；judged → 无动作。 */
   async onWallClock(taskId: string): Promise<void> {
     const cycle = this.cycles.get(taskId)
     if (cycle === undefined || cycle.phase === 'judged') return
     const record = this.deps.ledger.get(taskId)
     if (record === undefined || record.sessionId === undefined || (record.status !== 'dispatched' && record.status !== 'running')) return
+    // 会话仍在跑就整体让位：不打扰、不判定，轮结束事件路径接管（请求超时自会结束这轮）。
+    if (await this.sessionBusy(record.sessionId)) return
     if (cycle.phase === 'watching') {
       await this.nudge(record)
       return
     }
+    if (cycle.phase === 'nudged') {
+      await this.requestJudge(record)
+      return
+    }
     const observation = await this.deps.observeSession(record.sessionId, { projectionMode: 'none' })
-    await this.judge(record, observation.events)
+    await this.resolveJudge(record, observation.events, { forced: true })
+  }
+
+  /** 会话是否仍在跑一轮（桌面 sessionState 优先，CLI 老 host 用 agentsGet 兜底）。 */
+  private async sessionBusy(sessionId: string): Promise<boolean> {
+    if (this.deps.sessionState !== undefined) {
+      const state = await this.deps.sessionState(sessionId)
+      return state?.running === true
+    }
+    return this.deps.agentsGet(sessionId)?.status === 'running'
   }
 
   /* ───────────────────── 评估（豁免链 + 相位动作） ───────────────────── */
@@ -341,7 +399,8 @@ export class OutcomeAdjudicator {
         return
       }
       if (cycle.phase === 'watching') await this.nudge(record)
-      else await this.judge(record, events)
+      else if (cycle.phase === 'nudged') await this.requestJudge(record)
+      else if (cycle.phase === 'judging') await this.resolveJudge(record, events, { forced: false })
     } catch (error) {
       this.deps.logger?.warn(`判定评估失败（会话 ${sessionId}）: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
@@ -349,12 +408,19 @@ export class OutcomeAdjudicator {
     }
   }
 
-  /* ───────────────────── 第一级：收尾提醒 ───────────────────── */
+  /* ───────────────────── 提示注入（收尾提醒与判定请求共用） ───────────────────── */
 
-  private async nudge(record: TaskRecord): Promise<void> {
+  /**
+   * 排队注入一条系统提示：写前意图账（同文本 pending 复用同 requestId）→
+   * gateway 类同 requestId 限时重试 → 四码分治。投递成功与否由返回值告知，
+   * 相位与 progress 由调用方落（收尾提醒与判定请求的文案不同）。
+   */
+  private async injectQueuedPrompt(
+    record: TaskRecord,
+    text: string,
+  ): Promise<{ outcome: 'delivered' | 'gateway-exhausted' | 'writer-held' | 'not-found' | 'agent-busy'; requestId: string }> {
     const taskId = record.id
     const sessionId = record.sessionId as string
-    const text = closurePromptText(taskId)
     const intent = await this.deps.intents.prepare(taskId, text, this.deps.now())
     let attempt = 0
     while (attempt < PROMPT_ATTEMPT_LIMIT) {
@@ -362,72 +428,145 @@ export class OutcomeAdjudicator {
       try {
         await this.deps.prompt({ requestId: intent.requestId, sessionId, mode: 'queue', content: [{ type: 'text', text }] })
         await this.deps.intents.markDelivered(taskId, intent.seq, this.deps.now())
-        this.cycles.set(taskId, { phase: 'nudged' })
-        this.armTimers(taskId)
-        await this.deps.ledger.updateProgress(taskId, `收尾提醒已投递（${intent.requestId}）：请交付或说明阻塞`)
-        this.deps.recordIncident({ taskId, title: '收尾提醒', text: `收尾提醒已投递: ${intent.requestId}` })
-        return
+        return { outcome: 'delivered', requestId: intent.requestId }
       } catch (error) {
         const code = errorCode(error)
         if (code.includes('gateway/internal') || code.includes('gateway')) {
-          if (attempt >= PROMPT_ATTEMPT_LIMIT) {
-            this.deps.logger?.warn(`收尾提醒 ${intent.requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`)
-            return
-          }
+          if (attempt >= PROMPT_ATTEMPT_LIMIT) return { outcome: 'gateway-exhausted', requestId: intent.requestId }
           continue // 同 requestId 限时重试（r9 §3.3）
         }
-        if (code.includes('writer-held')) {
-          await this.deps.ledger.updateProgress(taskId, '收尾提醒投递受阻（session/writer-held），本轮不重试')
-          return // 停手（r9 §5.1）
-        }
-        if (code.includes('not-found')) {
-          await this.deps.ledger.updateProgress(taskId, '收尾提醒失败：会话不存在（session/not-found）')
-          this.deps.recordIncident({ taskId, title: '收尾提醒失败', text: '收尾提醒投递失败 session/not-found' })
-          return
-        }
-        if (code.includes('agent-busy')) {
-          await this.deps.ledger.updateProgress(taskId, '收尾提醒推迟：会话被占用（session/agent-busy），下轮再试')
-          return
-        }
+        if (code.includes('writer-held')) return { outcome: 'writer-held', requestId: intent.requestId } // 停手（r9 §5.1）
+        if (code.includes('not-found')) return { outcome: 'not-found', requestId: intent.requestId }
+        if (code.includes('agent-busy')) return { outcome: 'agent-busy', requestId: intent.requestId }
         throw error
       }
     }
+    return { outcome: 'gateway-exhausted', requestId: intent.requestId }
   }
 
-  /* ───────────────────── 第二级：独立总结判定 ───────────────────── */
+  /* ───────────────────── 第一级：收尾提醒 ───────────────────── */
 
-  private async judge(record: TaskRecord, events: readonly unknown[]): Promise<void> {
+  private async nudge(record: TaskRecord): Promise<void> {
+    const taskId = record.id
+    const { outcome, requestId } = await this.injectQueuedPrompt(record, closurePromptText(taskId))
+    if (outcome === 'delivered') {
+      this.cycles.set(taskId, { phase: 'nudged' })
+      this.armTimers(taskId)
+      await this.deps.ledger.updateProgress(taskId, `收尾提醒已投递（${requestId}）：请交付或说明阻塞`)
+      this.deps.recordIncident({ taskId, title: '收尾提醒', text: `收尾提醒已投递: ${requestId}` })
+      return
+    }
+    if (outcome === 'gateway-exhausted') {
+      this.deps.logger?.warn(`收尾提醒 ${requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`)
+      return
+    }
+    if (outcome === 'writer-held') {
+      await this.deps.ledger.updateProgress(taskId, '收尾提醒投递受阻（session/writer-held），本轮不重试')
+      return
+    }
+    if (outcome === 'not-found') {
+      await this.deps.ledger.updateProgress(taskId, '收尾提醒失败：会话不存在（session/not-found）')
+      this.deps.recordIncident({ taskId, title: '收尾提醒失败', text: '收尾提醒投递失败 session/not-found' })
+      return
+    }
+    await this.deps.ledger.updateProgress(taskId, '收尾提醒推迟：会话被占用（session/agent-busy），下轮再试')
+  }
+
+  /* ───────────────────── 第二级：原会话自判（2026-11-09 起） ───────────────────── */
+
+  /**
+   * 投递判定请求（queue）：同一执行会话自判三态，只回一行 JSON。投递成功置
+   * judging 相位并重开墙钟（防「判定轮零输出且墙钟已耗尽」卡死在 judging）；
+   * 回复由下一轮结束的 resolveJudge 或墙钟强制解析。
+   */
+  private async requestJudge(record: TaskRecord): Promise<void> {
+    const taskId = record.id
+    const phase = this.cycles.get(taskId)?.phase
+    if (phase === 'judging' || phase === 'judged') return
+    const { outcome, requestId } = await this.injectQueuedPrompt(record, judgePromptText(taskId))
+    if (outcome === 'delivered') {
+      this.clearTimers(taskId)
+      this.cycles.set(taskId, { phase: 'judging' })
+      this.armTimers(taskId)
+      await this.deps.ledger.updateProgress(taskId, `判定请求已投递（${requestId}）：等待会话自判回复`)
+      this.deps.recordIncident({ taskId, title: '判定请求', text: `判定请求已投递: ${requestId}` })
+      return
+    }
+    if (outcome === 'not-found') {
+      // 会话不存在：无从自判，blocked（判定不可用）终结本周期。
+      this.cycles.set(taskId, { phase: 'judged' })
+      this.clearTimers(taskId)
+      await this.deps.core.reportBlocker(record.sessionId as string, taskId, '判定不可用：会话不存在（session/not-found）')
+      this.deps.recordIncident({ taskId, title: '判定失败', text: '判定不可用：会话不存在（session/not-found）' })
+      return
+    }
+    // gateway 耗尽 / writer-held / agent-busy：留在 nudged，下轮事件或墙钟再试。
+    if (outcome === 'gateway-exhausted') {
+      this.deps.logger?.warn(`判定请求 ${requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`)
+    } else if (outcome === 'writer-held') {
+      await this.deps.ledger.updateProgress(taskId, '判定请求投递受阻（session/writer-held），本轮不重试')
+    } else {
+      await this.deps.ledger.updateProgress(taskId, '判定请求推迟：会话被占用（session/agent-busy），下轮再试')
+    }
+  }
+
+  /**
+   * 解析自判回复：只认「含判定标记的最后一条用户消息之后」的助手文本；
+   * 三态落位（completed→系统判定交付；partial/failed→blocked 附判定）。
+   * 找不到标记、无回复、回复不可解析 → blocked「判定不可用」附实情——
+   * 全程不再发起任何独立模型调用。
+   *
+   * forced=false（轮结束事件路径）：标记尚未出现 = 判定请求还在队列里，
+   * 不动相位继续等（下一轮结束或墙钟再进来）；forced=true（墙钟强制作结）：
+   * 一切缺失都按「判定不可用」如实落 blocked。
+   */
+  private async resolveJudge(record: TaskRecord, events: readonly unknown[], options: { forced: boolean }): Promise<void> {
     const taskId = record.id
     const sessionId = record.sessionId as string
-    // 入口同步置 judged：并发触发（去抖与墙钟同至）在异步工作开始前就被挡下
-    if (this.cycles.get(taskId)?.phase === 'judged') return
-    this.cycles.set(taskId, { phase: 'judged' })
-    try {
-      const { judgeOutcome } = await import('../memory/adapter.ts')
-      const judgement = await judgeOutcome(sessionId, events, this.deps.llm)
-      if (judgement.verdict === 'completed') {
-        if (record.status === 'dispatched') {
-          await this.deps.ledger.transition(taskId, 'running', '系统判定转执行')
-        }
-        await this.deps.core.completeTask(sessionId, taskId, {
-          docVersion: record.docVersion,
-          summary: judgement.summary,
-          deliveryOrigin: 'system-judged',
-        })
-        await this.deps.ledger.updateProgress(taskId, `系统判定交付：${judgement.summary}`)
-        this.deps.recordIncident({ taskId, title: '系统判定', text: `系统判定交付：${judgement.summary}` })
-      } else {
-        await this.deps.core.reportBlocker(sessionId, taskId, `${judgement.verdict}：${judgement.summary}`)
-        await this.deps.ledger.updateProgress(taskId, `系统判定 ${judgement.verdict}：${judgement.summary}`)
-        this.deps.recordIncident({ taskId, title: '系统判定', text: `系统判定 ${judgement.verdict}：${judgement.summary}` })
+    let markerIdx = -1
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      if ((events[i] as { type?: string } | undefined)?.type === 'user/message' && eventVisibleText(events[i]).includes(JUDGE_REQUEST_MARKER)) {
+        markerIdx = i
+        break
       }
+    }
+    if (markerIdx < 0 && !options.forced) return
+    // 入口同步置 judged：并发触发（去抖与墙钟同至）在异步工作开始前就被挡下
+    this.cycles.set(taskId, { phase: 'judged' })
+    this.clearTimers(taskId)
+    if (markerIdx < 0) {
+      await this.deps.core.reportBlocker(sessionId, taskId, '判定不可用：判定请求未被执行会话处理')
+      this.deps.recordIncident({ taskId, title: '判定失败', text: '判定不可用：判定请求未被执行会话处理' })
+      return
+    }
+    let reply = ''
+    for (let i = markerIdx + 1; i < events.length; i += 1) {
+      if ((events[i] as { type?: string } | undefined)?.type === 'assistant/message') reply = eventVisibleText(events[i])
+    }
+    let verdict
+    try {
+      verdict = parseOutcomeJudgement(reply)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       await this.deps.core.reportBlocker(sessionId, taskId, `判定不可用：${message}`)
       this.deps.recordIncident({ taskId, title: '判定失败', text: `判定不可用：${message}` })
-    } finally {
-      this.cycles.set(taskId, { phase: 'judged' })
-      this.clearTimers(taskId)
+      return
+    }
+    if (verdict.verdict === 'completed') {
+      if (record.status === 'dispatched') {
+        await this.deps.ledger.transition(taskId, 'running', '系统判定转执行')
+      }
+      await this.deps.core.completeTask(sessionId, taskId, {
+        docVersion: record.docVersion,
+        summary: verdict.summary,
+        deliveryOrigin: 'system-judged',
+      })
+      await this.deps.ledger.updateProgress(taskId, `系统判定交付：${verdict.summary}`)
+      this.deps.recordIncident({ taskId, title: '系统判定', text: `系统判定交付：${verdict.summary}` })
+    } else {
+      await this.deps.core.reportBlocker(sessionId, taskId, `${verdict.verdict}：${verdict.summary}`)
+      await this.deps.ledger.updateProgress(taskId, `系统判定 ${verdict.verdict}：${verdict.summary}`)
+      this.deps.recordIncident({ taskId, title: '系统判定', text: `系统判定 ${verdict.verdict}：${verdict.summary}` })
     }
   }
 }

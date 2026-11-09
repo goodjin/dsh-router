@@ -49,6 +49,13 @@ describe('宿主侧入口 src/entry.ts', () => {
     expect(resolveRootConfig({ workerSpawnMode: 'bogus' }).workerSpawnMode).toBe('cache-priority')
     expect(resolveRootConfig(undefined).workerSpawnMode).toBe('cache-priority')
   })
+
+  it('memoryEnabled（2026-11-09 起默认停用）：缺省/非 true 一律 false，显式 true 才接线', () => {
+    expect(resolveRootConfig({}).memoryEnabled).toBe(false)
+    expect(resolveRootConfig(undefined).memoryEnabled).toBe(false)
+    expect(resolveRootConfig({ memoryEnabled: 'yes' }).memoryEnabled).toBe(false)
+    expect(resolveRootConfig({ memoryEnabled: true }).memoryEnabled).toBe(true)
+  })
 })
 
 describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修复接线）', () => {
@@ -68,6 +75,16 @@ describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修�
     expect(block).toContain('index:')
     expect(block, '收编不得回落到整日志读取').not.toContain('readSession')
     expect(block, '收编不得再自己枚举宿主成员面').not.toContain('workspaceRegistry.list')
+  })
+
+  it('记忆按 memoryEnabled 接线（2026-11-09 默认停用）；判定器不再接独立模型通道', () => {
+    expect(source).toMatch(/if \(config\.memoryEnabled\) \{/)
+    expect(source).toMatch(/\.\.\.\(memoryFace === undefined \? \{\} : \{ memory: memoryFace \}\)/)
+    expect(source).toMatch(/memoryEnabled: booleanOr\(source\.memoryEnabled\)/)
+    const at = source.indexOf('new OutcomeAdjudicator({')
+    expect(at).toBeGreaterThan(0)
+    const block = source.slice(at, source.indexOf('adjudicatorRef.current', at))
+    expect(block, '判定器依赖不得再挂 llm 通道').not.toContain('llm:')
   })
 })
 

@@ -99,9 +99,33 @@ describe('createSummaryLlm', () => {
     expect(streamed[0]!.options).toMatchObject({
       provider: 'deepseek',
       model: 'glm-5',
-      messages: [{ role: 'user', content: '摘要这些' }],
+      // 宿主契约形状（2026-11-09）：content 必须是文本块数组，不再发纯字符串
+      messages: [{ role: 'user', content: [{ type: 'text', text: '摘要这些' }] }],
       purpose: 'compaction',
       signal: controller.signal,
+    })
+  })
+
+  it('一次性提示词按宿主契约投喂：system 上提专门字段、content 规整为文本块（2026-11-09 事故教训）', async () => {
+    const streamed: Record<string, unknown>[] = []
+    const host = {
+      async *stream(options: Record<string, unknown>) {
+        streamed.push(options)
+        yield { type: 'text-delta', index: 0, text: 'ok' }
+      },
+    }
+    const llm = createSummaryLlm(host, () => ({ provider: 'p', model: 'm' }))
+    await llm.stream([
+      { role: 'system', content: '你是摘要员' },
+      { role: 'user', content: '第一段' },
+      { role: 'user', content: '第二段' },
+    ], new AbortController().signal)
+    expect(streamed[0]).toMatchObject({
+      system: '你是摘要员',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: '第一段' }] },
+        { role: 'user', content: [{ type: 'text', text: '第二段' }] },
+      ],
     })
   })
 

@@ -8,22 +8,6 @@ import { createZstdDecompress } from "node:zlib";
 import { existsSync, globSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-//#region rolldown:runtime
-var __defProp = Object.defineProperty;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __esm = (fn, res) => function() {
-	return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
-};
-var __export = (all) => {
-	let target = {};
-	for (var name$1 in all) __defProp(target, name$1, {
-		get: all[name$1],
-		enumerable: true
-	});
-	return target;
-};
-
-//#endregion
 //#region src/shared/types.ts
 /** 终态集合：无出边，进入后任何写操作都走非法迁移。 */
 const TERMINAL_STATUSES = [
@@ -8485,6 +8469,14 @@ var MemoryDocStore = class {
 
 //#endregion
 //#region src/host/memory/summarizer.ts
+const SYSTEM_PROMPT = [
+	"你是会话记忆摘要员。把事件流压缩成中文条目化摘要，规则：",
+	"- 每条以 [决定]、[建议]、[事实] 之一开头：用户的决定用 [决定]，worker 的主张用 [建议]，已核实的结果用 [事实]；",
+	"- 每条末尾用 (seqs: n,n) 注明来源事件序号，便于回溯；",
+	"- 每条不超过 200 字；只保留需求、决定、结果、未决事项，不写过程流水；",
+	"- 不写代码块，不添加事件里没有的内容；",
+	"- 只输出摘要条目本身，不要解释。"
+].join("\n");
 function buildSummaryPrompt(input) {
 	const events = [...input.events].sort((a, b) => a.seq - b.seq);
 	const lines = [
@@ -8525,35 +8517,39 @@ async function summarizeIncremental(store, sessionId, events, llm, options = {})
 		toSeq
 	};
 }
-var SYSTEM_PROMPT;
-var init_summarizer = __esm({ "src/host/memory/summarizer.ts": (() => {
-	SYSTEM_PROMPT = [
-		"你是会话记忆摘要员。把事件流压缩成中文条目化摘要，规则：",
-		"- 每条以 [决定]、[建议]、[事实] 之一开头：用户的决定用 [决定]，worker 的主张用 [建议]，已核实的结果用 [事实]；",
-		"- 每条末尾用 (seqs: n,n) 注明来源事件序号，便于回溯；",
-		"- 每条不超过 200 字；只保留需求、决定、结果、未决事项，不写过程流水；",
-		"- 不写代码块，不添加事件里没有的内容；",
-		"- 只输出摘要条目本身，不要解释。"
-	].join("\n");
-}) });
 
 //#endregion
 //#region src/host/memory/adapter.ts
-var adapter_exports = /* @__PURE__ */ __export({
-	BackgroundSummarizer: () => BackgroundSummarizer,
-	COMPLETED_TASK_KIND: () => COMPLETED_TASK_KIND,
-	JUDGE_OUTCOME_SYSTEM_PROMPT: () => JUDGE_OUTCOME_SYSTEM_PROMPT,
-	NO_ROUTE_MESSAGE: () => NO_ROUTE_MESSAGE,
-	buildJudgeOutcomeMessages: () => buildJudgeOutcomeMessages,
-	createCompletedTaskRecorder: () => createCompletedTaskRecorder,
-	createSummaryLlm: () => createSummaryLlm,
-	eventsToSummaryEvents: () => eventsToSummaryEvents,
-	judgeOutcome: () => judgeOutcome,
-	maxSurfaceSeq: () => maxSurfaceSeq,
-	parseOutcomeJudgement: () => parseOutcomeJudgement,
-	recordCompletedTask: () => recordCompletedTask,
-	summarizeSessionViaQuery: () => summarizeSessionViaQuery
-});
+const NO_ROUTE_MESSAGE = "记忆摘要没有可用的模型路由：配置 summarizationProvider/summarizationModel，或让目标会话先路由过一次请求";
+/**
+* 一次性提示词消息 → 宿主 GenerateOptions 的合法形状（2026-11-09 事故教训）。
+*
+* 宿主契约要求 content 是**文本块数组**、系统提示词走专门的 `system` 字段；
+* 纯字符串 content 会被部分提供方适配器整条丢弃，投影后零轮次时甚至被替换
+* 成「.」占位——判定/摘要模型因此从未见过提示词（「判定模型返回空白」）。
+* 这里在插件侧先规整，不再依赖各适配器对越界形状的宽容度。
+*/
+function toHostOneShotMessages(messages) {
+	const systemParts = [];
+	const turns = [];
+	for (const message of messages) {
+		if (message.role === "system") {
+			if (message.content.trim() !== "") systemParts.push(message.content);
+			continue;
+		}
+		turns.push({
+			role: "user",
+			content: [{
+				type: "text",
+				text: message.content
+			}]
+		});
+	}
+	return {
+		...systemParts.length === 0 ? {} : { system: systemParts.join("\n\n") },
+		messages: turns
+	};
+}
 /**
 * 把 ctx.llm.stream 包成 B6 的 SummaryLlm。只认 text-delta 块（按 index 分桶
 * 保序拼接）；reasoning/usage/finish 一律忽略。resolveTarget 允许异步返回
@@ -8564,10 +8560,12 @@ function createSummaryLlm(host, resolveTarget) {
 	return { async stream(messages, signal) {
 		const target = await resolveTarget();
 		if (target === void 0) throw new Error(NO_ROUTE_MESSAGE);
+		const oneShot = toHostOneShotMessages(messages);
 		const options = {
 			provider: target.provider,
 			model: target.model,
-			messages,
+			messages: oneShot.messages,
+			...oneShot.system === void 0 ? {} : { system: oneShot.system },
 			purpose: "compaction",
 			...signal === void 0 ? {} : { signal }
 		};
@@ -8581,6 +8579,8 @@ function createSummaryLlm(host, resolveTarget) {
 		return [...parts.keys()].sort((a, b) => a - b).map((index) => parts.get(index) ?? "").join("");
 	} };
 }
+/** 喂给摘要模型的单事件文本上限（对齐宿主 snippetChars 默认量级）。 */
+const EXCERPT_MAX_CHARS = 240;
 /** 从一条 surface 事件里提取语义文本（形状照 dsh-session deriveEventMessage）。 */
 function eventText(event) {
 	if (typeof event !== "object" || event === null) return "";
@@ -8643,20 +8643,57 @@ async function maxSurfaceSeq(query, sessionId) {
 		observation[Symbol.dispose]?.();
 	}
 }
-/** 判定提示词（事件提取复用 eventsToSummaryEvents 的形状与截断规则）。 */
-function buildJudgeOutcomeMessages(events) {
-	const lines = ["待判定的会话事件（seq 升序，最近一轮）："];
-	for (const event of events) lines.push(`#${event.seq} [${event.type}] ${event.textExcerpt}`);
-	lines.push("");
-	lines.push("请输出判定 JSON。");
-	return [{
-		role: "system",
-		content: JUDGE_OUTCOME_SYSTEM_PROMPT
-	}, {
-		role: "user",
-		content: lines.join("\n")
-	}];
-}
+/**
+* idle 触发的后台增量摘要调度器。规则（brief 原文）：同会话同增量位只跑一次。
+* 调度时读 maxSeq 并记账；run 失败只回调 onError，同一位不再自动重试——
+* 之后有新事件（maxSeq 变化）时 summarizeIncremental 会把旧增量一起补上。
+* 同会话在跑期间的新 onIdle 直接丢弃（不排队，避免堆积）。
+*/
+var BackgroundSummarizer = class {
+	deps;
+	/** sessionId → 已调度到的最大事件 seq（去重位）。 */
+	scheduled = /* @__PURE__ */ new Map();
+	inFlight = /* @__PURE__ */ new Set();
+	constructor(deps) {
+		this.deps = deps;
+	}
+	/** 后台调度入口：不 await、不抛（fire-and-forget）。 */
+	onIdle(sessionId) {
+		if (this.inFlight.has(sessionId)) return;
+		(async () => {
+			this.inFlight.add(sessionId);
+			try {
+				const max = await this.deps.maxSeq(sessionId);
+				if (max === null) return;
+				if (this.scheduled.get(sessionId) === max) return;
+				this.scheduled.set(sessionId, max);
+				try {
+					await this.deps.run(sessionId);
+				} catch (error) {
+					this.deps.onError?.(sessionId, error);
+				}
+			} catch (error) {
+				this.deps.onError?.(sessionId, error);
+			} finally {
+				this.inFlight.delete(sessionId);
+			}
+		})();
+	}
+	/** 观测口：该会话已调度到的事件位。 */
+	scheduledThrough(sessionId) {
+		return this.scheduled.get(sessionId);
+	}
+};
+const JUDGE_OUTCOME_SYSTEM_PROMPT = [
+	"你是任务结果判定员。给你一个 worker 会话最近一轮的事件流（用户消息、助手输出），",
+	"判断该任务的实际交付状态。只输出一行 JSON，不要解释：",
+	"{\"verdict\":\"completed|partial|failed\",\"summary\":\"<不超过 200 字的判定摘要>\"}",
+	"三态定义：",
+	"- completed：任务目标已实际完成（即使执行者没有调用完成工具提交）；",
+	"- partial：部分完成——summary 必须说明剩余工作；",
+	"- failed：失败或受阻——summary 必须说明原因；",
+	"- 摘要只写事件流里有依据的结论，不添加事件里没有的内容，不写代码块。"
+].join("\n");
 /**
 * 解析判定输出：截取首尾大括号做 JSON 解析（模型偶尔包裹文字时仍可救回）；
 * verdict 必须在三态内、summary 必须非空——否则抛错（调用方按「判定不可用」
@@ -8682,19 +8719,8 @@ function parseOutcomeJudgement(raw) {
 		summary
 	};
 }
-/**
-* 独立总结判定：复用记忆摘要的 llm 通道（SummaryLlm），输入会话尾部事件，
-* 输出三态判定。事件无语义文本（空会话等）直接抛错——无从判定就是判定失败。
-*/
-async function judgeOutcome(sessionId, events, llm, options = {}) {
-	const summarized = eventsToSummaryEvents(events);
-	if (summarized.length === 0) throw new Error(`会话 ${sessionId} 没有可判定的语义事件`);
-	const messages = buildJudgeOutcomeMessages(summarized);
-	const signal = options.signal ?? new AbortController().signal;
-	const raw = (await llm.stream(messages, signal)).trim();
-	if (raw === "") throw new Error("判定模型返回空白");
-	return parseOutcomeJudgement(raw);
-}
+/** 任务完成写入项目层的条目类型（规格 §6 三分类：已验收的完成结果按已验证事实）。 */
+const COMPLETED_TASK_KIND = "verified-fact";
 /** 写 project 层一条完成记录（kind 固定 verified-fact；低信息按 store 规则拒绝）。 */
 function recordCompletedTask(store, input) {
 	return store.appendSummary("project", input.title, {
@@ -8717,58 +8743,6 @@ function createCompletedTaskRecorder(deps) {
 		});
 	};
 }
-var NO_ROUTE_MESSAGE, EXCERPT_MAX_CHARS, BackgroundSummarizer, JUDGE_OUTCOME_SYSTEM_PROMPT, COMPLETED_TASK_KIND;
-var init_adapter = __esm({ "src/host/memory/adapter.ts": (() => {
-	init_summarizer();
-	NO_ROUTE_MESSAGE = "记忆摘要没有可用的模型路由：配置 summarizationProvider/summarizationModel，或让目标会话先路由过一次请求";
-	EXCERPT_MAX_CHARS = 240;
-	BackgroundSummarizer = class {
-		deps;
-		/** sessionId → 已调度到的最大事件 seq（去重位）。 */
-		scheduled = /* @__PURE__ */ new Map();
-		inFlight = /* @__PURE__ */ new Set();
-		constructor(deps) {
-			this.deps = deps;
-		}
-		/** 后台调度入口：不 await、不抛（fire-and-forget）。 */
-		onIdle(sessionId) {
-			if (this.inFlight.has(sessionId)) return;
-			(async () => {
-				this.inFlight.add(sessionId);
-				try {
-					const max = await this.deps.maxSeq(sessionId);
-					if (max === null) return;
-					if (this.scheduled.get(sessionId) === max) return;
-					this.scheduled.set(sessionId, max);
-					try {
-						await this.deps.run(sessionId);
-					} catch (error) {
-						this.deps.onError?.(sessionId, error);
-					}
-				} catch (error) {
-					this.deps.onError?.(sessionId, error);
-				} finally {
-					this.inFlight.delete(sessionId);
-				}
-			})();
-		}
-		/** 观测口：该会话已调度到的事件位。 */
-		scheduledThrough(sessionId) {
-			return this.scheduled.get(sessionId);
-		}
-	};
-	JUDGE_OUTCOME_SYSTEM_PROMPT = [
-		"你是任务结果判定员。给你一个 worker 会话最近一轮的事件流（用户消息、助手输出），",
-		"判断该任务的实际交付状态。只输出一行 JSON，不要解释：",
-		"{\"verdict\":\"completed|partial|failed\",\"summary\":\"<不超过 200 字的判定摘要>\"}",
-		"三态定义：",
-		"- completed：任务目标已实际完成（即使执行者没有调用完成工具提交）；",
-		"- partial：部分完成——summary 必须说明剩余工作；",
-		"- failed：失败或受阻——summary 必须说明原因；",
-		"- 摘要只写事件流里有依据的结论，不添加事件里没有的内容，不写代码块。"
-	].join("\n");
-	COMPLETED_TASK_KIND = "verified-fact";
-}) });
 
 //#endregion
 //#region src/host/guard/adjudicator.ts
@@ -8862,6 +8836,35 @@ function closurePromptText(taskId) {
 		"（这是系统自动提醒，不是用户新指令。）"
 	].join("\n");
 }
+/** 判定请求的事件内标记（resolveJudge 只认含此标记之后的助手回复）。 */
+const JUDGE_REQUEST_MARKER = "【系统判定请求】";
+function judgePromptText(taskId) {
+	return [
+		`${JUDGE_REQUEST_MARKER}任务 ${taskId} 尚未提交交付。请对本任务的实际交付状态做一次判定，只输出一行 JSON，不要解释、不要调用工具：`,
+		"{\"verdict\":\"completed|partial|failed\",\"summary\":\"<不超过 200 字的判定摘要>\"}",
+		"- completed：任务目标已实际完成（若此刻已可交付，请直接调用 complete_task 提交，忽略本判定）；",
+		"- partial：部分完成——summary 必须说明剩余工作；",
+		"- failed：失败或受阻——summary 必须说明原因。",
+		"（这是系统自动判定请求，不是用户新指令。）"
+	].join("\n");
+}
+/** 一条 surface 事件的可见文本（user/message 的 data 即消息记录；assistant 走 data.message；形状照 memory/adapter 的 eventText，防御式）。 */
+function eventVisibleText(event) {
+	if (typeof event !== "object" || event === null) return "";
+	const { type, data } = event;
+	const record = typeof data === "object" && data !== null ? data : {};
+	const message = type === "user/message" ? record : typeof record.message === "object" && record.message !== null ? record.message : {};
+	const content = message.content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) return content.map((block) => {
+		if (typeof block === "object" && block !== null) {
+			const b = block;
+			if (b.type === "text" && typeof b.text === "string") return b.text;
+		}
+		return "";
+	}).filter((text) => text !== "").join(" ");
+	return typeof message.text === "string" ? message.text : "";
+}
 /** 从事件流解析末轮：返回 { lastTurnStartIdx, lastTurnEnd }；无完整轮 → undefined。 */
 function lastTurnWindow(events) {
 	let startIdx = -1;
@@ -8952,20 +8955,31 @@ var OutcomeAdjudicator = class {
 		if (cycle === void 0 || cycle.phase !== "watching") return;
 		const record = this.deps.ledger.get(taskId);
 		if (record === void 0 || record.sessionId === void 0 || record.status !== "dispatched" && record.status !== "running") return;
+		if (await this.sessionBusy(record.sessionId)) return;
 		await this.nudge(record);
 	}
-	/** 墙钟到期：watching → 提醒；nudged → 直接判定；judged → 无动作。 */
+	/** 墙钟到期：watching → 提醒；nudged → 投判定请求；judging → 强制解析；judged → 无动作。 */
 	async onWallClock(taskId) {
 		const cycle = this.cycles.get(taskId);
 		if (cycle === void 0 || cycle.phase === "judged") return;
 		const record = this.deps.ledger.get(taskId);
 		if (record === void 0 || record.sessionId === void 0 || record.status !== "dispatched" && record.status !== "running") return;
+		if (await this.sessionBusy(record.sessionId)) return;
 		if (cycle.phase === "watching") {
 			await this.nudge(record);
 			return;
 		}
+		if (cycle.phase === "nudged") {
+			await this.requestJudge(record);
+			return;
+		}
 		const observation = await this.deps.observeSession(record.sessionId, { projectionMode: "none" });
-		await this.judge(record, observation.events);
+		await this.resolveJudge(record, observation.events, { forced: true });
+	}
+	/** 会话是否仍在跑一轮（桌面 sessionState 优先，CLI 老 host 用 agentsGet 兜底）。 */
+	async sessionBusy(sessionId) {
+		if (this.deps.sessionState !== void 0) return (await this.deps.sessionState(sessionId))?.running === true;
+		return this.deps.agentsGet(sessionId)?.status === "running";
 	}
 	async activeTaskFor(sessionId) {
 		for (const record of await this.deps.ledger.listAll()) if (record.sessionId === sessionId && (record.status === "dispatched" || record.status === "running")) return record;
@@ -8992,17 +9006,22 @@ var OutcomeAdjudicator = class {
 				if (pending.includes("question") || pending.includes("approval")) return;
 			} else if (this.deps.agentsGet(sessionId)?.status === "running") return;
 			if (cycle.phase === "watching") await this.nudge(record);
-			else await this.judge(record, events);
+			else if (cycle.phase === "nudged") await this.requestJudge(record);
+			else if (cycle.phase === "judging") await this.resolveJudge(record, events, { forced: false });
 		} catch (error) {
 			this.deps.logger?.warn(`判定评估失败（会话 ${sessionId}）: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
 			this.evaluating.delete(sessionId);
 		}
 	}
-	async nudge(record) {
+	/**
+	* 排队注入一条系统提示：写前意图账（同文本 pending 复用同 requestId）→
+	* gateway 类同 requestId 限时重试 → 四码分治。投递成功与否由返回值告知，
+	* 相位与 progress 由调用方落（收尾提醒与判定请求的文案不同）。
+	*/
+	async injectQueuedPrompt(record, text) {
 		const taskId = record.id;
 		const sessionId = record.sessionId;
-		const text = closurePromptText(taskId);
 		const intent = await this.deps.intents.prepare(taskId, text, this.deps.now());
 		let attempt = 0;
 		while (attempt < PROMPT_ATTEMPT_LIMIT) {
@@ -9018,75 +9037,144 @@ var OutcomeAdjudicator = class {
 					}]
 				});
 				await this.deps.intents.markDelivered(taskId, intent.seq, this.deps.now());
-				this.cycles.set(taskId, { phase: "nudged" });
-				this.armTimers(taskId);
-				await this.deps.ledger.updateProgress(taskId, `收尾提醒已投递（${intent.requestId}）：请交付或说明阻塞`);
-				this.deps.recordIncident({
-					taskId,
-					title: "收尾提醒",
-					text: `收尾提醒已投递: ${intent.requestId}`
-				});
-				return;
+				return {
+					outcome: "delivered",
+					requestId: intent.requestId
+				};
 			} catch (error) {
 				const code = errorCode(error);
 				if (code.includes("gateway/internal") || code.includes("gateway")) {
-					if (attempt >= PROMPT_ATTEMPT_LIMIT) {
-						this.deps.logger?.warn(`收尾提醒 ${intent.requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`);
-						return;
-					}
+					if (attempt >= PROMPT_ATTEMPT_LIMIT) return {
+						outcome: "gateway-exhausted",
+						requestId: intent.requestId
+					};
 					continue;
 				}
-				if (code.includes("writer-held")) {
-					await this.deps.ledger.updateProgress(taskId, "收尾提醒投递受阻（session/writer-held），本轮不重试");
-					return;
-				}
-				if (code.includes("not-found")) {
-					await this.deps.ledger.updateProgress(taskId, "收尾提醒失败：会话不存在（session/not-found）");
-					this.deps.recordIncident({
-						taskId,
-						title: "收尾提醒失败",
-						text: "收尾提醒投递失败 session/not-found"
-					});
-					return;
-				}
-				if (code.includes("agent-busy")) {
-					await this.deps.ledger.updateProgress(taskId, "收尾提醒推迟：会话被占用（session/agent-busy），下轮再试");
-					return;
-				}
+				if (code.includes("writer-held")) return {
+					outcome: "writer-held",
+					requestId: intent.requestId
+				};
+				if (code.includes("not-found")) return {
+					outcome: "not-found",
+					requestId: intent.requestId
+				};
+				if (code.includes("agent-busy")) return {
+					outcome: "agent-busy",
+					requestId: intent.requestId
+				};
 				throw error;
 			}
 		}
+		return {
+			outcome: "gateway-exhausted",
+			requestId: intent.requestId
+		};
 	}
-	async judge(record, events) {
+	async nudge(record) {
+		const taskId = record.id;
+		const { outcome, requestId } = await this.injectQueuedPrompt(record, closurePromptText(taskId));
+		if (outcome === "delivered") {
+			this.cycles.set(taskId, { phase: "nudged" });
+			this.armTimers(taskId);
+			await this.deps.ledger.updateProgress(taskId, `收尾提醒已投递（${requestId}）：请交付或说明阻塞`);
+			this.deps.recordIncident({
+				taskId,
+				title: "收尾提醒",
+				text: `收尾提醒已投递: ${requestId}`
+			});
+			return;
+		}
+		if (outcome === "gateway-exhausted") {
+			this.deps.logger?.warn(`收尾提醒 ${requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`);
+			return;
+		}
+		if (outcome === "writer-held") {
+			await this.deps.ledger.updateProgress(taskId, "收尾提醒投递受阻（session/writer-held），本轮不重试");
+			return;
+		}
+		if (outcome === "not-found") {
+			await this.deps.ledger.updateProgress(taskId, "收尾提醒失败：会话不存在（session/not-found）");
+			this.deps.recordIncident({
+				taskId,
+				title: "收尾提醒失败",
+				text: "收尾提醒投递失败 session/not-found"
+			});
+			return;
+		}
+		await this.deps.ledger.updateProgress(taskId, "收尾提醒推迟：会话被占用（session/agent-busy），下轮再试");
+	}
+	/**
+	* 投递判定请求（queue）：同一执行会话自判三态，只回一行 JSON。投递成功置
+	* judging 相位并重开墙钟（防「判定轮零输出且墙钟已耗尽」卡死在 judging）；
+	* 回复由下一轮结束的 resolveJudge 或墙钟强制解析。
+	*/
+	async requestJudge(record) {
+		const taskId = record.id;
+		const phase = this.cycles.get(taskId)?.phase;
+		if (phase === "judging" || phase === "judged") return;
+		const { outcome, requestId } = await this.injectQueuedPrompt(record, judgePromptText(taskId));
+		if (outcome === "delivered") {
+			this.clearTimers(taskId);
+			this.cycles.set(taskId, { phase: "judging" });
+			this.armTimers(taskId);
+			await this.deps.ledger.updateProgress(taskId, `判定请求已投递（${requestId}）：等待会话自判回复`);
+			this.deps.recordIncident({
+				taskId,
+				title: "判定请求",
+				text: `判定请求已投递: ${requestId}`
+			});
+			return;
+		}
+		if (outcome === "not-found") {
+			this.cycles.set(taskId, { phase: "judged" });
+			this.clearTimers(taskId);
+			await this.deps.core.reportBlocker(record.sessionId, taskId, "判定不可用：会话不存在（session/not-found）");
+			this.deps.recordIncident({
+				taskId,
+				title: "判定失败",
+				text: "判定不可用：会话不存在（session/not-found）"
+			});
+			return;
+		}
+		if (outcome === "gateway-exhausted") this.deps.logger?.warn(`判定请求 ${requestId} 重试耗尽（gateway），意图保持 pending 下轮续投`);
+		else if (outcome === "writer-held") await this.deps.ledger.updateProgress(taskId, "判定请求投递受阻（session/writer-held），本轮不重试");
+		else await this.deps.ledger.updateProgress(taskId, "判定请求推迟：会话被占用（session/agent-busy），下轮再试");
+	}
+	/**
+	* 解析自判回复：只认「含判定标记的最后一条用户消息之后」的助手文本；
+	* 三态落位（completed→系统判定交付；partial/failed→blocked 附判定）。
+	* 找不到标记、无回复、回复不可解析 → blocked「判定不可用」附实情——
+	* 全程不再发起任何独立模型调用。
+	*
+	* forced=false（轮结束事件路径）：标记尚未出现 = 判定请求还在队列里，
+	* 不动相位继续等（下一轮结束或墙钟再进来）；forced=true（墙钟强制作结）：
+	* 一切缺失都按「判定不可用」如实落 blocked。
+	*/
+	async resolveJudge(record, events, options) {
 		const taskId = record.id;
 		const sessionId = record.sessionId;
-		if (this.cycles.get(taskId)?.phase === "judged") return;
+		let markerIdx = -1;
+		for (let i = events.length - 1; i >= 0; i -= 1) if (events[i]?.type === "user/message" && eventVisibleText(events[i]).includes(JUDGE_REQUEST_MARKER)) {
+			markerIdx = i;
+			break;
+		}
+		if (markerIdx < 0 && !options.forced) return;
 		this.cycles.set(taskId, { phase: "judged" });
+		this.clearTimers(taskId);
+		if (markerIdx < 0) {
+			await this.deps.core.reportBlocker(sessionId, taskId, "判定不可用：判定请求未被执行会话处理");
+			this.deps.recordIncident({
+				taskId,
+				title: "判定失败",
+				text: "判定不可用：判定请求未被执行会话处理"
+			});
+			return;
+		}
+		let reply = "";
+		for (let i = markerIdx + 1; i < events.length; i += 1) if (events[i]?.type === "assistant/message") reply = eventVisibleText(events[i]);
+		let verdict;
 		try {
-			const { judgeOutcome: judgeOutcome$1 } = await Promise.resolve().then(() => (init_adapter(), adapter_exports));
-			const judgement = await judgeOutcome$1(sessionId, events, this.deps.llm);
-			if (judgement.verdict === "completed") {
-				if (record.status === "dispatched") await this.deps.ledger.transition(taskId, "running", "系统判定转执行");
-				await this.deps.core.completeTask(sessionId, taskId, {
-					docVersion: record.docVersion,
-					summary: judgement.summary,
-					deliveryOrigin: "system-judged"
-				});
-				await this.deps.ledger.updateProgress(taskId, `系统判定交付：${judgement.summary}`);
-				this.deps.recordIncident({
-					taskId,
-					title: "系统判定",
-					text: `系统判定交付：${judgement.summary}`
-				});
-			} else {
-				await this.deps.core.reportBlocker(sessionId, taskId, `${judgement.verdict}：${judgement.summary}`);
-				await this.deps.ledger.updateProgress(taskId, `系统判定 ${judgement.verdict}：${judgement.summary}`);
-				this.deps.recordIncident({
-					taskId,
-					title: "系统判定",
-					text: `系统判定 ${judgement.verdict}：${judgement.summary}`
-				});
-			}
+			verdict = parseOutcomeJudgement(reply);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			await this.deps.core.reportBlocker(sessionId, taskId, `判定不可用：${message}`);
@@ -9095,9 +9183,29 @@ var OutcomeAdjudicator = class {
 				title: "判定失败",
 				text: `判定不可用：${message}`
 			});
-		} finally {
-			this.cycles.set(taskId, { phase: "judged" });
-			this.clearTimers(taskId);
+			return;
+		}
+		if (verdict.verdict === "completed") {
+			if (record.status === "dispatched") await this.deps.ledger.transition(taskId, "running", "系统判定转执行");
+			await this.deps.core.completeTask(sessionId, taskId, {
+				docVersion: record.docVersion,
+				summary: verdict.summary,
+				deliveryOrigin: "system-judged"
+			});
+			await this.deps.ledger.updateProgress(taskId, `系统判定交付：${verdict.summary}`);
+			this.deps.recordIncident({
+				taskId,
+				title: "系统判定",
+				text: `系统判定交付：${verdict.summary}`
+			});
+		} else {
+			await this.deps.core.reportBlocker(sessionId, taskId, `${verdict.verdict}：${verdict.summary}`);
+			await this.deps.ledger.updateProgress(taskId, `系统判定 ${verdict.verdict}：${verdict.summary}`);
+			this.deps.recordIncident({
+				taskId,
+				title: "系统判定",
+				text: `系统判定 ${verdict.verdict}：${verdict.summary}`
+			});
 		}
 	}
 };
@@ -9142,7 +9250,6 @@ async function search(store, query, scope) {
 
 //#endregion
 //#region src/host/guard/breaker.ts
-init_adapter();
 /** 滑动窗宽（规格 §2：10 分钟）。 */
 const DEFAULT_BREAKER_WINDOW_MS = 6e5;
 /** 条件 a 阈值：infra 失败次数（规格 §2：≥3）。 */
@@ -9509,6 +9616,7 @@ const Config = Schema.object({
 	workerSpawnMode: Schema.union(["cache-priority", "minimal-face"]).default("cache-priority").volatile(),
 	summarizationProvider: Schema.string().default("").volatile(),
 	summarizationModel: Schema.string().default("").volatile(),
+	memoryEnabled: Schema.boolean().default(false).volatile(),
 	questionBudget: Schema.number().default(2).volatile(),
 	firstResponseTimeoutMs: Schema.number().default(6e5).volatile(),
 	adjudicationWallClockMs: Schema.number().default(18e5).volatile(),
@@ -9589,6 +9697,13 @@ function nonNegative(value, fallback) {
 function stringOr(value, fallback) {
 	return typeof value === "string" && value.trim() !== "" ? value : fallback;
 }
+/**
+* 布尔（记忆开关）：volatile 惰性描述符先解引用（同 spawnModeOr 的取证结论），
+* 只有显式 true 才开——缺省、形状不对一律停用（先屏蔽记忆的既定方向）。
+*/
+function booleanOr(value) {
+	return (typeof value === "object" && value !== null && typeof value.get === "function" ? value.get() : value) === true;
+}
 /** 模板清单：形状不对逐条丢弃，全部不合法回内置。 */
 function templatesOr(value) {
 	if (!Array.isArray(value)) return BUILTIN_TEMPLATES;
@@ -9627,6 +9742,7 @@ function resolveRootConfig(raw) {
 		workerPreset: stringOr(source.workerPreset, "dsh-router-worker"),
 		summarizationProvider: stringOr(source.summarizationProvider, ""),
 		summarizationModel: stringOr(source.summarizationModel, ""),
+		memoryEnabled: booleanOr(source.memoryEnabled),
 		questionBudget: nonNegative(source.questionBudget, DEFAULT_QUESTION_BUDGET),
 		firstResponseTimeoutMs: nonNegative(source.firstResponseTimeoutMs, 6e5),
 		adjudicationWallClockMs: nonNegative(source.adjudicationWallClockMs, 18e5),
@@ -9910,7 +10026,6 @@ function apply(ctx, rawConfig) {
 		maxDepth: config.maxDepth,
 		concurrency: { default: config.perTypeConcurrency }
 	});
-	const memoryStore = new MemoryDocStore(join(config.dataDir, "memory"), fs);
 	const closureIntents = new ClosureIntentStore({
 		fs,
 		path: join(config.dataDir, "closure-intents.json"),
@@ -9922,46 +10037,63 @@ function apply(ctx, rawConfig) {
 		newId: () => randomUUID(),
 		logger: { warn: (m) => log.warn(m) }
 	});
-	const memoryQuery = { observeSession: (sessionId) => ctx.sessionQuery.observeSession(sessionId) };
-	const resolveSummaryTarget = async () => {
-		if (config.summarizationProvider !== "" && config.summarizationModel !== "") return {
-			provider: config.summarizationProvider,
-			model: config.summarizationModel
-		};
-		const records = await ledger.listAll();
-		for (const record of records) {
-			if (record.sessionId === void 0) continue;
-			const routed = ctx.agents.get(record.sessionId)?.session?.requestHeader?.()?.config;
-			if (routed !== void 0 && typeof routed.provider === "string" && routed.provider !== "" && typeof routed.model === "string" && routed.model !== "") return {
-				provider: routed.provider,
-				model: routed.model
-			};
-		}
+	let memoryStore;
+	let memoryFace;
+	let summarizer;
+	const recordIncident = (entry) => {
+		if (!config.memoryEnabled || memoryStore === void 0) return;
+		memoryStore.appendSummary("project", `任务 ${entry.taskId}`, {
+			sourceRefs: [`task:${entry.taskId}`],
+			kind: "verified-fact",
+			text: entry.text
+		}).catch((error) => {
+			log.warn(`事故记忆写入失败（${entry.taskId}）: ${error instanceof Error ? error.message : String(error)}`);
+		});
 	};
-	const summaryLlm = createSummaryLlm(ctx.llm, resolveSummaryTarget);
-	const summarizer = new BackgroundSummarizer({
-		maxSeq: (sessionId) => maxSurfaceSeq(memoryQuery, sessionId),
-		run: (sessionId) => summarizeSessionViaQuery(memoryQuery, memoryStore, sessionId, summaryLlm),
-		onError: (sessionId, error) => {
-			log.warn(`会话 ${sessionId} 记忆增量摘要失败（下次 idle 或新事件后重试）: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	});
-	const recordTaskMemory = createCompletedTaskRecorder({
-		store: memoryStore,
-		query: memoryQuery,
-		llm: summaryLlm,
-		onError: (_stage, error) => {
-			log.warn(`任务完成的记忆写入失败（不阻塞完成协议）: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	});
+	if (config.memoryEnabled) {
+		memoryStore = new MemoryDocStore(join(config.dataDir, "memory"), fs);
+		const memoryQuery = { observeSession: (sessionId) => ctx.sessionQuery.observeSession(sessionId) };
+		const resolveSummaryTarget = async () => {
+			if (config.summarizationProvider !== "" && config.summarizationModel !== "") return {
+				provider: config.summarizationProvider,
+				model: config.summarizationModel
+			};
+			const records = await ledger.listAll();
+			for (const record of records) {
+				if (record.sessionId === void 0) continue;
+				const routed = ctx.agents.get(record.sessionId)?.session?.requestHeader?.()?.config;
+				if (routed !== void 0 && typeof routed.provider === "string" && routed.provider !== "" && typeof routed.model === "string" && routed.model !== "") return {
+					provider: routed.provider,
+					model: routed.model
+				};
+			}
+		};
+		const summaryLlm = createSummaryLlm(ctx.llm, resolveSummaryTarget);
+		const store = memoryStore;
+		summarizer = new BackgroundSummarizer({
+			maxSeq: (sessionId) => maxSurfaceSeq(memoryQuery, sessionId),
+			run: (sessionId) => summarizeSessionViaQuery(memoryQuery, store, sessionId, summaryLlm),
+			onError: (sessionId, error) => {
+				log.warn(`会话 ${sessionId} 记忆增量摘要失败（下次 idle 或新事件后重试）: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		});
+		const recordTaskMemory = createCompletedTaskRecorder({
+			store,
+			query: memoryQuery,
+			llm: summaryLlm,
+			onError: (_stage, error) => {
+				log.warn(`任务完成的记忆写入失败（不阻塞完成协议）: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		});
+		/** routerCore.memory（brief 形状：search 直传 retrieval）。 */
+		memoryFace = {
+			search: (query, scope) => search(store, query, scope),
+			onTaskCompleted: (input) => recordTaskMemory(input)
+		};
+	} else log.info("三层记忆已停用（memoryEnabled=false）：后台摘要/完成写入/事故写入/检索注入均不接线");
 	/** 该会话是否绑定了任务（= worker/主管会话；Router 会话不做增量摘要）。 */
 	const isTaskSession = async (sessionId) => {
 		return (await ledger.listAll()).some((record) => record.sessionId === sessionId);
-	};
-	/** routerCore.memory（brief 形状：search 直传 retrieval）。 */
-	const memoryFace = {
-		search: (query, scope) => search(memoryStore, query, scope),
-		onTaskCompleted: (input) => recordTaskMemory(input)
 	};
 	let pairing = null;
 	const queueWarned = /* @__PURE__ */ new Set();
@@ -10047,7 +10179,7 @@ function apply(ctx, rawConfig) {
 		isRunning: (sessionId) => bridge.isRunning(sessionId),
 		maxActiveCards: config.maxActiveCards,
 		tasksDir: config.tasksDir,
-		memory: memoryFace,
+		...memoryFace === void 0 ? {} : { memory: memoryFace },
 		breaker,
 		budgets,
 		logger: { warn: (message) => log.warn(message) }
@@ -10056,7 +10188,7 @@ function apply(ctx, rawConfig) {
 		...assembled.core,
 		snapshotText: assembled.snapshotText,
 		sessionPromptText,
-		memory: { search: memoryFace.search },
+		...memoryFace === void 0 ? {} : { memory: { search: memoryFace.search } },
 		callerRoleOf: (sessionId) => assembled.core.callerRoleOf(sessionId)
 	});
 	const adjudicator = new OutcomeAdjudicator({
@@ -10078,21 +10210,12 @@ function apply(ctx, rawConfig) {
 			const agent = ctx.agents.get(sessionId);
 			return agent === void 0 || agent.status === void 0 ? void 0 : { status: agent.status };
 		},
-		llm: summaryLlm,
 		core: {
 			completeTask: (caller, taskId, input) => assembled.core.completeTask(caller, taskId, input),
 			reportBlocker: (caller, taskId, reason) => assembled.core.reportBlocker(caller, taskId, reason)
 		},
 		intents: closureIntents,
-		recordIncident: (entry) => {
-			memoryStore.appendSummary("project", `任务 ${entry.taskId}`, {
-				sourceRefs: [`task:${entry.taskId}`],
-				kind: "verified-fact",
-				text: entry.text
-			}).catch((error) => {
-				log.warn(`事故记忆写入失败（${entry.taskId}）: ${error instanceof Error ? error.message : String(error)}`);
-			});
-		},
+		recordIncident,
 		now: () => Date.now(),
 		schedule: (delayMs, fn) => {
 			const timer = setTimeout(() => {
@@ -10115,6 +10238,7 @@ function apply(ctx, rawConfig) {
 			if (outcome === "compacted") log.info(`会话 ${sessionId} 派发后上下文整理完成`);
 		});
 		(async () => {
+			if (summarizer === void 0) return;
 			if (!await isTaskSession(sessionId)) return;
 			summarizer.onIdle(sessionId);
 		})();
