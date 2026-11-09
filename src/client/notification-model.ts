@@ -201,7 +201,13 @@ export function notificationsFromState(state: RouterState): readonly Notificatio
   return state.notifications ?? []
 }
 
-/** 紧急按钮态：出现带 unfreeze 动作的异常卡 = 已冻结（并列解除按钮）。 */
-export function emergencyButtonState(cards: readonly NotificationCard[]): { frozen: boolean } {
-  return { frozen: cards.some((card) => card.actions.some((action) => action.action === 'unfreeze')) }
+/**
+ * 全局熔断是否处于冻结态（v1.4）。
+ *
+ * 读宿主投影的真实熔断态（RouterState.breaker），不再从通知卡推断——历史上
+ * 靠「有没有带 unfreeze 动作的卡」推断，而没有任何代码路径产出那种卡，于是
+ * 「解除冻结」按钮永远不出现，用户被冻结锁死却无路可走。
+ */
+export function breakerFrozen(state: RouterState | null | undefined): boolean {
+  return state?.breaker?.frozen === true
 }

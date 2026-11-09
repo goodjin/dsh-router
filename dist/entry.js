@@ -65,6 +65,7 @@ const TRANSITIONS = {
 	],
 	dispatched: [
 		"running",
+		"paused",
 		"blocked",
 		"failed",
 		"cancelled"
@@ -251,6 +252,7 @@ var TaskLedger = class {
 				role: input.role,
 				templateId: input.templateId,
 				parentId: input.parentId,
+				dispatchedBySessionId: input.dispatchedBySessionId,
 				dependsOn,
 				status: depsSatisfied ? "draft" : "queued",
 				docVersion: 1,
@@ -5972,8 +5974,10 @@ function registerRouterRoutes(ctx, deps) {
 			body: JSON.stringify(report)
 		};
 	});
-	handle(ROUTER_EMERGENCY_PAUSE_PATH, ["POST"], async () => {
-		const report = await deps.emergencyPause();
+	handle(ROUTER_EMERGENCY_PAUSE_PATH, ["POST"], async (request) => {
+		const body = JSON.parse(await readBody(request));
+		if (typeof body.routerSessionId !== "string" || body.routerSessionId === "") throw new LedgerError("bad-request", "routerSessionId 必填（当前 Router 会话 id）");
+		const report = await deps.scopedPause(body.routerSessionId);
 		return {
 			status: 200,
 			body: JSON.stringify(report)
@@ -6158,6 +6162,135 @@ function renderLedgerSnapshot(tasks, options) {
 }
 
 //#endregion
+//#region src/host/guard/emergency.ts
+/** 暂停通知的固定措辞（告知 Router：你的活被停了，等用户指示）。 */
+const SCOPED_PAUSE_NOTICE = "已暂停，等用户指示";
+/** 在跑的任务状态（dispatched/running）——只有这两个值得打断。 */
+function isLive(status) {
+	return status === "dispatched" || status === "running";
+}
+/**
+* 派发树闭包：某 Router 会话派出的任务 + 其下游子任务（主管再拆的那一层）。
+*
+* 宿主记的「派发者会话」（dispatchedBySessionId）为准：Router 会话派的直接
+* 子任务记 Router 会话 id；主管在自己会话里派的下游子任务记主管的会话 id。
+* 闭包 = 从 routerSessionId 出发，沿「派发者会话 → 该任务的执行会话」反复
+* 并入新任务。
+*
+* 只保留在跑的（dispatched/running）且已绑执行会话的——其余状态不打扰，
+* 无会话的任务无处可停。
+*/
+function scopedPauseTargets(records, routerSessionId) {
+	const byDispatcher = /* @__PURE__ */ new Map();
+	for (const record of records) {
+		const dispatcher = record.dispatchedBySessionId;
+		if (dispatcher === void 0 || dispatcher === "") continue;
+		const bucket = byDispatcher.get(dispatcher);
+		if (bucket === void 0) byDispatcher.set(dispatcher, [record]);
+		else bucket.push(record);
+	}
+	const dispatchers = new Set([routerSessionId]);
+	const inScope = /* @__PURE__ */ new Map();
+	for (;;) {
+		let grew = false;
+		for (const dispatcher of [...dispatchers]) for (const record of byDispatcher.get(dispatcher) ?? []) {
+			if (inScope.has(record.id)) continue;
+			inScope.set(record.id, record);
+			if (record.sessionId !== void 0 && record.sessionId !== "") {
+				if (!dispatchers.has(record.sessionId)) {
+					dispatchers.add(record.sessionId);
+					grew = true;
+				}
+			}
+		}
+		if (!grew) break;
+	}
+	return [...inScope.values()].filter((record) => isLive(record.status) && typeof record.sessionId === "string" && record.sessionId !== "");
+}
+/** 执行作用域紧急暂停：算范围 → 逐个落账本 → 断会话 → 逐张落卡 → 告知 → 逐项报告。 */
+async function runScopedPause(deps, routerSessionId) {
+	const targets = await deps.targets(routerSessionId);
+	const results = [];
+	const paused = [];
+	for (const target of targets) {
+		const sessionId = target.sessionId;
+		try {
+			await deps.markPaused(target.id);
+			const item = {
+				taskId: target.id,
+				title: target.title,
+				sessionId,
+				paused: true,
+				interrupted: false
+			};
+			paused.push(item);
+			results.push(item);
+		} catch (error) {
+			results.push({
+				taskId: target.id,
+				title: target.title,
+				sessionId,
+				paused: false,
+				interrupted: false,
+				detail: `落账本失败：${error instanceof Error ? error.message : String(error)}`
+			});
+		}
+	}
+	const sessionIds = paused.map((item) => item.sessionId);
+	const outcomes = sessionIds.length > 0 ? await deps.interrupt(sessionIds) : [];
+	const outcomeBySession = new Map(outcomes.map((entry) => [entry.sessionId, entry]));
+	for (const item of paused) {
+		const outcome = outcomeBySession.get(item.sessionId);
+		if (outcome === void 0) {
+			item.interrupted = false;
+			item.detail = "中断结果缺失（如实：宿主未返回该会话的中断结果）";
+			continue;
+		}
+		if (outcome.outcome === "accepted") {
+			item.interrupted = true;
+			if (outcome.detail !== void 0) item.detail = outcome.detail;
+		} else {
+			item.interrupted = false;
+			item.detail = `中断失败：${outcome.detail ?? "原因未记录"}`;
+		}
+	}
+	if (deps.notifyTask !== void 0) for (const item of results) {
+		const summary = item.paused && item.interrupted ? `${SCOPED_PAUSE_NOTICE}：任务已暂停（紧急暂停只停当前 Router 派出的活，不影响别的会话）。` : `${SCOPED_PAUSE_NOTICE}：任务未完全停下——${item.detail ?? "原因未记录"}`;
+		try {
+			await deps.notifyTask({
+				taskId: item.taskId,
+				title: item.title,
+				summary
+			});
+		} catch (error) {
+			deps.logger?.warn(`紧急暂停的任务卡写入失败（逐项结果已在响应里如实带出）: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	let notified = false;
+	let notifyDetail;
+	if (deps.notifyRouter !== void 0) {
+		const failedCount$1 = results.filter((item) => !item.paused || !item.interrupted).length;
+		const text = failedCount$1 > 0 ? `${SCOPED_PAUSE_NOTICE}：你派出的 ${results.length} 个任务已停下，其中 ${failedCount$1} 个未完全停下（见任务卡）。请停止推进这些任务，等用户指示。` : `${SCOPED_PAUSE_NOTICE}：你派出的 ${results.length} 个任务已停下。请停止推进这些任务，等用户指示。`;
+		try {
+			await deps.notifyRouter(routerSessionId, text);
+			notified = true;
+		} catch (error) {
+			notifyDetail = error instanceof Error ? error.message : String(error);
+			deps.logger?.warn(`紧急暂停告知 Router 会话失败（暂停本身已生效）: ${notifyDetail}`);
+		}
+	}
+	const failedCount = results.filter((item) => !item.paused || !item.interrupted).length;
+	const report = {
+		tasks: results,
+		pausedCount: results.length - failedCount,
+		failedCount,
+		notified
+	};
+	if (notifyDetail !== void 0) report.notifyDetail = notifyDetail;
+	return report;
+}
+
+//#endregion
 //#region src/host/guard/notifications.ts
 /** 完成卡动作集（规格 §5：打开会话 / 查看结果文档 / 退回重做 + 确认）。 */
 function completionActions() {
@@ -6190,6 +6323,29 @@ function anomalyActions() {
 		{
 			action: "redispatch",
 			label: "重派"
+		},
+		{
+			action: "cancel",
+			label: "取消任务"
+		},
+		{
+			action: "ack",
+			label: "知道了"
+		}
+	];
+}
+/**
+* 暂停卡动作集（v1.4 作用域紧急暂停）：打开会话 / 取消任务 / 知道了。
+*
+* 与异常卡不同——**不给「重派」**：这张卡说的是「这个任务被暂停了」，重派会把
+* 用户刚叫停的活立刻再开起来，正好和暂停的意思相反。要恢复走 control_task
+* resume（工作台的恢复入口），不在卡上做。
+*/
+function pausedActions() {
+	return [
+		{
+			action: "open-session",
+			label: "打开会话"
 		},
 		{
 			action: "cancel",
@@ -6323,6 +6479,19 @@ function toCard(record, waiting) {
 	if (record.parentId !== void 0) card.parentId = record.parentId;
 	if (record.firstRequestCacheReadTokens !== void 0) card.firstRequestCacheReadTokens = record.firstRequestCacheReadTokens;
 	return card;
+}
+/**
+* 熔断冻结态的可见投影（lossless：未冻结只带 frozen；冻结才带原因与时间）。
+* query_tasks.breaker（模型可见）与 RouterState.breaker（界面可见）共用它。
+*/
+async function breakerView(breaker) {
+	const state = await breaker.state();
+	const view = { frozen: state.frozen };
+	if (state.frozen) {
+		if (state.reason !== void 0) view.reason = state.reason;
+		if (state.frozenAt !== void 0) view.frozenAt = state.frozenAt;
+	}
+	return view;
 }
 /**
 * 派发重试上限（v1.1 规格 §2-4）：同一任务连续派发失败达上限自动 blocked，
@@ -6497,6 +6666,7 @@ function createRouterCore(deps) {
 				role: input.role,
 				templateId: input.templateId,
 				parentId: parentTaskId,
+				dispatchedBySessionId: callerSessionId$1,
 				dependsOn: input.dependsOn?.map((ref) => ref.taskId) ?? [],
 				acceptancePolicy: "auto"
 			});
@@ -6592,15 +6762,7 @@ function createRouterCore(deps) {
 			if (filter?.taskId !== void 0) cards = cards.filter((card) => card.taskId === filter.taskId);
 			const result = { tasks: cards };
 			if (deps.budgets !== void 0 && viewerSessionId !== void 0) result.budgets = deps.budgets.snapshot(viewerSessionId);
-			if (deps.breaker !== void 0) {
-				const breakerState = await deps.breaker.state();
-				const view = { frozen: breakerState.frozen };
-				if (breakerState.frozen) {
-					if (breakerState.reason !== void 0) view.reason = breakerState.reason;
-					if (breakerState.frozenAt !== void 0) view.frozenAt = breakerState.frozenAt;
-				}
-				result.breaker = view;
-			}
+			if (deps.breaker !== void 0) result.breaker = await breakerView(deps.breaker);
 			return result;
 		},
 		async controlTask(callerSessionId$1, taskId, action) {
@@ -6724,6 +6886,29 @@ function createRouterCore(deps) {
 		getTask(taskId) {
 			return ledger.get(taskId);
 		},
+		async scopedPause(routerSessionId) {
+			if (!ui.routerSessions().some((entry) => entry.sessionId === routerSessionId)) throw new LedgerError("bad-request", `不是已登记的 Router 会话: ${routerSessionId}`);
+			const report = await runScopedPause({
+				targets: async () => scopedPauseTargets(await ledger.listAll(), routerSessionId),
+				markPaused: async (taskId) => {
+					await ledger.transition(taskId, "paused");
+				},
+				interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
+				notifyTask: async (input) => deps.notifications?.push({
+					kind: "anomaly",
+					taskId: input.taskId,
+					title: input.title,
+					summary: input.summary,
+					actions: pausedActions()
+				}),
+				notifyRouter: async (sessionId, text) => {
+					await bridge.notify(sessionId, `scoped-pause-${sessionId}`, text);
+				},
+				logger: deps.logger
+			}, routerSessionId);
+			await refreshSnapshot();
+			return report;
+		},
 		callerRoleOf
 	};
 	return {
@@ -6756,6 +6941,7 @@ function createRouterCore(deps) {
 						enabled: true,
 						origin: "user"
 					})),
+					...deps.breaker !== void 0 ? { breaker: await breakerView(deps.breaker) } : {},
 					...notificationCards.length > 0 ? { notifications: notificationCards } : {}
 				};
 			},
@@ -6949,6 +7135,7 @@ const routerPrompt = `你是 Router，一个长期在线的任务编排器，由
 - 你不代替执行会话完成任务，也不要催促它们跳过协议。任务被驳回返工时，用 supplement_task 传达修改要求。
 - 执行会话用 report_blocker 报告阻塞时，任务会标记为受阻：把阻塞转告用户，协调解决后视情况用 control_task 恢复或补充材料。
 - 派发被拒且错误信息含「派发已冻结」= 系统级故障已触发熔断：立即停止一切派发与重试，如实向用户报告原因，等用户在工作台解除冻结后再继续。
+- 用户在工作台按「暂停本 Router 任务」时，只有你派出的任务（及其下游子任务）被停；别的 Router 会话与之后的新派发都不受影响。你会收到一条「已暂停，等用户指示」的告知：停止推进那些任务，等用户指示，不要自行重派。
 - query_tasks 返回里的 budgets/breaker 字段是当前派发预算与熔断状态：预算用尽时不要换任务名规避，先向用户确认计划；blocked 任务优先判断「修因或取消」，禁止换名重派。
 `;
 
@@ -7349,6 +7536,7 @@ const unifiedPrompt = `你是本编排系统里的一名会话执行者，由 {{
 ## 系统冻结
 
 - 错误信息里出现「派发已冻结」= 系统级故障已触发熔断：立即停止相关操作与重试，如实向用户（或上级会话）报告原因，等冻结解除后再继续。
+- 收到「已暂停，等用户指示」= 用户停了你这个会话派出去的任务（含下游子任务）：停止推进，等用户指示，不要自行重派。别的会话与之后的新派发不受影响。
 `;
 
 //#endregion
@@ -8802,6 +8990,12 @@ const DEFAULT_BREAKER_WINDOW_MS = 6e5;
 const DEFAULT_INFRA_THRESHOLD = 3;
 /** 条件 b 阈值：窗口内创建任务数且零完成（规格 §2：≥10）。 */
 const DEFAULT_CREATION_THRESHOLD = 10;
+/**
+* 遗留的手动冻结原因（v1.2 的「紧急暂停」写的；v1.4 起紧急暂停不再冻结全局
+* 派发，这个原因本产品不再产生）。装载时遇到它即作废冻结态——否则用户会被
+* 一条谁也解不掉的旧标记永久卡在「派发已冻结（user-emergency）」。
+*/
+const LEGACY_USER_EMERGENCY_REASON = "user-emergency";
 function sanitizeEvents(raw) {
 	if (!Array.isArray(raw)) return [];
 	return raw.filter((entry) => typeof entry?.taskId === "string" && typeof entry?.at === "number").map((entry) => ({
@@ -8847,15 +9041,24 @@ var CircuitBreaker = class {
 	async loadFromDisk() {
 		try {
 			const parsed = JSON.parse(await this.fs.readFile(this.path));
-			if (parsed !== null && typeof parsed === "object" && parsed.schemaVersion === 1) this.file = {
-				schemaVersion: 1,
-				frozen: parsed.frozen === true,
-				...typeof parsed.reason === "string" && parsed.reason !== "" ? { reason: parsed.reason } : {},
-				...typeof parsed.frozenAt === "number" ? { frozenAt: parsed.frozenAt } : {},
-				infraFailures: sanitizeEvents(parsed.infraFailures),
-				creations: sanitizeEvents(parsed.creations),
-				completions: sanitizeEvents(parsed.completions)
-			};
+			if (parsed !== null && typeof parsed === "object" && parsed.schemaVersion === 1) {
+				this.file = {
+					schemaVersion: 1,
+					frozen: parsed.frozen === true,
+					...typeof parsed.reason === "string" && parsed.reason !== "" ? { reason: parsed.reason } : {},
+					...typeof parsed.frozenAt === "number" ? { frozenAt: parsed.frozenAt } : {},
+					infraFailures: sanitizeEvents(parsed.infraFailures),
+					creations: sanitizeEvents(parsed.creations),
+					completions: sanitizeEvents(parsed.completions)
+				};
+				if (this.file.frozen && this.file.reason === LEGACY_USER_EMERGENCY_REASON) {
+					this.file.frozen = false;
+					this.file.reason = void 0;
+					this.file.frozenAt = void 0;
+					this.logger?.warn(`已作废遗留的紧急暂停冻结标记（${LEGACY_USER_EMERGENCY_REASON}）：紧急暂停现在只停当前 Router 的任务，不再冻结全局派发`);
+					await this.save();
+				}
+			}
 		} catch {}
 	}
 	/** 状态落盘（mkdirp 父目录；失败只告警，内存熔断仍生效）。 */
@@ -9130,46 +9333,6 @@ function cacheReadTokensOf(event) {
 	if (usage === null || typeof usage !== "object") return void 0;
 	const tokens = usage.cacheReadTokens;
 	return typeof tokens === "number" && Number.isFinite(tokens) ? tokens : void 0;
-}
-
-//#endregion
-//#region src/host/guard/emergency.ts
-/** 紧急暂停的冻结原因（留痕 guard-state；用户解除后不再复现）。 */
-const EMERGENCY_PAUSE_REASON = "user-emergency";
-/**
-* 紧急暂停目标：账本 running/dispatched 且已绑执行会话的任务（paused/queued/
-* waiting-user 等其余状态不打扰；无会话的任务无处可停）。
-*/
-function emergencyPauseTargets(records) {
-	return records.filter((record) => (record.status === "running" || record.status === "dispatched") && typeof record.sessionId === "string" && record.sessionId !== "").map((record) => record.sessionId);
-}
-/** 执行紧急暂停：冻结 → 收集 → 逐会话中断 → 异常通知 → 逐项报告。 */
-async function runEmergencyPause(deps) {
-	const freezeOutcome = await deps.freeze(EMERGENCY_PAUSE_REASON);
-	const sessionIds = await deps.targetSessionIds();
-	const interrupted = sessionIds.length > 0 ? await deps.interrupt(sessionIds) : [];
-	const failed = interrupted.filter((entry) => entry.outcome === "failed");
-	let notification;
-	if (deps.notify !== void 0) {
-		const failedText = failed.map((entry) => `${entry.sessionId}（${entry.detail ?? "原因未记录"}）`).join("；");
-		const summary = interrupted.length === 0 ? `派发已冻结（${freezeOutcome.reason ?? EMERGENCY_PAUSE_REASON}），无进行中的任务会话需要中断` : `派发已冻结（${freezeOutcome.reason ?? EMERGENCY_PAUSE_REASON}），已中断 ${interrupted.length} 个任务会话（受理 ${interrupted.length - failed.length}${failed.length > 0 ? `；失败 ${failed.length}：${failedText}` : ""}）`;
-		try {
-			notification = await deps.notify({
-				title: "紧急暂停已执行",
-				summary
-			});
-		} catch (error) {
-			deps.logger?.warn(`紧急暂停的异常通知写入失败（逐项结果已在响应里如实带出）: ${error instanceof Error ? error.message : String(error)}`);
-		}
-	}
-	const report = {
-		frozen: freezeOutcome.frozen,
-		interrupted,
-		failedCount: failed.length
-	};
-	if (freezeOutcome.reason !== void 0) report.reason = freezeOutcome.reason;
-	if (notification !== void 0) report.notification = notification;
-	return report;
 }
 
 //#endregion
@@ -9947,25 +10110,7 @@ function apply(ctx, rawConfig) {
 					after: { frozen: (await breaker.state()).frozen }
 				};
 			},
-			emergencyPause: async () => runEmergencyPause({
-				targetSessionIds: async () => emergencyPauseTargets(await ledger.listAll()),
-				freeze: async (reason) => {
-					await breaker.freeze(reason);
-					const state = await breaker.state();
-					return state.frozen && state.reason !== void 0 ? {
-						frozen: state.frozen,
-						reason: state.reason
-					} : { frozen: state.frozen };
-				},
-				interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
-				notify: async (input) => notifications.push({
-					kind: "anomaly",
-					title: input.title,
-					summary: input.summary,
-					actions: anomalyActions()
-				}),
-				logger: { warn: (message) => log.warn(message) }
-			})
+			scopedPause: (routerSessionId) => assembled.core.scopedPause(routerSessionId)
 		});
 	});
 	function workerInstructionsText() {

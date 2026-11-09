@@ -26,6 +26,13 @@ export const DEFAULT_INFRA_THRESHOLD = 3
 /** 条件 b 阈值：窗口内创建任务数且零完成（规格 §2：≥10）。 */
 export const DEFAULT_CREATION_THRESHOLD = 10
 
+/**
+ * 遗留的手动冻结原因（v1.2 的「紧急暂停」写的；v1.4 起紧急暂停不再冻结全局
+ * 派发，这个原因本产品不再产生）。装载时遇到它即作废冻结态——否则用户会被
+ * 一条谁也解不掉的旧标记永久卡在「派发已冻结（user-emergency）」。
+ */
+export const LEGACY_USER_EMERGENCY_REASON = 'user-emergency'
+
 /** 熔断器计数（模型可见投影 query_tasks.breaker 的数据源之一）。 */
 export interface BreakerCounts {
   /** 窗口内 infra 失败次数。 */
@@ -44,12 +51,8 @@ export interface BreakerState {
   counts: BreakerCounts
 }
 
-/** 熔断冻结态的模型可见投影（query_tasks.breaker；lossless：未冻结只带 frozen）。 */
-export interface BreakerVisibility {
-  frozen: boolean
-  reason?: string
-  frozenAt?: number
-}
+/** 熔断冻结态的模型可见投影（query_tasks.breaker / RouterState.breaker；lossless：未冻结只带 frozen）。 */
+export type { BreakerVisibility } from '../../shared/types.ts'
 
 /** guard-state.json 落盘形状（含窗口事件，重启不重置计数）。 */
 export interface GuardStateFile {
@@ -149,6 +152,19 @@ export class CircuitBreaker {
           infraFailures: sanitizeEvents(parsed.infraFailures),
           creations: sanitizeEvents(parsed.creations),
           completions: sanitizeEvents(parsed.completions),
+        }
+        // v1.4：作废遗留的「紧急暂停」冻结标记。那条路径本产品已不存在
+        // （紧急暂停不再冻结全局派发），留着只会把用户永久锁死——界面上的
+        // 「解除冻结」按钮历史上也永远不出现（没有任何卡带 unfreeze 动作）。
+        // 自动冻结原因（infra 风暴 / 创建风暴）照旧恢复。
+        if (this.file.frozen && this.file.reason === LEGACY_USER_EMERGENCY_REASON) {
+          this.file.frozen = false
+          this.file.reason = undefined
+          this.file.frozenAt = undefined
+          this.logger?.warn(
+            `已作废遗留的紧急暂停冻结标记（${LEGACY_USER_EMERGENCY_REASON}）：紧急暂停现在只停当前 Router 的任务，不再冻结全局派发`,
+          )
+          await this.save()
         }
       }
     } catch {

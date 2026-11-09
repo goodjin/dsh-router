@@ -61,8 +61,6 @@ import { CircuitBreaker, DEFAULT_BREAKER_WINDOW_MS, DEFAULT_CREATION_THRESHOLD, 
 import { DispatchBudgets } from './host/guard/budgets.ts'
 import { FirstRequestCacheObserver } from './host/observability.ts'
 
-import { runEmergencyPause, emergencyPauseTargets, EMERGENCY_PAUSE_REASON } from './host/guard/emergency.ts'
-
 export { Config } from './host/root-config.ts'
 
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
@@ -1065,25 +1063,10 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         const afterState = await breaker.state()
         return { before, after: { frozen: afterState.frozen } }
       },
-      emergencyPause: async () =>
-        runEmergencyPause({
-          targetSessionIds: async () => emergencyPauseTargets(await ledger.listAll()),
-          freeze: async (reason: string) => {
-            await breaker.freeze(reason)
-            const state = await breaker.state()
-            return state.frozen && state.reason !== undefined
-              ? { frozen: state.frozen, reason: state.reason }
-              : { frozen: state.frozen }
-          },
-          interrupt: (sessionIds) => bridge.interruptTaskSessions(sessionIds),
-          notify: async (input) => notifications.push({
-            kind: 'anomaly',
-            title: input.title,
-            summary: input.summary,
-            actions: anomalyActions(),
-          }),
-          logger: { warn: (message: string) => log.warn(message) },
-        }),
+      // v1.4：紧急暂停改成**作用域**——只停该 Router 会话派出的任务 + 其下游
+      // 子任务。不碰全局熔断（熔断保持全局且自动）、不留任何全局标记、之后
+      // 的新派发不受影响、别的 Router 会话不受影响。
+      scopedPause: (routerSessionId: string) => assembled.core.scopedPause(routerSessionId),
     })
   })
 

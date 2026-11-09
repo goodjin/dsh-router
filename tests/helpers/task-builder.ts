@@ -20,6 +20,7 @@ export function task(patch: Partial<TaskRecord> = {}): TaskRecord {
     role: patch.role ?? 'worker',
     templateId: patch.templateId ?? 'coder',
     parentId: patch.parentId,
+    dispatchedBySessionId: patch.dispatchedBySessionId,
     dependsOn: patch.dependsOn ?? [],
     sessionId: patch.sessionId,
     status: patch.status ?? 'queued',

@@ -21,14 +21,13 @@ import {
   type RouterRoutesDeps,
 } from '../src/host/routes.ts'
 import { guardCoreWith, type GuardCoreOptions } from './helpers/guard-core.ts'
+import { task } from './helpers/task-builder.ts'
 import type { AgentInterruptFace, InterruptOutcome, SessionBridge } from '../src/host/bridge/sessions.ts'
-import { NotificationStore, anomalyActions } from '../src/host/guard/notifications.ts'
+import { NotificationStore, anomalyActions, type NotificationSink } from '../src/host/guard/notifications.ts'
 import {
-  emergencyPauseTargets,
-  runEmergencyPause,
-  type EmergencyPauseReport,
+  scopedPauseTargets,
 } from '../src/host/guard/emergency.ts'
-import type { RouterState, WorkerSpawnMode } from '../src/shared/view-contract.ts'
+import type { RouterState, ScopedPauseReport, WorkerSpawnMode } from '../src/shared/view-contract.ts'
 
 /* ────────────────────────── 假 HTTP 上下文（照 routes-worker-types 同款） ────────────────────────── */
 
@@ -117,10 +116,31 @@ function fakeInterruptFace(opts: { failFor?: (sessionId: string) => Error | unde
 async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<typeof fakeInterruptFace> } = {}) {
   // budgets 关闭：用户发起的控制动作本就绕过模型侧预算（B4 简报），且测试需要
   // 同会话连派多个任务构造 running/dispatched 并存的目标清单。
-  const h = await guardCoreWith({ ...opts, budgets: null, interruptFace: opts.interrupt?.face })
+  // 通知存储要用核心那份 memfs（装配后才拿得到），故先给核心一个转发口，
+  // 装配完再把真存储接上——v1.4 的暂停任务卡走的就是这个口。
+  let sink: NotificationSink | undefined
+  const forwarding: NotificationSink = {
+    push: (input) => {
+      if (sink === undefined) throw new Error('通知存储未接上')
+      return sink.push(input)
+    },
+    pending: () => (sink === undefined ? Promise.resolve([]) : sink.pending()),
+    list: () => (sink === undefined ? Promise.resolve([]) : sink.list()),
+    ack: (cardId) => (sink === undefined ? Promise.resolve(false) : sink.ack(cardId)),
+  }
+  const h = await guardCoreWith({
+    ...opts,
+    budgets: null,
+    interruptFace: opts.interrupt?.face,
+    notifications: forwarding,
+  })
   const breaker = h.breaker!
   let cardSeq = 0
   const notifications = new NotificationStore({ fs: h.memfs.fs, path: '/guard/notifications.json', newId: () => `card-${++cardSeq}`, now: () => 5000 })
+  sink = notifications
+  // v1.4：作用域暂停只认已登记的 Router 会话——把测试里的派发者登记进去。
+  await h.ui.addRouterSession('router-s-1', 'ws-1', 'Router')
+  await h.ui.addRouterSession('router-s-2', 'ws-1', 'Router 2')
   const spawnModeHolder: { mode: WorkerSpawnMode } = { mode: 'cache-priority' }
   const deps: RouterRoutesDeps = {
     // v1.2 B3 通知确认：经统一 NotificationStore。
@@ -194,19 +214,7 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
       const afterState = await breaker.state()
       return { before, after: { frozen: afterState.frozen } }
     },
-    emergencyPause: async () =>
-      runEmergencyPause({
-        targetSessionIds: async () => emergencyPauseTargets(await h.ledger.listAll()),
-        freeze: async (reason) => {
-          await breaker.freeze(reason)
-          const state = await breaker.state()
-          return state.frozen && state.reason !== undefined
-            ? { frozen: state.frozen, reason: state.reason }
-            : { frozen: state.frozen }
-        },
-        interrupt: (ids) => h.bridge.interruptTaskSessions(ids),
-        notify: async (input) => notifications.push({ kind: 'anomaly', title: input.title, summary: input.summary, actions: anomalyActions() }),
-      }),
+    scopedPause: async (routerSessionId: string) => h.core.scopedPause(routerSessionId),
   }
   return { ...h, deps, notifications, breaker, interrupt: opts.interrupt, spawnModeHolder }
 }
@@ -224,6 +232,22 @@ async function dispatchWorkerTask(
     templateId: 'coder',
   })
   return { taskId: result.taskId, sessionId: result.sessionId ?? '' }
+}
+
+/**
+ * 派发一个任务并指定派发者会话（v1.4：宿主记 dispatchedBySessionId，作用域
+ * 暂停据此圈范围）。这里直接改账本记录来模拟不同派发者——真实链路里这个字段
+ * 由 core.dispatchTask 落库（见 core.ts 的 dispatchTask）。
+ */
+async function dispatchBy(
+  h: Awaited<ReturnType<typeof controlHarness>>,
+  title: string,
+  dispatcher = 'router-s-1',
+): Promise<{ taskId: string; sessionId: string }> {
+  const result = await dispatchWorkerTask(h, title)
+  const record = h.ledger.get(result.taskId)!
+  record.dispatchedBySessionId = dispatcher
+  return result
 }
 
 /* ────────────────────────── 控制路由（POST /router/tasks/control） ────────────────────────── */
@@ -286,8 +310,8 @@ describe('POST /router/tasks/control（B4）', () => {
       async unfreezeBreaker() {
         return { before: { frozen: true }, after: { frozen: false } }
       },
-      async emergencyPause() {
-        return { frozen: true, interrupted: [], failedCount: 0 }
+      async scopedPause() {
+        return { tasks: [], pausedCount: 0, failedCount: 0, notified: true }
       },
     })
     const paths = routes.map((r) => r.path)
@@ -316,7 +340,7 @@ describe('POST /router/tasks/control（B4）', () => {
     expect(notice?.text).toContain('暂停')
   })
 
-  it('pause 在 dispatched 上非法 → 409（状态机无 dispatched→paused 边）', async () => {
+  it('pause 在 dispatched 上合法（v1.4：作用域暂停要能停刚派出、还没开跑的任务）', async () => {
     const h = await controlHarness()
     const { taskId } = await dispatchWorkerTask(h, '还没开跑')
 
@@ -325,9 +349,9 @@ describe('POST /router/tasks/control（B4）', () => {
     const exchange = fakeExchange('POST', '/router/tasks/control', JSON.stringify({ taskId, action: 'pause' }))
     await handlerOf(routes, '/router/tasks/control')(exchange.req, exchange.res)
 
-    expect(exchange.captured.status).toBe(409)
-    expect(JSON.parse(exchange.captured.body!)).toMatchObject({ error: expect.stringContaining('非法状态迁移') })
-    expect(h.ledger.get(taskId)?.status).toBe('dispatched')
+    expect(exchange.captured.status).toBe(200)
+    expect(JSON.parse(exchange.captured.body!)).toEqual({ status: 'paused' })
+    expect(h.ledger.get(taskId)?.status).toBe('paused')
   })
 
   it('resume：paused→running，会话收到恢复通知', async () => {
@@ -531,128 +555,182 @@ describe('POST /router/breaker/unfreeze（B4）', () => {
   })
 })
 
-/* ────────────────────────── 紧急暂停（POST /router/emergency-pause） ────────────────────────── */
+/* ────────────────────────── 作用域紧急暂停（POST /router/emergency-pause，v1.4） ────────────────────────── */
 
-describe('POST /router/emergency-pause（B4，Review Focus 5）', () => {
-  it('冻结 + 逐会话中断：running/dispatched 的会话全受理；paused/queued 不打扰；异常通知落卡', async () => {
+describe('POST /router/emergency-pause（v1.4：只停当前 Router 派出去的活）', () => {
+  it('只停当前 Router 派出的任务及其下游子任务；别的 Router 会话的任务不碰', async () => {
     const interrupt = fakeInterruptFace()
     const h = await controlHarness({ interrupt })
-    const running = await dispatchWorkerTask(h, '跑着的活')
-    await h.ledger.transition(running.taskId, 'running')
-    const paused = await dispatchWorkerTask(h, '已暂停的活')
-    await h.ledger.transition(paused.taskId, 'running')
-    await h.ledger.transition(paused.taskId, 'paused')
-    const dispatched = await dispatchWorkerTask(h, '刚派出的活')
-    // queued 且无会话的任务（不经核心派发，直接进账本）
-    const queued = await h.ledger.createTask({
-      title: '排队的活',
-      goal: '做完',
-      acceptance: ['完成'],
-      projectId: 'cwd:/proj',
-      cwd: '/proj',
-      role: 'worker',
-      templateId: 'coder',
-      dependsOn: [],
-      acceptancePolicy: 'auto',
-    })
-    await h.ledger.transition(queued.id, 'queued')
+    const mine = await dispatchBy(h, '我派出的活')
+    const other = await dispatchBy(h, '别的 Router 派出的活', 'router-s-2')
+    // 下游子任务：主管在自己的会话里派出去的
+    const downstream = await dispatchBy(h, '下游子任务', mine.sessionId)
 
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, h.deps)
-    const exchange = fakeExchange('POST', '/router/emergency-pause')
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
     await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
 
     expect(exchange.captured.status).toBe(200)
-    const report = JSON.parse(exchange.captured.body!) as EmergencyPauseReport
-    expect(report.frozen).toBe(true)
-    expect(report.reason).toBe('user-emergency')
-    expect(report.failedCount).toBe(0)
-    expect(report.interrupted.map((entry) => entry.sessionId).sort()).toEqual(
-      [running.sessionId, dispatched.sessionId].sort(),
+    const report = JSON.parse(exchange.captured.body!) as ScopedPauseReport
+    const stopped = report.tasks.map((t) => t.taskId).sort()
+    expect(stopped).toEqual([mine.taskId, downstream.taskId].sort())
+    expect(stopped).not.toContain(other.taskId)
+    // 别的 Router 的任务原封不动
+    expect(h.ledger.get(other.taskId)?.status).toBe('dispatched')
+    // 中断只打作用域内的会话
+    expect(interrupt.calls.map((c) => c.sessionId).sort()).toEqual(
+      [mine.sessionId, downstream.sessionId].sort(),
     )
-    for (const entry of report.interrupted) {
-      expect(entry.outcome).toBe('accepted')
-      expect(entry).not.toHaveProperty('detail')
-    }
-    expect(report.interrupted.map((entry) => entry.sessionId)).not.toContain(paused.sessionId)
-    // 中断逐字走 r8 形态：{kind:'hook',reason:'emergency-stop'} + {keepInbox:true}
-    expect(interrupt.calls.map((call) => call.sessionId).sort()).toEqual(
-      [running.sessionId, dispatched.sessionId].sort(),
-    )
-    for (const call of interrupt.calls) {
-      expect(call.cause).toEqual({ kind: 'hook', reason: 'emergency-stop' })
-      expect(call.options).toEqual({ keepInbox: true })
-    }
-    expect((await h.breaker.state()).frozen).toBe(true)
-    // 异常通知落卡（v1.2：成功后写一条 kind:'anomaly'）
-    expect(report.notification).toBeDefined()
-    expect(report.notification?.kind).toBe('anomaly')
-    const cards = await h.notifications.list()
-    expect(cards).toHaveLength(1)
-    expect(cards[0]!.summary).toContain('2')
   })
 
-  it('一个失败项如实上报：failed 项带 detail，HTTP 仍 200，通知摘要含失败明细（不静默）', async () => {
+  it('落账本 paused 后才断会话：迟到的 complete_task 被状态机拒掉', async () => {
+    const interrupt = fakeInterruptFace()
+    const h = await controlHarness({ interrupt })
+    const task = await dispatchBy(h, '跑着的活')
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
+    await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    expect(h.ledger.get(task.taskId)?.status).toBe('paused')
+    // paused 的出边没有 completed → 迟到提交被拒
+    await expect(
+      h.core.completeTask(task.sessionId, task.taskId, { docVersion: 1, summary: '抢交完成' }),
+    ).rejects.toMatchObject({ code: 'illegal-transition' })
+  })
+
+  it('不碰全局熔断、不留全局标记：之后的新派发照常（用户指示：不影响后面新派活）', async () => {
+    const interrupt = fakeInterruptFace()
+    const h = await controlHarness({ interrupt })
+    const task = await dispatchBy(h, '跑着的活')
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
+    await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
+
+    expect(exchange.captured.status).toBe(200)
+    // 全局熔断没被冻结，也没写任何手动冻结标记
+    expect((await h.breaker.state()).frozen).toBe(false)
+    expect((await h.breaker.state()).reason).toBeUndefined()
+    // 持久化文件里也没有任何冻结标记（文件不存在 = 从没写过冻结）
+    const guardFile = await h.memfs.fs.readFile('/guard/guard-state.json').catch(() => undefined)
+    if (guardFile !== undefined) {
+      const parsed = JSON.parse(guardFile) as { frozen: boolean; reason?: string }
+      expect(parsed.frozen).toBe(false)
+      expect(parsed.reason).toBeUndefined()
+    }
+    // 之后的新派发不受影响
+    const later = await h.core.dispatchTask('router-s-1', {
+      title: '暂停之后新派的', goal: '继续做', acceptance: ['完成'], role: 'worker', templateId: 'coder',
+    })
+    expect(h.ledger.get(later.taskId)?.status).toBe('dispatched')
+    expect(h.ledger.get(task.taskId)?.status).toBe('paused')
+  })
+
+  it('逐张落任务卡（用户面：能跳会话、能取消），失败项如实带明细', async () => {
     const interrupt = fakeInterruptFace({
       failFor: (sessionId) => (sessionId === 'session-2' ? new Error('agents 中断被宿主拒绝') : undefined),
     })
     const h = await controlHarness({ interrupt })
-    const first = await dispatchWorkerTask(h, '停得下来的')
-    await h.ledger.transition(first.taskId, 'running')
-    const second = await dispatchWorkerTask(h, '停不下来的')
+    const first = await dispatchBy(h, '停得下来的')
+    const second = await dispatchBy(h, '停不下来的')
 
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, h.deps)
-    const exchange = fakeExchange('POST', '/router/emergency-pause')
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
     await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
 
     expect(exchange.captured.status).toBe(200)
-    const report = JSON.parse(exchange.captured.body!) as EmergencyPauseReport
+    const report = JSON.parse(exchange.captured.body!) as ScopedPauseReport
     expect(report.failedCount).toBe(1)
-    const failed = report.interrupted.filter((entry) => entry.outcome === 'failed')
-    expect(failed).toHaveLength(1)
-    expect(failed[0]!.sessionId).toBe(second.sessionId)
-    expect(failed[0]!.detail).toContain('agents 中断被宿主拒绝')
-    const accepted = report.interrupted.filter((entry) => entry.outcome === 'accepted')
-    expect(accepted.map((entry) => entry.sessionId)).toEqual([first.sessionId])
-    // 失败项进通知摘要（Review Focus 5：汇总卡如实报失败项）
-    expect(report.notification?.summary).toContain(second.sessionId)
-    expect(report.notification?.summary).toContain('agents 中断被宿主拒绝')
+    expect(report.pausedCount).toBe(1)
+    const failed = report.tasks.find((t) => t.taskId === second.taskId)!
+    expect(failed.paused).toBe(true)
+    expect(failed.interrupted).toBe(false)
+    expect(failed.detail).toContain('agents 中断被宿主拒绝')
+    const ok = report.tasks.find((t) => t.taskId === first.taskId)!
+    expect(ok.paused).toBe(true)
+    expect(ok.interrupted).toBe(true)
+    // 逐任务卡落统一通知存储，失败项的卡如实带失败原因
+    const cards = await h.notifications.list()
+    expect(cards).toHaveLength(2)
+    expect(cards.map((c) => c.taskId).sort()).toEqual([first.taskId, second.taskId].sort())
+    const failedCard = cards.find((c) => c.taskId === second.taskId)!
+    expect(failedCard.summary).toContain('agents 中断被宿主拒绝')
+    // 暂停卡不给「重派」：那会把用户刚叫停的活立刻再开起来
+    for (const card of cards) {
+      expect(card.actions.map((a) => a.action)).toEqual(['open-session', 'cancel', 'ack'])
+    }
   })
 
-  it('无 running/dispatched 任务：interrupted 空、仍冻结、仍写通知', async () => {
+  it('告知 Router 会话「已暂停，等用户指示」（只是告知，不拦派发）', async () => {
+    const interrupt = fakeInterruptFace()
+    const h = await controlHarness({ interrupt })
+    await dispatchBy(h, '跑着的活')
+
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
+    await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
+
+    const report = JSON.parse(exchange.captured.body!) as ScopedPauseReport
+    expect(report.notified).toBe(true)
+    const notice = h.events.prompts.find((p) => p.sessionId === 'router-s-1')
+    expect(notice?.text).toContain('已暂停，等用户指示')
+  })
+
+  it('没有在跑的任务：空报告、不冻结、HTTP 200', async () => {
     const interrupt = fakeInterruptFace()
     const h = await controlHarness({ interrupt })
 
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, h.deps)
-    const exchange = fakeExchange('POST', '/router/emergency-pause')
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
     await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
 
     expect(exchange.captured.status).toBe(200)
-    const report = JSON.parse(exchange.captured.body!) as EmergencyPauseReport
-    expect(report.interrupted).toEqual([])
+    const report = JSON.parse(exchange.captured.body!) as ScopedPauseReport
+    expect(report.tasks).toEqual([])
     expect(report.failedCount).toBe(0)
-    expect(report.frozen).toBe(true)
     expect(interrupt.calls).toEqual([])
-    expect(report.notification).toBeDefined()
+    expect((await h.breaker.state()).frozen).toBe(false)
   })
 
   it('中断面未接线：逐项如实 failed（不冒充受理）', async () => {
     const h = await controlHarness() // 不注入 agents 中断面
-    const task = await dispatchWorkerTask(h, '没人能停的')
-    await h.ledger.transition(task.taskId, 'running')
+    const task = await dispatchBy(h, '没人能停的')
 
     const { ctx, routes } = fakeHttpContext()
     registerRouterRoutes(ctx, h.deps)
-    const exchange = fakeExchange('POST', '/router/emergency-pause')
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'router-s-1' }))
     await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
 
-    const report = JSON.parse(exchange.captured.body!) as EmergencyPauseReport
+    const report = JSON.parse(exchange.captured.body!) as ScopedPauseReport
     expect(report.failedCount).toBe(1)
-    expect(report.interrupted[0]!.outcome).toBe('failed')
-    expect(report.interrupted[0]!.detail).toContain('中断面')
-    expect(report.notification?.summary).toContain(task.sessionId)
+    expect(report.tasks[0]!.interrupted).toBe(false)
+    expect(report.tasks[0]!.detail).toContain('中断面')
+  })
+
+  it('缺 routerSessionId → 400（范围圈不出来就不猜）', async () => {
+    const h = await controlHarness()
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({}))
+    await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
+    expect(exchange.captured.status).toBe(400)
+  })
+
+  it('未登记的会话 id → 400（不拿任意会话 id 圈范围）', async () => {
+    const h = await controlHarness()
+    const { ctx, routes } = fakeHttpContext()
+    registerRouterRoutes(ctx, h.deps)
+    const exchange = fakeExchange('POST', '/router/emergency-pause', JSON.stringify({ routerSessionId: 'not-a-router' }))
+    await handlerOf(routes, '/router/emergency-pause')(exchange.req, exchange.res)
+    expect(exchange.captured.status).toBe(400)
   })
 })
 
@@ -714,16 +792,22 @@ describe('guard 通知段（B4→B3 合并后：紧急暂停落统一 Notificati
     expect((await store.pending())).toHaveLength(0)
   })
 
-  it('emergencyPauseTargets：只取 running/dispatched 且已绑会话的任务', () => {
-    const targets = emergencyPauseTargets([
-      { status: 'running', sessionId: 's-1' },
-      { status: 'dispatched', sessionId: 's-2' },
-      { status: 'paused', sessionId: 's-3' },
-      { status: 'queued', sessionId: undefined },
-      { status: 'waiting-user', sessionId: 's-4' },
-      { status: 'completed', sessionId: 's-5' },
-    ])
-    expect(targets).toEqual(['s-1', 's-2'])
+  it('scopedPauseTargets：只取当前 Router 派发树里在跑且已绑会话的任务（含下游子任务）', () => {
+    const records = [
+      // Router 会话直接派的：进范围
+      task({ id: 'T-1', title: '我派的', status: 'running', sessionId: 's-1', dispatchedBySessionId: 'router-1' }),
+      // 主管在 s-1 里派的下游子任务：闭包进来
+      task({ id: 'T-2', title: '下游', status: 'dispatched', sessionId: 's-2', dispatchedBySessionId: 's-1' }),
+      // 别的 Router 派的：不进范围
+      task({ id: 'T-3', title: '别人的', status: 'running', sessionId: 's-3', dispatchedBySessionId: 'router-2' }),
+      // 同派发者但已结束 / 无会话：不打扰
+      task({ id: 'T-4', title: '已结束', status: 'completed', sessionId: 's-4', dispatchedBySessionId: 'router-1' }),
+      task({ id: 'T-5', title: '没会话', status: 'dispatched', sessionId: undefined, dispatchedBySessionId: 'router-1' }),
+      // 旧任务（无派发溯源）：无法归属，不进范围
+      task({ id: 'T-6', title: '旧的', status: 'running', sessionId: 's-6', dispatchedBySessionId: undefined }),
+    ]
+    const targets = scopedPauseTargets(records, 'router-1')
+    expect(targets.map((t) => t.id).sort()).toEqual(['T-1', 'T-2'])
   })
 })
 

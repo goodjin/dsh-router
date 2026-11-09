@@ -33,6 +33,16 @@ export type TaskStatus =
 /** 终态集合：无出边，进入后任何写操作都走非法迁移。 */
 export const TERMINAL_STATUSES: readonly TaskStatus[] = ['completed', 'cancelled', 'failed'] as const
 
+/**
+ * 熔断冻结态的可见投影（客户端 ↔ 宿主共用形状；lossless：未冻结只带 frozen）。
+ * 宿主侧由 host/guard/breaker.ts 产出（结构相同，故直接复用这个类型）。
+ */
+export interface BreakerVisibility {
+  frozen: boolean
+  reason?: string
+  frozenAt?: number
+}
+
 /** 终态判定。 */
 export function isTerminal(status: TaskStatus): boolean {
   return TERMINAL_STATUSES.includes(status)
@@ -93,6 +103,13 @@ export interface TaskRecord {
   dependsOn: string[]
   /** 关联 worker 会话 ID（默认一个任务一个会话）。 */
   sessionId?: string
+  /**
+   * 派发者会话 ID（v1.4：作用域紧急暂停的归属依据）。由宿主在派发时记下
+   * 「谁派的我」——Router 会话派的直接子任务记 Router 会话 id，主管在自己
+   * 会话里派的下游子任务记主管的会话 id。派发树按它闭包（不靠模型自填的
+   * parentId，那可能漏填或填错）。缺省 = 本次改动之前派出的旧任务（无法归属）。
+   */
+  dispatchedBySessionId?: string
   status: TaskStatus
   /** 一句话进度（执行者更新；报告阻塞/驳回/派发失败时也落这里）。 */
   progress?: string

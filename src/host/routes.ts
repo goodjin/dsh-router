@@ -16,7 +16,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { LedgerError, type LedgerErrorCode } from './ledger/errors.ts'
 import type { TaskStatus } from '../shared/types.ts'
 import type { BreakerVisibility } from './guard/breaker.ts'
-import type { EmergencyPauseReport } from './guard/emergency.ts'
+import type { ScopedPauseReport } from './guard/emergency.ts'
 import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
@@ -113,8 +113,8 @@ export interface RouterRoutesDeps {
   controlTask(taskId: string, action: TaskControlAction): Promise<{ status: TaskStatus }>
   /** 用户解除派发冻结（v1.2 B4）：返回冻结前/后的可见投影。 */
   unfreezeBreaker(): Promise<BreakerUnfreezeReport>
-  /** 紧急暂停（v1.2 B4）：冻结 + 逐会话中断 + 异常通知；逐项结果失败项如实列出。 */
-  emergencyPause(): Promise<EmergencyPauseReport>
+  /** 作用域紧急暂停（v1.4）：只停该 Router 会话派出的任务 + 其下游子任务；逐项如实。 */
+  scopedPause(routerSessionId: string): Promise<ScopedPauseReport>
   /**
    * 轻量诊断报告（v1.4 GET /router/health）：SessionHeaderIndex 计数 + 收编
    * 计数。只报计数与状态名，不含会话 id/路径等私有内容。
@@ -417,8 +417,14 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     return { status: 200, body: JSON.stringify(report) }
   })
 
-  handle(ROUTER_EMERGENCY_PAUSE_PATH, ['POST'], async () => {
-    const report = await deps.emergencyPause()
+  handle(ROUTER_EMERGENCY_PAUSE_PATH, ['POST'], async (request) => {
+    // v1.4：作用域暂停——必须指明「哪个 Router 会话」（界面取当前 Router 会话视图
+    // 的会话 id）。没有它就无法圈定范围（用户指示：只停当前 router 派出去的活）。
+    const body = JSON.parse(await readBody(request)) as { routerSessionId?: unknown }
+    if (typeof body.routerSessionId !== 'string' || body.routerSessionId === '') {
+      throw new LedgerError('bad-request', 'routerSessionId 必填（当前 Router 会话 id）')
+    }
+    const report = await deps.scopedPause(body.routerSessionId)
     return { status: 200, body: JSON.stringify(report) }
   })
 

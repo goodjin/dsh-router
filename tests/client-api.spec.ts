@@ -40,6 +40,34 @@ function jsonResponse(status: number, body: unknown): Response {
   } as Response
 }
 
+describe('POST /router/emergency-pause（v1.4 作用域暂停）', () => {
+  it('带上 routerSessionId 调宿主，解析逐任务如实结果', async () => {
+    const seen: string[] = []
+    let sentBody: unknown
+    const report = {
+      tasks: [
+        { taskId: 'T-001', title: '写文档', sessionId: 'w-1', paused: true, interrupted: true },
+        { taskId: 'T-002', title: '跑批', sessionId: 'w-2', paused: true, interrupted: false, detail: '中断失败：宿主拒绝' },
+      ],
+      pausedCount: 1,
+      failedCount: 1,
+      notified: true,
+    }
+    const api = createRouterApi({
+      fetch: jsonFetch((input, init) => {
+        seen.push(input)
+        sentBody = JSON.parse(String(init?.body ?? '{}'))
+        return jsonResponse(200, report)
+      }),
+    })
+    const result = await api.emergencyPause('router-1')
+    expect(seen[0]).toBe('/router/emergency-pause')
+    expect(sentBody).toEqual({ routerSessionId: 'router-1' })
+    expect(result).toEqual(report)
+    expect(result.tasks[1]!.detail).toContain('宿主拒绝')
+  })
+})
+
 describe('GET /router/state', () => {
   it('带 workspaceId 查询参数，解析 RouterState', async () => {
     const seen: string[] = []
