@@ -20,6 +20,8 @@ export type LedgerErrorCode =
   | 'not-task-owner'
   /** 工具角色层：工具名不在注册清单里。 */
   | 'unknown-tool'
+  /** 派发指定的项目在 registry 中不存在（错误信息带可用项目清单）。 */
+  | 'project-unavailable'
   /** 工具角色层：无法从 exec.agent 解析调用方会话 ID（宿主身份字段缺失）。 */
   | 'caller-unresolved'
   /** 问答桥：问题 ID 不存在（HTTP 404）。 */

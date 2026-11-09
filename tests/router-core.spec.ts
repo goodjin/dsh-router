@@ -101,8 +101,8 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
     },
     agents: { get: () => undefined },
     workspaceRegistry: {
-      list: () => [{ id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] }] as WorkspaceInfo[],
-      get: (id: string) => (id === 'ws-1' ? { id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] } : undefined),
+      list: () => [{ id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] }, { id: 'ws-2', path: '/other' }] as WorkspaceInfo[],
+      get: (id: string) => (id === 'ws-1' ? { id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] } : id === 'ws-2' ? { id: 'ws-2', path: '/other' } : undefined),
     },
     onSessionStatus(callback) {
       statusCbs.push(callback)
@@ -306,8 +306,7 @@ function fakeBreaker(): CircuitBreaker {
 /* ────────────────────────── 派发 ────────────────────────── */
 
 describe('createRouterCore：dispatchTask', () => {
-  it('Router 会话派发：workspace 解析、任务书落盘、桥投递、驱动打标（调用者+执行会话）、加标签', async () => {
-    const { core, workbench, events, driver, ui, docs } = await coreWith()
+  it('Router 会话派发：workspace 解析、任务书落盘、桥投递、驱动打标（调用者+执行会话）、加标签', async () => {    const { core, workbench, events, driver, ui, docs } = await coreWith()
     const result = await core.dispatchTask('router-s-1', {
       title: '修登录',
       goal: '登录不再 500',
@@ -323,13 +322,50 @@ describe('createRouterCore：dispatchTask', () => {
     // v1.3 规格 §3.1：标题 = `类型名 · T-xxx 任务名`（类型面缺席时退 templateId）。
     expect(events.renames[0]!.title).toBe('coder · T-001 修登录')
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')
-    expect(events.prompts[0]!.text).toContain('docs/auth.md')
+    // 2026-11-09 派发语义：投递是简洁任务分派（含文档地址），materials 落在任务书文档里
+    expect(events.prompts[0]!.text).toContain('【任务分派】T-001')
+    expect(events.prompts[0]!.text).toContain('.router/tasks/T-001/task.v1.md')
+    expect(await docs.readDoc('T-001', 'task', 1)).toContain('docs/auth.md')
     // 调用者会话（Router）与执行会话都要打 pendingCompaction 标记：Router 自身
     // 的派发讨论段在 idle 后也要被压缩（裁定 5 的补齐，规格 §4）
     expect(driver.marked).toEqual(['router-s-1', 'session-1'])
     expect(ui.tabs('ws-1').map((t) => t.sessionId)).toEqual(['session-1'])
     expect(docs.files.get('/proj/.router/tasks/T-001/task.v1.md')).toContain('# 任务书 T-001')
     void workbench
+  })
+
+  it('2026-11-09 项目判定：dispatch_task 按 id 或路径解析 project，任务落到目标项目', async () => {
+    const { core, ledger } = await coreWith()
+    await core.dispatchTask('router-s-1', {
+      title: '修别家的登录', goal: '登录不再 500', acceptance: ['回归通过'],
+      role: 'worker', templateId: 'coder', project: 'ws-2',
+    })
+    await core.dispatchTask('router-s-1', {
+      title: '再来一个', goal: '按路径指定', acceptance: ['完成'],
+      role: 'worker', templateId: 'coder', project: '/other',
+    })
+    const records = await ledger.listAll()
+    expect(records[0]!.projectId).toBe('ws-2')
+    expect(records[0]!.cwd).toBe('/other')
+    expect(records[1]!.projectId).toBe('ws-2')
+    // 未指定 project → 派发者会话所在项目（既有行为不变）
+    await core.dispatchTask('router-s-1', {
+      title: '本项目的活', goal: '当前项目', acceptance: ['完成'],
+      role: 'worker', templateId: 'coder',
+    })
+    const third = (await ledger.listAll()).at(-1)!
+    expect(third.projectId).toBe('ws-1')
+    expect(third.cwd).toBe('/proj')
+  })
+
+  it('project 匹配不到 → project-unavailable 拒绝，错误带可用项目清单（教育性）', async () => {
+    const { core } = await coreWith()
+    const rejection = core.dispatchTask('router-s-1', {
+      title: '迷路', goal: '项目不存在', acceptance: ['完成'],
+      role: 'worker', templateId: 'coder', project: 'ws-gone',
+    })
+    await expect(rejection).rejects.toMatchObject({ code: 'project-unavailable' })
+    await expect(rejection).rejects.toThrow(/ws-1（\/proj）/)
   })
 
   it('v1.4：派发时宿主记下派发者会话（作用域紧急暂停的归属依据）', async () => {

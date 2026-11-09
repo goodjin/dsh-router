@@ -74,10 +74,10 @@ export interface RouterAdoptionDeps {
   /** 登记 Router 会话。 */
   register(sessionId: string, workspaceId: string): Promise<void>
   /**
-   * 身份卡投递（entry 的 deliverRouterCardStrict：桥幂等，**失败向上抛**）。
-   * 失败必须传播：只有真成功才记账（review I2）。
+   * 身份卡投递（2026-11-09 起可选——Router 身份由 persona 直定，不再投卡；
+   * 留接口兼容旧接线：提供时仍「失败向上抛」，只有真成功才记账（review I2））。
    */
-  deliver(sessionId: string): Promise<void>
+  deliver?(sessionId: string): Promise<void>
   logger?: { warn(message: string): void }
 }
 
@@ -553,8 +553,8 @@ async function adoptCandidate(
       }
     }
 
-    // (6) 投递身份卡：失败向上抛（不记账，等退避后重试）。
-    if (!cache.delivered.has(sessionId)) {
+    // (6) 投递身份卡（可选——缺省即撤卡语义）：失败向上抛（不记账，等退避后重试）。
+    if (deps.deliver !== undefined && !cache.delivered.has(sessionId)) {
       await deps.deliver(sessionId)
       cache.delivered.add(sessionId)
       cache.counters.delivered += 1

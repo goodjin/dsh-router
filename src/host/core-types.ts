@@ -21,6 +21,11 @@ export interface DispatchTaskInput {
   constraints?: string[]
   role: 'supervisor' | 'worker'
   templateId: string
+  /**
+   * 任务所属项目（2026-11-09 行为定义）：项目 id 或工作区路径。缺省 = 派发者
+   * 会话所在项目。Router 判断项目归属时填此项（上下文「项目列表」可对照）。
+   */
+  project?: string
   parentTaskId?: string
   dependsOn?: { taskId: string; version?: number }[]
   materials?: string[]

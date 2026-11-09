@@ -137,7 +137,7 @@ const TASK_ID_PARAM = {
 /** 八个工具的参数与输出 schema（形状照计划 Task B3 清单逐项）。 */
 const TOOL_SPECS = {
 	dispatch_task: {
-		description: "创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到任务书全文，Router 不阻塞等待。",
+		description: "创建任务并派发到独立执行会话。写清目标、验收条件与约束后派发；执行会话收到简洁任务分派（含任务书文档地址，全文自读），Router 不阻塞等待。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -160,6 +160,10 @@ const TOOL_SPECS = {
 				templateId: {
 					type: "string",
 					description: "专业类型（worker 模板 ID）"
+				},
+				project: {
+					type: "string",
+					description: "任务所属项目：项目 id 或工作区路径（上下文「项目列表」可对照）。用户没有明确指定、且任务不属于当前会话所在项目时才需要填；monorepo 的模块细分写进 goal/constraints，不在此填子目录"
 				},
 				parentTaskId: {
 					type: "string",
@@ -207,6 +211,7 @@ const TOOL_SPECS = {
 				constraints: args.constraints,
 				role: args.role,
 				templateId: String(args.templateId),
+				project: typeof args.project === "string" && args.project !== "" ? args.project : void 0,
 				parentTaskId: args.parentTaskId,
 				dependsOn: args.dependsOn,
 				materials: args.materials,

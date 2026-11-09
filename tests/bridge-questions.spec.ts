@@ -413,7 +413,9 @@ describe('SessionBridge：派发', () => {
     expect(events.prompts[0]!.sessionId).toBe('session-1')
     expect(events.prompts[0]!.mode).toBe('queue')
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')
-    expect(events.prompts[0]!.text).toContain('# 任务书 T-001')
+    // 2026-11-09 派发语义：任务分派简述 + 任务书文档地址（全文 worker 自读），不再投任务书全文
+    expect(events.prompts[0]!.text).toContain('【任务分派】T-001')
+    expect(events.prompts[0]!.text).toContain('.router/tasks/T-001/task.v1.md')
     expect(events.prompts[0]!.text).toContain(instructions)
     expect(ledger.get('T-001')?.status).toBe('dispatched')
     expect(ledger.get('T-001')?.sessionId).toBe('session-1')
@@ -479,7 +481,10 @@ describe('SessionBridge：补充与通知', () => {
     expect(events.prompts).toHaveLength(1)
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v2')
     expect(events.prompts[0]!.sessionId).toBe('session-9')
-    expect(events.prompts[0]!.text).toContain('v2 补充')
+    // 2026-11-09 派发语义：补充重投 = 升版简述 + 新版文档地址
+    expect(events.prompts[0]!.text).toContain('【任务补充】')
+    expect(events.prompts[0]!.text).toContain('补充：用 PostgreSQL')
+    expect(events.prompts[0]!.text).toContain('task.v2.md')
   })
 
   it('supplementTo：还没绑会话的任务不投递（保持 queued 等解锁）', async () => {

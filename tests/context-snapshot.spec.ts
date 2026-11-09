@@ -16,6 +16,18 @@ describe('renderLedgerSnapshot', () => {
     expect(text).toContain('没有未结束任务')
   })
 
+  it('项目列表（2026-11-09 行为定义）：渲染在活动任务之前；缺省无此节', () => {
+    const text = renderLedgerSnapshot([task({ id: 'T-001', title: '示例', goal: '目标', acceptance: [], status: 'dispatched', sessionId: 's-1' })], {
+      maxCards: 8,
+      projects: [{ id: 'ws-1', path: '/proj' }, { id: 'ws-2' }],
+    })
+    expect(text).toContain('## 项目列表')
+    expect(text).toContain('- ws-1（/proj）')
+    expect(text).toContain('- ws-2')
+    expect(text.indexOf('## 项目列表')).toBeLessThan(text.indexOf('## 活动任务'))
+    expect(renderLedgerSnapshot([], { maxCards: 8 })).not.toContain('项目列表')
+  })
+
   it('覆盖全部未结束任务，字段齐全（目标/验收/类型/会话/状态/进度/依赖）', () => {
     const tasks = [
       task({
