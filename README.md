@@ -1,6 +1,6 @@
 # dsh-router
 
-DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把一个会话级任务拆给多个 worker、追踪进度、汇总结果。**开发中**：当前入库的是可构建骨架，浏览器半边只有一个占位的空 apply，装上后不会有任何可见功能。
+DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把一个会话级任务拆给多个 worker、追踪进度、汇总结果。功能已实现（任务账本与派发、分叉创建 worker、身份卡、问答浮窗、通知卡片、失控防护、三层记忆、浮窗工作台、设置页）。**完整需求以 [`docs/requirements.md`](docs/requirements.md)（整合版）为唯一权威**；历次分版规格保留在 `docs/superpowers/specs/` 作历史决策记录。
 
 > **开发与排障请先查官方文档**：本插件的宿主契约（装载行、客户端模块、Slots、路由等）
 > 以 DeepSeek Harness 官方文档为准。本地镜像见
@@ -10,9 +10,12 @@ DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把�
 
 ## 现在装上会发生什么
 
-什么都不会发生——这是刻意的。浏览器半边（`src/client/index.ts`）是 root 级别可运行的空 apply：不注册、不注入任何 slot，只在浏览器控制台自报一行 `client placeholder loaded`，让「装没装上」可查。宿主侧入口（`src/entry.ts`）同样只有 name 和空 apply。
+- 预设选择器出现「Router」与主管/ worker 预设；picker 自建的 Router 会话被收编进工作台并幂等收到身份卡（Router 会话全部独立，不去重不跳转）。
+- Router 会话里可派发任务（分叉创建 worker、继承历史与前缀缓存）、汇聚 worker 提问、收完成/异常卡片、作用域紧急暂停与解除冻结。
+- 设置页出现「Router 管理」栏目（worker 类型 CRUD、Router 默认提示词/模型）；Router 会话有「系统提示词」视图。
+- 浏览器控制台自报一行 `Router client loaded …`，让「装没装上」可查。
 
-骨架已保证的是**接线正确**：装载行的声明、产物形状、入口指向都有 `tests/bundle.spec.ts` 盯着，任何一条断掉测试就红，不会重演「装上但静默失效」。
+装载接线（声明行、产物形状、入口指向）由 `tests/bundle.spec.ts` 盯着，任何一条断掉测试就红，不会重演「装上但静默失效」。
 
 ## 安装挂载
 
@@ -41,23 +44,25 @@ DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把�
 2. **package.json 声明 `dsh.client.platform = "web"`**；
 3. **patch 里装载行的 name 是裸包名** `@goodjin2/dsh-router`——带子路径的行会退化成在 node 里 import 浏览器产物，整块静默失效。
 
-配套的形状规矩：`exports["./client"]` 只能写字符串或 `{ "default": 字符串 }`；`lib/client.js` 必须是「单文件 CJS 工厂」（`window.__ModuleLoader__.load({ id, factory })` 包裹，顶层不得有 import/export）；`.` 入口指向宿主侧空入口 `dist/entry.js`，浏览器代码不进宿主进程。以上全部有 `tests/bundle.spec.ts` 断言。
+配套的形状规矩：`exports["./client"]` 只能写字符串或 `{ "default": 字符串 }`；`lib/client.js` 必须是「单文件 CJS 工厂」（`window.__ModuleLoader__.load({ id, factory })` 包裹，顶层不得有 import/export）；`.` 入口指向宿主侧入口 `dist/entry.js`，浏览器代码不进宿主进程。以上全部有 `tests/bundle.spec.ts` 断言。
 
 ## 布局
 
 ```
-src/entry.ts          宿主侧空入口（name + 空 apply）→ dist/entry.js
-src/client/index.ts   浏览器半边占位（空 apply，不挂 slot）→ lib/client.js
-cordis.patch.yml      装载行（现只有客户端一行；宿主路由/工具/预设行待契约研究后补）
-tests/bundle.spec.ts  装载接线测试（dsh 段、裸包名行、产物形状、入口指向）
-tests/entry.spec.ts   sanity 测试（两个入口源文件可加载、空跑不抛）
+src/entry.ts          宿主侧入口（组装 routerCore、问答桥、HTTP 路由、类型存储与动态预设）→ dist/entry.js
+src/host/             账本 ledger / 调度与完成 core / 防护 guard / 会话桥 bridge /
+                      收编索引 session / 记忆 memory / 上下文 context / 预设 presets / 工具 tools
+src/client/           浏览器半边（工作台标签、问答/通知浮窗、返回按钮、提示词编辑、设置段）→ lib/client.js
+src/shared/           宿主/浏览器共享类型与视图契约
+cordis.patch.yml      装载行（裸包名根服务行 + 主管/worker 两条静态预设行；Router 预设运行时动态注册）
+tests/                装载接线、账本/状态机、防护、收编、记忆、客户端模型等全套测试
 ```
 
-宿主路由 / 工具 / 预设行尚未接入，等契约研究返回后在 `cordis.patch.yml` 补行；补完必须跑容器核查脚本：`node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router`。
+改任何声明行 / 预设行后必须跑容器核查脚本（双宿主都绿）：`node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router`，以及本仓 `node scripts/check-subrows.mjs`。
 
 ## 记忆文档布局
 
-三层记忆（`src/host/memory/`，规格 §6）各是一份 Markdown，同一个形状：YAML 头 +「## 摘要」+「## 条目」。rootDir 由宿主集成层配置（默认插件状态目录）。
+三层记忆（`src/host/memory/`，需求 [`docs/requirements.md`](docs/requirements.md) §12）各是一份 Markdown，同一个形状：YAML 头 +「## 摘要」+「## 条目」。rootDir 由宿主集成层配置（默认插件状态目录）。
 
 | 层 | 文档 | 说明 |
 | --- | --- | --- |

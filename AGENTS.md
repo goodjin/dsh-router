@@ -1,6 +1,7 @@
 # dsh-router 仓库纪律
 
-DSH Router：主管 / 工作型 worker 的会话任务编排插件（开发中，当前为可构建骨架）。
+DSH Router：主管 / 工作型 worker 的会话任务编排插件（功能已实现；完整需求见
+[`docs/requirements.md`](docs/requirements.md)，整合版，唯一需求权威）。
 归属映射：**会话任务编排（任务的拆分、派发、追踪、汇总）→ 本仓 `dsh-router`**。
 
 ## 门禁
@@ -42,8 +43,9 @@ minify 确定序；将来接入 CSS 时照 chat-power 的「按基名算哈希�
 node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
 ```
 
-宿主路由 / 工具 / 预设行还没接（patch 里只有客户端装载行 + TODO 注释）；契约研究
-返回后补行，补完先跑核查再提交。
+patch 现含裸包名根服务行 + 主管/worker 两条静态预设行（Router 预设运行时动态
+注册，不放 yml 以免同 id 相撞）；改行先跑核查再提交，动态注册行另过插件内
+注册校验与 `node scripts/check-subrows.mjs`。
 
 ## 工作方式
 
@@ -57,6 +59,6 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
 
 - 「装上了却不生效」：先看宿主启动 stderr 的装配审计（`dsh: warning: N entry did
   not activate`），再看下发首页 HTML 的 `window.__DSH_BOOT__` 里有没有本包；
-  浏览器控制台应能看到 `[ @goodjin2/dsh-router] client placeholder loaded` 自报行。
+  浏览器控制台应能看到 `[ @goodjin2/dsh-router] Router client loaded …` 自报行。
 - 声明行静默失败的机制、升级后的核查规范：见容器级规范
   `../AGENTS.md`（DSH 升级后的升级检查规范）与官方文档镜像 `../docs/official/`。
