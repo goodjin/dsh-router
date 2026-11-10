@@ -60,7 +60,7 @@ interface HostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined); failSelectModel?: Error } = {}) {
+function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; failPrompt?: Error | ((attempt: number) => Error | undefined); failSelectModel?: Error; failWorkspaceList?: boolean } = {}) {
   const events: HostEvents = { created: [], prompts: [], renames: [] }
   const modelSelects: { sessionId: string; provider: string; model: string }[] = []
   const statusCbs: ((sessionId: string, running: boolean) => void)[] = []
@@ -101,7 +101,13 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
     },
     agents: { get: () => undefined },
     workspaceRegistry: {
-      list: () => [{ id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] }, { id: 'ws-2', path: '/other' }] as WorkspaceInfo[],
+      list: () => {
+        // 2026-11-10 崩溃回归：插件被卸载/重载的竞态窗口里，cordis 会对已失效
+        // 的必需服务抛 `cannot get required service "workspaceRegistry" in
+        // inactive context`（这里用同形状的普通 Error 代替）。
+        if (opts.failWorkspaceList === true) throw new Error('cannot get required service "workspaceRegistry" in inactive context')
+        return [{ id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] }, { id: 'ws-2', path: '/other' }] as WorkspaceInfo[]
+      },
       get: (id: string) => (id === 'ws-1' ? { id: 'ws-1', path: '/proj', sessionIds: ['router-s-1'] } : id === 'ws-2' ? { id: 'ws-2', path: '/other' } : undefined),
     },
     onSessionStatus(callback) {
@@ -206,6 +212,8 @@ async function coreWith(
     /** v1.1 C1：Router 默认值（缺省 = 不钉默认模型）。 */
     routerDefaults?: { get(): Promise<{ routerSystemPrompt: string; routerModel: string }> }
     failSelectModel?: Error
+    /** 2026-11-10 崩溃回归：registry 面在插件卸载竞态窗口里读不到（抛错）。 */
+    failWorkspaceList?: boolean
     failCreate?: (attempt: number) => Error | undefined
     failPrompt?: Error | ((attempt: number) => Error | undefined)
     /** 验收/冻结测试用：通知存储与熔断器（缺省 = 防护面未接线）。 */
@@ -220,7 +228,7 @@ async function coreWith(
   const ledger = new TaskLedger(persistence, () => 1000)
   await ledger.listAll()
   const docs = memoryDocs()
-  const { hosts, events, modelSelects } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt, failSelectModel: opts.failSelectModel })
+  const { hosts, events, modelSelects } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt, failSelectModel: opts.failSelectModel, failWorkspaceList: opts.failWorkspaceList })
   const forkCalls: { sessionId: string }[] = []
   const ui = fakeUi()
   await ui.load()
@@ -896,6 +904,18 @@ describe('createRouterCore：快照缓存', () => {
     expect(snapshotText()).toContain('新任务')
     expect(snapshotText()).not.toContain('没有未结束任务')
     void core
+  })
+
+  /**
+   * 2026-11-10 桌面版崩溃回归：插件被卸载/重载的竞态窗口里读必需的 registry
+   * 服务会抛 `… in inactive context`。这个异常一旦从 refreshSnapshot 逃出去
+   * 就变成未捕获 rejection，宿主按 fatal 处理、整个桌面版退出。
+   */
+  it('registry 面失效时 refreshSnapshot 不抛：项目列表降级为「无此节」', async () => {
+    const { snapshotText, refreshSnapshot } = await coreWith([], { failWorkspaceList: true })
+    await expect(refreshSnapshot()).resolves.toBeUndefined()
+    expect(snapshotText()).toContain('没有未结束任务')
+    expect(snapshotText()).not.toContain('项目列表')
   })
 })
 

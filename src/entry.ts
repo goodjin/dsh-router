@@ -36,6 +36,7 @@ import { SessionHeaderIndex, type IndexFileState } from './host/session/session-
 import { CompactionDriver } from './host/context/compaction-driver.ts'
 import { registerRouterRoutes, type RouterRoutesContext } from './host/routes.ts'
 import { createRouterCore, type RouterCoreConfig, type RouterCoreHosts, type RouterMemory } from './host/core.ts'
+import { createFireAndForget } from './host/safe-async.ts'
 import { workerInstructions as WORKER_INSTRUCTIONS } from './host/prompts/worker-instructions.ts'
 import { SessionPromptStore } from './host/prompts/session-prompt.ts'
 import { routerPrompt } from './host/prompts/router.ts'
@@ -316,6 +317,10 @@ function jsonFilePersistence<T>(path: string): {
 export function apply(ctx: RootContext, rawConfig: unknown): void {
   const config = resolveRootConfig(rawConfig)
   const log = ctx.logger?.(name) ?? { info: (m: string) => console.info(`[${name}] ${m}`), warn: (m: string) => console.warn(`[${name}] ${m}`) }
+  // 「发射后不管」的异步调用统一出口：宿主把未捕获的 promise rejection 当致命
+  // 错误（fatal load failure → exit(1) → 桌面版记为崩溃），插件里绝不让这类
+  // 异常逃到进程级（2026-11-10 现场：60 秒快照补刷撞上插件卸载窗口）。
+  const fireAndForget = createFireAndForget({ warn: (message: string) => log.warn(message) })
 
   // v1.3 C2：worker 派生模式的运行时值（规格 §1 volatile）。初值 = 启动配置；
   // 设置页 POST 即改（即时生效，存量任务/会话不受影响）；不落盘——宿主重启
@@ -482,7 +487,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     }
     return forkSeedFn
   }
-  void loadForkSeed()
+  fireAndForget('分叉种子装载', () => loadForkSeed())
 
   const bridge = new SessionBridge({
     ledger,
@@ -569,7 +574,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // builtin 不经引擎（映射静态预设，ensureRegistered 对它恒 false）。
   // v1.3.1 巡检：注册表缺位最长 60 秒内自愈（UI 冷恢复路径等不来入口钩子）。
   ctx.effect(() => {
-    const timer = setInterval(() => { void engine.ensureRouterPresent(spawnMode()) }, 60_000)
+    const timer = setInterval(() => { fireAndForget('预设注册表巡检', () => engine.ensureRouterPresent(spawnMode())) }, 60_000)
     return () => clearInterval(timer)
   }, 'dsh-router: 预设注册表巡检')
 
@@ -858,14 +863,14 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   })
   bridge.onStatusChange((sessionId, running) => {
     if (running) return
-    void driver.onIdle(sessionId).then((outcome) => {
+    fireAndForget('派发后上下文整理', () => driver.onIdle(sessionId).then((outcome) => {
       if (outcome === 'compacted') log.info(`会话 ${sessionId} 派发后上下文整理完成`)
-    })
-    void (async () => {
+    }))
+    fireAndForget('任务会话摘要判定', async () => {
       if (summarizer === undefined) return
       if (!(await isTaskSession(sessionId))) return
       summarizer.onIdle(sessionId)
-    })()
+    })
   })
 
   // v1.2 B3：轮沿喂判定器（去抖在判定器内）
@@ -873,13 +878,17 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     if (running) adjudicator.onTurnStart(sessionId)
     else adjudicator.onTurnEnd(sessionId)
   })
-  void adjudicator.syncWatched()
+  fireAndForget('判定器同步巡检', () => adjudicator.syncWatched())
 
   // 项目列表新鲜度（2026-11-09 行为定义）：快照缓存只在账本写后刷新，用户
   // 新开项目不会碰账本——低频补刷让「项目列表」跟上 registry（60s，量级同
   // 预设巡检；fire-and-forget，失败不重试等下轮）。
+  //
+  // 2026-11-10：补刷回调必须兜底——插件被卸载/重载的竞态窗口里读必需的
+  // workspaceRegistry 会抛（inactive context），没人接就直接把宿主带走
+  // （fatal load failure → 桌面版记为崩溃）。
   ctx.effect(() => {
-    const timer = setInterval(() => { void assembled.refreshSnapshot() }, 60_000)
+    const timer = setInterval(() => { fireAndForget('快照项目列表补刷', () => assembled.refreshSnapshot()) }, 60_000)
     return () => clearInterval(timer)
   }, 'dsh-router: 快照项目列表补刷')
 
@@ -888,7 +897,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   ctx.on('user-questions/request', (async (request: unknown, next: () => Promise<unknown>) => {
     const outcome = await relay.claimQuestion(request as never, next)
     // 问答变化影响活动快照的「待回答事项」，同步刷缓存（fire-and-forget）
-    void assembled.refreshSnapshot()
+    fireAndForget('问答快照刷新', () => assembled.refreshSnapshot())
     return outcome
   }) as unknown as (...args: unknown[]) => unknown, { prepend: true })
 
@@ -897,13 +906,13 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   // data.usage.cacheReadTokens 记进账本任务（fire-and-forget，观测不挡事件流）。
   const cacheObserver = new FirstRequestCacheObserver({ ledger, logger: { warn: (message) => log.warn(message) } })
   ctx.on('session/event', ((session: unknown, event: unknown) => {
-    void cacheObserver.onSessionEvent(session, event)
+    fireAndForget('缓存命中观测', () => cacheObserver.onSessionEvent(session, event))
   }) as unknown as (...args: unknown[]) => unknown)
 
   // 启动恢复：动态预设同步（Router 动态化→静态兜底 + 启用类型全量注册）+ UI
   // 状态装载 + 账本孤儿问题清理 + 快照缓存预热 + 会话提示词覆盖装载。
   ctx.effect(() => {
-    void (async () => {
+    fireAndForget('启动恢复与动态预设同步', async () => {
       const defaults = await defaultsStore.get()
       defaultsText = defaults.routerSystemPrompt // 默认文本缓存刷新（section 同步读）
       const routerOutcome = await engine.syncRouter(spawnMode())
@@ -927,7 +936,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       }
       await assembled.refreshSnapshot()
       log.info('routerCore 就绪')
-    })()
+    })
   }, 'dsh-router: 启动恢复与动态预设同步')
 
   // HTTP 路由（webServer/connection 机会式：缺席不挡装载）。
@@ -971,7 +980,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       },
       answerQuestion: async (questionId, answers) => {
         await assembled.workbench.answerQuestion(questionId, answers)
-        void assembled.refreshSnapshot()
+        fireAndForget('答问后快照刷新', () => assembled.refreshSnapshot())
       },
       closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
       listWorkerTypes: async () => ({ types: await typeStore.list() }),

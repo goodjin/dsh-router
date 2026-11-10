@@ -6661,14 +6661,31 @@ function createRouterCore(deps) {
 		assertCallerRole(record.role, "report_progress", callerSessionId$1, { get: (id) => ledger.get(id) }, taskId);
 		return record;
 	};
+	/**
+	* 项目列表（registry 面）。
+	*
+	* registry 缺席/失效时**无此节**（cwd 模式照常可用）——这本来就是行为定义。
+	* 关键是要兜住「插件被卸载/重载的竞态窗口」：此时读必需的 registry 服务会
+	* 抛 `cannot get required service "workspaceRegistry" in inactive context`，
+	* 抛出去会一路逃到进程级变成未捕获 rejection，宿主按 fatal 处理、整个桌面
+	* 版退出（2026-11-10 现场）。所以这里就地降级为空列表。
+	*/
+	const listProjects = () => {
+		try {
+			return hosts.workspaceRegistry.list().map((workspace) => ({
+				id: workspace.id,
+				path: workspace.path
+			}));
+		} catch (error) {
+			deps.logger?.warn(`项目列表刷新跳过（registry 面不可用）: ${error instanceof Error ? error.message : String(error)}`);
+			return [];
+		}
+	};
 	const refreshSnapshot = async () => {
 		snapshotCache = renderLedgerSnapshot(await ledger.listAll(), {
 			maxCards: deps.maxActiveCards ?? 12,
 			openQuestions: await waitingCounts(),
-			projects: hosts.workspaceRegistry.list().map((workspace) => ({
-				id: workspace.id,
-				path: workspace.path
-			}))
+			projects: listProjects()
 		});
 	};
 	/** 记账时钟（熔断事件时间戳；缺省 Date.now）。 */
@@ -7144,6 +7161,33 @@ function dispatchRejectionText(code, callerRole) {
 	if (code === "role-forbidden") return "主管之下只能派 worker 或子代理，不能再派主管（v1.1 规格 §3.4 禁主管链）";
 	if (code === "depth-exceeded") return "超过最大递归深度，请把工作合并进当前任务或改派 supervisor";
 	return "依赖命中了自身的祖先任务（环），请换依赖对象";
+}
+
+//#endregion
+//#region src/host/safe-async.ts
+/** 把任意抛出物压成一行可读文本。 */
+function describeError(error) {
+	return error instanceof Error ? error.message : String(error);
+}
+/**
+* 造一个安全的「发射后不管」调用器。
+*
+* - work 返回的 promise 被拒绝 → 记一行 warn，不产生未捕获 rejection；
+* - work 同步抛出 → 同样记一行 warn，不打断调用方。
+*/
+function createFireAndForget(logger) {
+	return (label, work) => {
+		let promise;
+		try {
+			promise = Promise.resolve(work());
+		} catch (error) {
+			logger.warn(`${label}失败: ${describeError(error)}`);
+			return;
+		}
+		promise.catch((error) => {
+			logger.warn(`${label}失败: ${describeError(error)}`);
+		});
+	};
 }
 
 //#endregion
@@ -9835,6 +9879,7 @@ function apply(ctx, rawConfig) {
 		info: (m) => console.info(`[${name}] ${m}`),
 		warn: (m) => console.warn(`[${name}] ${m}`)
 	};
+	const fireAndForget = createFireAndForget({ warn: (message) => log.warn(message) });
 	let currentSpawnMode = config.workerSpawnMode;
 	const spawnMode = () => currentSpawnMode;
 	const fs = fsAdapter();
@@ -9936,7 +9981,7 @@ function apply(ctx, rawConfig) {
 		}
 		return forkSeedFn;
 	};
-	loadForkSeed();
+	fireAndForget("分叉种子装载", () => loadForkSeed());
 	const bridge = new SessionBridge({
 		ledger,
 		docsFor,
@@ -10002,7 +10047,7 @@ function apply(ctx, rawConfig) {
 	});
 	ctx.effect(() => {
 		const timer = setInterval(() => {
-			engine.ensureRouterPresent(spawnMode());
+			fireAndForget("预设注册表巡检", () => engine.ensureRouterPresent(spawnMode()));
 		}, 6e4);
 		return () => clearInterval(timer);
 	}, "dsh-router: 预设注册表巡检");
@@ -10236,29 +10281,29 @@ function apply(ctx, rawConfig) {
 	});
 	bridge.onStatusChange((sessionId, running) => {
 		if (running) return;
-		driver.onIdle(sessionId).then((outcome) => {
+		fireAndForget("派发后上下文整理", () => driver.onIdle(sessionId).then((outcome) => {
 			if (outcome === "compacted") log.info(`会话 ${sessionId} 派发后上下文整理完成`);
-		});
-		(async () => {
+		}));
+		fireAndForget("任务会话摘要判定", async () => {
 			if (summarizer === void 0) return;
 			if (!await isTaskSession(sessionId)) return;
 			summarizer.onIdle(sessionId);
-		})();
+		});
 	});
 	bridge.onStatusChange((sessionId, running) => {
 		if (running) adjudicator.onTurnStart(sessionId);
 		else adjudicator.onTurnEnd(sessionId);
 	});
-	adjudicator.syncWatched();
+	fireAndForget("判定器同步巡检", () => adjudicator.syncWatched());
 	ctx.effect(() => {
 		const timer = setInterval(() => {
-			assembled.refreshSnapshot();
+			fireAndForget("快照项目列表补刷", () => assembled.refreshSnapshot());
 		}, 6e4);
 		return () => clearInterval(timer);
 	}, "dsh-router: 快照项目列表补刷");
 	ctx.on("user-questions/request", (async (request, next) => {
 		const outcome = await relay.claimQuestion(request, next);
-		assembled.refreshSnapshot();
+		fireAndForget("问答快照刷新", () => assembled.refreshSnapshot());
 		return outcome;
 	}), { prepend: true });
 	const cacheObserver = new FirstRequestCacheObserver({
@@ -10266,10 +10311,10 @@ function apply(ctx, rawConfig) {
 		logger: { warn: (message) => log.warn(message) }
 	});
 	ctx.on("session/event", ((session, event) => {
-		cacheObserver.onSessionEvent(session, event);
+		fireAndForget("缓存命中观测", () => cacheObserver.onSessionEvent(session, event));
 	}));
 	ctx.effect(() => {
-		(async () => {
+		fireAndForget("启动恢复与动态预设同步", async () => {
 			defaultsText = (await defaultsStore.get()).routerSystemPrompt;
 			const routerOutcome = await engine.syncRouter(spawnMode());
 			const enabledTypes = (await typeStore.list()).filter((record) => record.enabled);
@@ -10288,7 +10333,7 @@ function apply(ctx, rawConfig) {
 			}
 			await assembled.refreshSnapshot();
 			log.info("routerCore 就绪");
-		})();
+		});
 	}, "dsh-router: 启动恢复与动态预设同步");
 	ctx.inject?.(["webServer", "connection"], (child) => {
 		registerRouterRoutes(child, {
@@ -10325,7 +10370,7 @@ function apply(ctx, rawConfig) {
 			},
 			answerQuestion: async (questionId, answers) => {
 				await assembled.workbench.answerQuestion(questionId, answers);
-				assembled.refreshSnapshot();
+				fireAndForget("答问后快照刷新", () => assembled.refreshSnapshot());
 			},
 			closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
 			listWorkerTypes: async () => ({ types: await typeStore.list() }),
