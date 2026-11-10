@@ -1619,8 +1619,14 @@ var SessionBridge = class {
 			const workspace = this.resolveWorkspace(record);
 			const title = await this.sessionTitle(record);
 			const forkSource = this.resolveForkSource(record, opts?.forkFrom);
-			if (mode === "cache-priority") sessionId = await this.createByFork(record, title, forkSource);
-			else sessionId = await this.createBySeed(record, title, forkSource, workspace);
+			let forked = false;
+			if (mode === "cache-priority") {
+				const forkedId = await this.createByFork(record, title, forkSource);
+				if (forkedId !== void 0) {
+					sessionId = forkedId;
+					forked = true;
+				}
+			} else sessionId = await this.createBySeed(record, title, forkSource, workspace);
 			if (sessionId === void 0) {
 				const agentPreset = await this.presetFor(record);
 				const createOpts = workspace !== void 0 ? {
@@ -1637,7 +1643,7 @@ var SessionBridge = class {
 					await this.host.rename?.(fresh, title);
 				});
 			}
-			if (mode !== "cache-priority") await this.pinDefaultModel(sessionId, record.templateId ?? "");
+			if (!forked) await this.pinDefaultModel(sessionId, record.templateId ?? "");
 		}
 		const deliverySessionId = sessionId;
 		const firstText = await this.firstDeliveryText(record);
@@ -6753,7 +6759,8 @@ function createRouterCore(deps) {
 			const docPath = await docs.initTask(record, book);
 			await deps.breaker?.recordCreation(record.id, now());
 			try {
-				const { sessionId } = await bridge.dispatchTask(record.id, { forkFrom: callerSessionId$1 });
+				const forkFrom = callerTask?.role === "supervisor" ? callerSessionId$1 : void 0;
+				const { sessionId } = await bridge.dispatchTask(record.id, forkFrom !== void 0 ? { forkFrom } : {});
 				deps.budgets?.recordDispatchSuccess(callerSessionId$1);
 				driver.onDispatched(callerSessionId$1);
 				await afterDispatch(record, sessionId, workspace?.id);

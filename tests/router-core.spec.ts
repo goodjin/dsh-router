@@ -211,6 +211,8 @@ async function coreWith(
     /** 验收/冻结测试用：通知存储与熔断器（缺省 = 防护面未接线）。 */
     notifications?: NotificationStore
     breaker?: CircuitBreaker
+    /** 2026-11-10 分叉范围测试：桥的 worker 生成模式（缺省 minimal-face）。 */
+    mode?: 'cache-priority' | 'minimal-face'
   } = {},
 ) {
   const persistence = new MemoryPersistence()
@@ -219,6 +221,7 @@ async function coreWith(
   await ledger.listAll()
   const docs = memoryDocs()
   const { hosts, events, modelSelects } = fakeHosts({ failCreate: opts.failCreate, failPrompt: opts.failPrompt, failSelectModel: opts.failSelectModel })
+  const forkCalls: { sessionId: string }[] = []
   const ui = fakeUi()
   await ui.load()
   const bridge = new SessionBridge({
@@ -232,9 +235,18 @@ async function coreWith(
       rename: async (sessionId, title) => {
         await hosts.sessionController.rename({ sessionId, title })
       },
+      selectModel: (request, signal) => hosts.sessionController.selectModel!(request, signal),
+      // 2026-11-10 分叉范围测试：记录分叉调用（返回新会话 id，模拟宿主 fork）
+      fork: async (request: { sessionId: string }) => {
+        forkCalls.push({ sessionId: request.sessionId })
+        return { sessionId: `forked-${forkCalls.length}` }
+      },
     },
     presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
     workerInstructions: () => '【执行指引】',
+    // 2026-11-10 分叉范围测试：类型面（切换卡类型名 + 全新创建钉 models[0]）
+    types: { get: async () => ({ templateId: 'coder', name: 'coder', description: '', role: 'worker' as const, models: ['fake-provider/fake-model'], systemPrompt: '', skills: [], enabled: true, origin: 'builtin' as const, createdAt: 1, updatedAt: 1 }) },
+    ...(opts.mode !== undefined ? { mode: opts.mode } : {}),
     signal: new AbortController().signal,
   })
   const relay = new AnswerRelay({ ledger, newId: () => `q-${++questionSeq}`, now: () => 1 })
@@ -269,7 +281,7 @@ async function coreWith(
   }
   const assembled = createRouterCore(assemblyDeps)
   await assembled.refreshSnapshot()
-  return { ledger, docs, bridge, relay, driver, events, modelSelects, ui, memoryState, ...assembled }
+  return { ledger, docs, bridge, relay, driver, events, modelSelects, forkCalls, ui, memoryState, ...assembled }
 }
 
 /** 内存 FsAdapter（熔断器/通知存储的落盘假件）。 */
@@ -366,6 +378,31 @@ describe('createRouterCore：dispatchTask', () => {
     })
     await expect(rejection).rejects.toMatchObject({ code: 'project-unavailable' })
     await expect(rejection).rejects.toThrow(/ws-1（\/proj）/)
+  })
+
+  it('2026-11-10 分叉范围：Router 派发全新创建（不分叉、钉类型模型）；主管派子任务才分叉复用', async () => {
+    const { core, ledger, events, modelSelects, forkCalls } = await coreWith([], { mode: 'cache-priority' })
+    // Router 会话派发：不传分叉来源 → 全新创建 + 钉类型 models[0]（worker 不背 Router 历史）
+    await core.dispatchTask('router-s-1', {
+      title: '修登录', goal: '登录不再 500', acceptance: ['回归通过'],
+      role: 'worker', templateId: 'coder',
+    })
+    expect(forkCalls).toEqual([])
+    expect(events.created).toHaveLength(1)
+    expect(modelSelects).toHaveLength(1)
+    // 主管（任务会话）派子任务：传分叉来源 → 宿主 fork 复用主管会话
+    await ledger.createTask({
+      title: '父任务', goal: '拆解', acceptance: ['完成'], constraints: [],
+      projectId: 'ws-1', cwd: '/proj', role: 'supervisor', templateId: 'lead',
+      dependsOn: [], acceptancePolicy: 'auto',
+    })
+    const parent = (await ledger.listAll()).find((record) => record.title === '父任务')!
+    await ledger.attachSession(parent.id, 'sup-s-1')
+    await core.dispatchTask('sup-s-1', {
+      title: '子任务', goal: '执行子项', acceptance: ['完成'],
+      role: 'worker', templateId: 'coder',
+    })
+    expect(forkCalls).toEqual([{ sessionId: 'sup-s-1' }])
   })
 
   it('v1.4：派发时宿主记下派发者会话（作用域紧急暂停的归属依据）', async () => {

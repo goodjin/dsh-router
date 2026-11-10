@@ -215,13 +215,14 @@ describe('cache-priority：创建段 = 宿主 fork face（规格 §3.1）', () =
     expect(h.captured.selectModelCalls).toHaveLength(0)
   })
 
-  it('无分叉源（无 forkFrom 且父任务无会话）→ 回退创建路径：仍不 selectModel、投递仍 switch 卡格式', async () => {
+  it('无分叉源（2026-11-10 起 Router 派发即无源）→ 回退创建路径：钉类型默认模型、投递仍 switch 卡格式', async () => {
     const h = harness({ mode: 'cache-priority' })
     const record = await createTask(h)
     await h.bridge.dispatchTask(record.id)
     expect(h.captured.forkCalls).toHaveLength(0)
     expect(h.captured.createCalls).toHaveLength(1)
-    expect(h.captured.selectModelCalls).toHaveLength(0)
+    // 全新创建不继承来源模型 → 钉类型 models[0]（只有分叉路径才绝不钉）
+    expect(h.captured.selectModelCalls).toEqual([{ sessionId: expect.any(String), provider: 'prov', model: 'model-a' }])
     expect(h.captured.promptCalls[0]!.text).toContain('【身份切换卡】')
     expect(h.captured.promptCalls[0]!.requestId).toBe(`switch-${record.id}-v1`)
   })
@@ -285,7 +286,7 @@ describe('minimal-face：五步复刻（规格 §3.2）', () => {
     expect(h.captured.attachCalls).toHaveLength(0) // 无 workspace 解析面时跳过
   })
 
-  it('后接 rename + selectModel(models[0])（minimal 才钉模型）', async () => {
+  it('后接 rename + selectModel(models[0])（五步与全新创建都钉模型；只有分叉绝不钉）', async () => {
     const h = harness({ mode: 'minimal-face' })
     const record = await createTask(h)
     await h.bridge.dispatchTask(record.id, { forkFrom: 'router-session-1' })

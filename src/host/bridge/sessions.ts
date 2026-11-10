@@ -469,32 +469,38 @@ export class SessionBridge {
       const workspace = this.resolveWorkspace(record)
       const title = await this.sessionTitle(record)
       const forkSource = this.resolveForkSource(record, opts?.forkFrom)
-      if (mode === 'cache-priority') {
-        // cache 模式：宿主分叉（继承来源历史/组合/模型）；无源回退创建（不钉模型）。
-        sessionId = await this.createByFork(record, title, forkSource)
-      } else {
-        // minimal 模式：五步复刻（带历史 + worker 预设组合 + 钉模型）；面不全或
-        // 无源回退既有创建路径。
-        sessionId = await this.createBySeed(record, title, forkSource, workspace)
+    let forked = false
+    if (mode === 'cache-priority') {
+      // cache 模式：宿主分叉（继承来源历史/组合/模型；2026-11-10 起来源只剩
+      // 主管会话）；无源（Router 派发）回退创建。
+      const forkedId = await this.createByFork(record, title, forkSource)
+      if (forkedId !== undefined) {
+        sessionId = forkedId
+        forked = true
       }
-      if (sessionId === undefined) {
-        const agentPreset = await this.presetFor(record)
-        const createOpts = workspace !== undefined
-          ? { workspaceId: workspace.id, agentPreset }
-          : { cwd: record.cwd, agentPreset }
-        const fresh = await this.tagged('会话创建失败', () => this.host.create(createOpts, this.hostSignal()))
-        sessionId = fresh
-        await this.tagged('会话登记失败', () => this.ledger.attachSession(taskId, fresh))
-        await this.tagged('会话改名失败', async () => {
-          await this.host.rename?.(fresh, title)
-        })
-      }
-      // 模型钉定（v1.1 §5 / Review Focus 3）：minimal（含回退创建与五步）钉类型
-      // models[0]；cache 模式绝不调 selectModel——分叉继承来源模型（调用即缓存断裂），
-      // 类型 models 仅作展示。
-      if (mode !== 'cache-priority') {
-        await this.pinDefaultModel(sessionId, record.templateId ?? '')
-      }
+    } else {
+      // minimal 模式：五步复刻（带历史 + worker 预设组合 + 钉模型）；面不全或
+      // 无源回退既有创建路径。
+      sessionId = await this.createBySeed(record, title, forkSource, workspace)
+    }
+    if (sessionId === undefined) {
+      const agentPreset = await this.presetFor(record)
+      const createOpts = workspace !== undefined
+        ? { workspaceId: workspace.id, agentPreset }
+        : { cwd: record.cwd, agentPreset }
+      const fresh = await this.tagged('会话创建失败', () => this.host.create(createOpts, this.hostSignal()))
+      sessionId = fresh
+      await this.tagged('会话登记失败', () => this.ledger.attachSession(taskId, fresh))
+      await this.tagged('会话改名失败', async () => {
+        await this.host.rename?.(fresh, title)
+      })
+    }
+    // 模型钉定（v1.1 §5 / Review Focus 3 + 2026-11-10）：只有**分叉**绝不钉——
+    // 分叉继承来源模型，selectModel 即缓存断裂；全新创建（含 cache 模式回退，
+    // Router 派发现在走这条路）与 minimal 五步一律钉类型 models[0]。
+    if (!forked) {
+      await this.pinDefaultModel(sessionId, record.templateId ?? '')
+    }
     }
     const deliverySessionId: string = sessionId
     const firstText = await this.firstDeliveryText(record)
