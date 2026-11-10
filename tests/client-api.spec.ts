@@ -346,3 +346,24 @@ describe('C2 派生模式（GET/POST /router/spawn-mode）', () => {
     expect((error as RouterApiError).message).toContain('mode')
   })
 })
+
+describe('GET /router/session-output（v1.5 会话输出尾部）', () => {
+  it('带 sessionId 取尾部，解析 { text, source }', async () => {
+    const seen: string[] = []
+    const api = createRouterApi({
+      fetch: jsonFetch((input) => {
+        seen.push(input)
+        return jsonResponse(200, { text: '最后一段输出', source: 'live' })
+      }),
+    })
+    await expect(api.getSessionOutput('w-1')).resolves.toEqual({ text: '最后一段输出', source: 'live' })
+    expect(seen).toEqual(['/router/session-output?sessionId=w-1'])
+  })
+
+  it('响应缺 text → 协议错误（RouterApiError）', async () => {
+    const api = createRouterApi({ fetch: jsonFetch(() => jsonResponse(200, { source: 'live' })) })
+    const error = await api.getSessionOutput('w-1').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(RouterApiError)
+    expect((error as RouterApiError).message).toContain('session-output')
+  })
+})

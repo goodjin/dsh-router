@@ -156,6 +156,9 @@ async function controlHarness(opts: GuardCoreOptions & { interrupt?: ReturnType<
       return { sessionId: 'r' }
     },
     async answerQuestion() {},
+    async sessionOutput() {
+      return { text: '', source: 'none' as const }
+    },
     async closeTab() {
       return true
     },
@@ -276,7 +279,10 @@ describe('POST /router/tasks/control（B4）', () => {
         return { sessionId: 'r' }
       },
       async answerQuestion() {},
-      async closeTab() {
+      async sessionOutput() {
+      return { text: '', source: 'none' as const }
+    },
+    async closeTab() {
         return true
       },
       async listWorkerTypes() {

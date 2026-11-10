@@ -115,6 +115,35 @@ const CLOSE_STYLE: CSSProperties = {
   opacity: 0.6,
 }
 
+/** 动作错误提示（v1.5：失败不再无声）。 */
+const ERROR_STYLE: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  flex: '0 0 auto',
+  maxWidth: '30vw',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  padding: '2px 6px',
+  borderRadius: 6,
+  border: '1px solid var(--dsh-color-danger, #d93025)',
+  background: 'color-mix(in srgb, var(--dsh-color-danger, #d93025) 10%, transparent)',
+  color: 'inherit',
+  fontSize: 12,
+  lineHeight: '18px',
+}
+
+const ERROR_CLOSE_STYLE: CSSProperties = {
+  border: 'none',
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+  fontSize: 12,
+  lineHeight: '14px',
+  padding: 0,
+}
+
 function statusDot(entry: RouterTabEntry): ReactNode {
   if (entry.kind !== 'worker' || !entry.running) return null
   return (
@@ -142,6 +171,8 @@ export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
   const activeIndex = activeTabIndex(tabs, state.currentSessionId)
   // root slot 跨会话存活：普通会话或无当前会话时整条隐藏，不占头部空间。
   if (!workbenchTabsVisible(state.routerState, state.currentSessionId) || tabs.length === 0) return null
+  // v1.5：动作错误可见——之前失败完全无声（关不掉标签也不提示）。
+  const error = state.actionError ?? state.lastError
   return (
     <nav data-router-workbench-tabs style={ROW_STYLE} aria-label="Router 会话标签">
       <style>{HEADER_STYLE}</style>
@@ -163,6 +194,19 @@ export function WorkbenchTabs(props: WorkbenchTabsProps): ReactNode {
           />
         )
       })}
+      {error !== null && error !== undefined && error !== '' ? (
+        <span data-router-tab-error style={ERROR_STYLE} role="alert">
+          {error}
+          <button
+            type="button"
+            aria-label="关闭提示"
+            onClick={() => { props.store.clearActionError() }}
+            style={ERROR_CLOSE_STYLE}
+          >
+            ×
+          </button>
+        </span>
+      ) : null}
     </nav>
   )
 }

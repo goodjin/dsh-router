@@ -613,6 +613,9 @@ function fakeDeps(state: Partial<RouterRoutesDeps> = {}): RouterRoutesDeps & { c
     async answerQuestion(questionId, answers) {
       calls.push(`answer:${questionId}:${JSON.stringify(answers)}`)
     },
+    async sessionOutput() {
+      return { text: '', source: 'none' as const }
+    },
     async closeTab(workspaceId, sessionId) {
       calls.push(`close:${workspaceId}:${sessionId}`)
       return true
@@ -678,6 +681,7 @@ describe('HTTP 路由（exact + admit）', () => {
       '/router/router-session',
       '/router/answer',
       '/router/tabs/close',
+      '/router/session-output',
       '/router/worker-types',
       '/router/worker-types/update',
       '/router/worker-types/enabled',

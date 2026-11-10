@@ -33,6 +33,11 @@ export interface TaskCard {
   parentId?: string
   /** 派发来源，用于浮窗沿任务树隔离到所属 Router。 */
   sessionRunning?: boolean
+  /**
+   * 完成摘要（任务已结时才有；v1.5 浮窗预览用它替代「读整条会话」）。
+   * 未结任务没有结果摘要，键缺席（不冒充空串）。
+   */
+  summary?: string
   dispatchedBySessionId?: string
   docVersion: number
 }
@@ -84,6 +89,24 @@ export interface WorkerTabInfo {
   taskId?: string
   taskStatus?: TaskStatus
   running: boolean
+  /**
+   * 标签行所属工作区（v1.5：关标签按**标签自己的**工作区发请求）。
+   * 标签行是派发时按「任务落到哪个项目」写的，与当前会话所在工作区可能不同；
+   * 缺省时客户端退回当前会话的工作区（旧服务端兼容）。
+   */
+  workspaceId?: string
+}
+
+/**
+ * GET /router/session-output 的响应：某会话最新一段助手输出（宿主侧截取，有界）。
+ *
+ * 浏览器侧不再留驻整条会话事件流（一次几 MB），改为按需取这一小段。
+ */
+export interface SessionOutputValue {
+  /** 尾部文字（最多一千二百字）；没有内容时为空串。 */
+  text: string
+  /** 取数来源：live = 运行中会话的实时尾部；ledger = 账本里的结果摘要；none = 没有内容。 */
+  source: 'live' | 'ledger' | 'none'
 }
 
 /** worker 模板（v1 遗留形状；派发描述与 v1 客户端 templates 字段继续用它）。 */

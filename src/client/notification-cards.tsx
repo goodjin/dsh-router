@@ -7,7 +7,7 @@
 import { useSyncExternalStore } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { SessionPreview, type PreviewSessions } from './session-preview.tsx'
+import { SessionOutput } from './session-output.tsx'
 import type { RouterApi } from './api.ts'
 import {
   actionAvailable,
@@ -34,7 +34,6 @@ import { LightTooltip, useHoverDarken } from './ui-kit.tsx'
 
 /** 组件的业务输入（registration 的 inject 工厂给的 face；组件绝不收 ctx）。 */
 export interface NotificationOverlayFace {
-  sessions?: PreviewSessions
   store: WorkbenchStore
   api: RouterApi
   prefs: ClientPrefsStore
@@ -117,6 +116,27 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
     if (state !== null) commitBoard(syncedNotifications(boardRef.current, state.notifications ?? []))
   }, [state, commitBoard])
 
+  // v1.5：浮窗**延后挂载**——先把会话界面渲染出来，等浏览器空闲再挂浮窗。
+  // 打开 Router 会话那一刻不再跟着灌会话数据（界面先可用，内容随后到）。
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    const run = (): void => { if (!cancelled) setMounted(true) }
+    const scheduler = globalThis as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number
+      cancelIdleCallback?: (handle: number) => void
+    }
+    if (typeof scheduler.requestIdleCallback === 'function') {
+      const handle = scheduler.requestIdleCallback(run, { timeout: 1000 })
+      return () => {
+        cancelled = true
+        scheduler.cancelIdleCallback?.(handle)
+      }
+    }
+    const timer = setTimeout(run, 0)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [])
+
   const runAction = useCallback((cardId: string, action: NotificationActionKind): void => {
     const current = boardRef.current
     const entry = current.cards.find((item) => item.card.cardId === cardId)
@@ -163,6 +183,8 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
   // 变化会触发 "Rendered more hooks" 崩溃。仅 Router 主会话显示其归属队列。
   if (scope === undefined) return null
   if (state === null) return null
+  // 延后挂载：界面先出来，浮窗随后（v1.5）。
+  if (!mounted) return null
 
   const ownQuestions = prefs.overlayEnabled ? workbench.board.cards.filter((entry) =>
     taskRouterSession(state, entry.card.taskId) === scope || entry.card.sessionId === scope) : []
@@ -208,7 +230,13 @@ export function NotificationOverlay(props: NotificationOverlayProps): ReactNode 
             <span data-router-session-status={status.kind} aria-hidden>{status.icon}</span> {status.label}
           </div>
           <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column', justifyContent: 'flex-start' }}>
-            <SessionPreview sessionId={row.sessionId} sessions={props.sessions} />
+            <SessionOutput
+              api={props.api}
+              sessionId={row.sessionId}
+              running={row.tasks.some((task) => task.status === 'running' && task.sessionRunning === true)}
+              summary={row.tasks.map((task) => task.summary).find((text) => text !== undefined)}
+              refreshKey={state}
+            />
             {notifications.filter((entry) => entry.error).map((entry) => <div key={entry.card.cardId} role="alert">{entry.error}</div>)}
           </div>
           <div data-session-button-row style={{ display: 'flex', flexShrink: 0, gap: 6, overflowX: 'auto', whiteSpace: 'nowrap' }}>

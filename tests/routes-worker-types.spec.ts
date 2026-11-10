@@ -234,6 +234,9 @@ function fakeDeps(factories?: {
       return { sessionId: 'r' }
     },
     async answerQuestion() {},
+    async sessionOutput() {
+      return { text: '', source: 'none' as const }
+    },
     async closeTab() {
       return true
     },
@@ -295,6 +298,7 @@ describe('worker 类型路由（C3）', () => {
       '/router/router-session',
       '/router/answer',
       '/router/tabs/close',
+      '/router/session-output',
       '/router/worker-types',
       '/router/worker-types/update',
       '/router/worker-types/enabled',

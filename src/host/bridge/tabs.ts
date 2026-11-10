@@ -160,6 +160,23 @@ export class UiStateStore {
     return removed
   }
 
+  /**
+   * 按会话 id 关标签（不看工作区）。
+   *
+   * 为什么需要：标签行的工作区是「任务派发落点」，与用户当前所在会话的工作区
+   * 可能不是同一个；双键对不上时旧路径会**静默不删**（界面表现为「灰一下又
+   * 回来」）。会话 id 全局唯一，所以这里按 id 移除该会话的全部标签行。
+   */
+  async removeTabBySession(sessionId: string): Promise<boolean> {
+    let removed = false
+    await this.commit(() => {
+      const before = this.tabRows.length
+      this.tabRows = this.tabRows.filter((row) => row.sessionId !== sessionId)
+      removed = this.tabRows.length < before
+    })
+    return removed
+  }
+
   /** 某 workspace 的标签序（加入序）。 */
   tabs(workspaceId: string): TabRow[] {
     return this.tabRows.filter((row) => row.workspaceId === workspaceId)

@@ -50,6 +50,19 @@ describe('UiStateStore', () => {
     expect(await ui.removeTab('ws-1', 'session-ghost')).toBe(false)
   })
 
+  it('按会话 id 关标签（不看工作区）：工作区对不上也能关掉', async () => {
+    const { ui } = store()
+    await ui.load()
+    await ui.addTab('ws-1', 'session-1')
+    await ui.addTab('ws-2', 'session-2')
+    // 双键对不上（客户端传的是当前会话的工作区）：按 id 兜底仍能关掉。
+    expect(await ui.removeTab('ws-1', 'session-2')).toBe(false)
+    expect(await ui.removeTabBySession('session-2')).toBe(true)
+    expect(ui.tabs('ws-2')).toHaveLength(0)
+    expect(ui.tabs('ws-1')).toHaveLength(1)
+    expect(await ui.removeTabBySession('session-ghost')).toBe(false)
+  })
+
   it('重复加同一标签不产生第二条', async () => {
     const { ui } = store()
     await ui.load()

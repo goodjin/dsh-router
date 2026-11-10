@@ -2056,6 +2056,22 @@ var UiStateStore = class {
 		});
 		return removed;
 	}
+	/**
+	* 按会话 id 关标签（不看工作区）。
+	*
+	* 为什么需要：标签行的工作区是「任务派发落点」，与用户当前所在会话的工作区
+	* 可能不是同一个；双键对不上时旧路径会**静默不删**（界面表现为「灰一下又
+	* 回来」）。会话 id 全局唯一，所以这里按 id 移除该会话的全部标签行。
+	*/
+	async removeTabBySession(sessionId) {
+		let removed = false;
+		await this.commit(() => {
+			const before = this.tabRows.length;
+			this.tabRows = this.tabRows.filter((row) => row.sessionId !== sessionId);
+			removed = this.tabRows.length < before;
+		});
+		return removed;
+	}
 	/** 某 workspace 的标签序（加入序）。 */
 	tabs(workspaceId) {
 		return this.tabRows.filter((row) => row.workspaceId === workspaceId);
@@ -5687,6 +5703,8 @@ const ROUTER_STATE_PATH = "/router/state";
 const ROUTER_SESSION_PATH = "/router/router-session";
 const ROUTER_ANSWER_PATH = "/router/answer";
 const ROUTER_TABS_CLOSE_PATH = "/router/tabs/close";
+/** v1.5：某会话最新一段助手输出（浮窗预览用；有界，不把会话流交给浏览器）。 */
+const ROUTER_SESSION_OUTPUT_PATH = "/router/session-output";
 /** 入口去重指令的消费回执（v1.1 Task C4）。 */
 /** Worker 类型管理（v1.1 Task C3，规格 §5/§6）：同路径 GET 列表 / POST 新建 / DELETE 删。 */
 const WORKER_TYPES_PATH = "/router/worker-types";
@@ -5854,10 +5872,19 @@ function registerRouterRoutes(ctx, deps) {
 	handle(ROUTER_TABS_CLOSE_PATH, ["POST"], async (request) => {
 		const body = await readJsonBody(request);
 		if (typeof body.workspaceId !== "string" || typeof body.sessionId !== "string") throw new LedgerError("bad-request", "workspaceId 与 sessionId 必填");
-		await deps.closeTab(body.workspaceId, body.sessionId);
+		if (!await deps.closeTab(body.workspaceId, body.sessionId)) throw new LedgerError("card-not-found", `标签不存在或已关闭: ${body.sessionId}`);
 		return {
 			status: 200,
 			body: JSON.stringify({ ok: true })
+		};
+	});
+	handle(ROUTER_SESSION_OUTPUT_PATH, ["GET"], async (request) => {
+		const sessionId = new URL(request.url ?? "/", "http://localhost").searchParams.get("sessionId") ?? "";
+		if (sessionId === "") throw new LedgerError("bad-request", "sessionId 查询参数必填");
+		const output = await deps.sessionOutput(sessionId);
+		return {
+			status: 200,
+			body: JSON.stringify(output)
 		};
 	});
 	handle(WORKER_TYPES_PATH, [
@@ -6179,6 +6206,75 @@ function renderLedgerSnapshot(tasks, options) {
 	});
 	sections.push(`${header}\n\n${cards.join("\n\n")}`);
 	return sections.join("\n\n");
+}
+
+//#endregion
+//#region src/host/session/tail.ts
+/**
+* 会话输出尾部提取（宿主侧）。
+*
+* 为什么搬到宿主：浏览器侧原先把**整条**会话事件流 retain 进内存（一次几 MB），
+* 只为了在浮窗里显示几百字的预览——打开 Router 会话那一刻的卡顿就来自这里。
+* 改成宿主按需读尾部、只回一段有界文字，浏览器不再留驻会话流。
+*
+* 取数只用 surface 事件（宿主会话观察租约给的就是它）：从尾部往前找最后一条
+* 带文字的助手事件（assistant/message 或 assistant/attempt），取其文字并保留
+* **尾部**（最新的一段）；用户输入、推理、工具参数一律不取。
+*/
+/** 回给客户端的尾部上限（字符）。超长时保留尾部（最新的一段）。 */
+const SESSION_TAIL_MAX_CHARS = 1200;
+function asRecord(value) {
+	return typeof value === "object" && value !== null ? value : {};
+}
+/** 事件类型名（非字符串按空处理）。 */
+function eventTypeOf(event) {
+	const type = asRecord(event).type;
+	return typeof type === "string" ? type : "";
+}
+/**
+* 一条助手事件里的文字。
+*
+* - assistant/message：data.message.content 是字符串或文本块数组；
+* - assistant/attempt：data.stream 里的 text-chunks / text-delta。
+*/
+function assistantTextOf(event) {
+	const data = asRecord(asRecord(event).data);
+	const content = asRecord(data.message).content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) return content.map((block) => {
+		const record = asRecord(block);
+		return record.type === "text" && typeof record.text === "string" ? record.text : "";
+	}).filter((text) => text !== "").join(" ");
+	const stream = data.stream;
+	if (Array.isArray(stream)) {
+		const parts = [];
+		for (const entry of stream) {
+			const record = asRecord(entry);
+			if (record.type === "text-chunks" && Array.isArray(record.texts)) {
+				for (const text of record.texts) if (typeof text === "string") parts.push(text);
+			} else if (record.type === "chunk") {
+				const chunk = asRecord(record.chunk);
+				if (chunk.type === "text-delta" && typeof chunk.text === "string") parts.push(chunk.text);
+			}
+		}
+		return parts.join("");
+	}
+	return "";
+}
+/**
+* 最后一段助手输出（尾部有界）；没有助手文字时返回空串。
+*
+* 只认助手事件：用户输入、工具调用、推理都不作为预览内容。
+*/
+function extractLatestOutput(events) {
+	for (let index = events.length - 1; index >= 0; index -= 1) {
+		const type = eventTypeOf(events[index]);
+		if (type !== "assistant/message" && type !== "assistant/attempt") continue;
+		const text = assistantTextOf(events[index]).trim();
+		if (text === "") continue;
+		return text.length > SESSION_TAIL_MAX_CHARS ? text.slice(-SESSION_TAIL_MAX_CHARS) : text;
+	}
+	return "";
 }
 
 //#endregion
@@ -6516,6 +6612,7 @@ function toCard(record, waiting) {
 		docVersion: record.docVersion
 	};
 	if (record.progress !== void 0) card.progress = record.progress;
+	if (record.result?.summary !== void 0) card.summary = record.result.summary;
 	if (record.sessionId !== void 0) card.sessionId = record.sessionId;
 	if (record.parentId !== void 0) card.parentId = record.parentId;
 	if (record.dispatchedBySessionId !== void 0) card.dispatchedBySessionId = record.dispatchedBySessionId;
@@ -7103,7 +7200,8 @@ function createRouterCore(deps) {
 							title: taskRecord !== void 0 ? `${taskRecord.id} ${taskRecord.title}` : row.sessionId,
 							taskId: taskRecord?.id ?? row.taskId,
 							taskStatus: taskRecord?.status,
-							running: deps.isRunning(row.sessionId)
+							running: deps.isRunning(row.sessionId),
+							workspaceId: row.workspaceId
 						};
 					}),
 					templates: enabledTemplates(),
@@ -7144,7 +7242,50 @@ function createRouterCore(deps) {
 				await relay.answerQuestion(questionId, answers);
 			},
 			async closeTab(workspaceId, sessionId) {
-				return ui.removeTab(workspaceId, sessionId);
+				if (await ui.removeTab(workspaceId, sessionId)) return true;
+				return ui.removeTabBySession(sessionId);
+			},
+			async sessionOutput(sessionId) {
+				const record = (await ledger.listAll()).find((entry) => entry.sessionId === sessionId);
+				if (record !== void 0 && isTerminal(record.status)) {
+					const summary = record.result?.summary;
+					return summary !== void 0 && summary !== "" ? {
+						text: summary,
+						source: "ledger"
+					} : {
+						text: "",
+						source: "none"
+					};
+				}
+				if (!deps.isRunning(sessionId)) return {
+					text: "",
+					source: "none"
+				};
+				const observe = deps.observeSession;
+				if (observe === void 0) return {
+					text: "",
+					source: "none"
+				};
+				let observation;
+				try {
+					observation = await observe(sessionId);
+					const text = extractLatestOutput(observation.events ?? []);
+					return text === "" ? {
+						text: "",
+						source: "none"
+					} : {
+						text,
+						source: "live"
+					};
+				} catch (error) {
+					deps.logger?.warn(`会话输出尾部读取失败（降级为空）: ${error instanceof Error ? error.message : String(error)}`);
+					return {
+						text: "",
+						source: "none"
+					};
+				} finally {
+					observation?.[Symbol.dispose]?.();
+				}
 			},
 			pendingQuestions() {
 				return relay.pendingCards();
@@ -10222,6 +10363,15 @@ function apply(ctx, rawConfig) {
 		routerDefaults: { get: () => defaultsStore.get() },
 		newId: () => randomUUID(),
 		isRunning: (sessionId) => bridge.isRunning(sessionId),
+		observeSession: async (sessionId) => {
+			const observation = await ctx.sessionQuery.observeSession(sessionId);
+			return {
+				events: observation.events ?? [],
+				[Symbol.dispose]: () => {
+					releaseObservation(observation);
+				}
+			};
+		},
 		maxActiveCards: config.maxActiveCards,
 		tasksDir: config.tasksDir,
 		...memoryFace === void 0 ? {} : { memory: memoryFace },
@@ -10373,6 +10523,7 @@ function apply(ctx, rawConfig) {
 				fireAndForget("答问后快照刷新", () => assembled.refreshSnapshot());
 			},
 			closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
+			sessionOutput: (sessionId) => assembled.workbench.sessionOutput(sessionId),
 			listWorkerTypes: async () => ({ types: await typeStore.list() }),
 			createWorkerType: async (input) => {
 				const type = await typeStore.create(input);

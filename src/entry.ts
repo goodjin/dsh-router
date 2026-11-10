@@ -785,6 +785,18 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     routerDefaults: { get: () => defaultsStore.get() },
     newId: () => randomUUID(),
     isRunning: (sessionId) => bridge.isRunning(sessionId),
+    // v1.5：浮窗预览的尾部取数源——宿主会话观察租约（读完即释放，不留租约）。
+    observeSession: async (sessionId) => {
+      const observation = await ctx.sessionQuery.observeSession(sessionId) as {
+        events?: unknown[]
+        dispose?: () => void
+        [Symbol.dispose]?: () => void
+      }
+      return {
+        events: (observation.events ?? []) as readonly unknown[],
+        [Symbol.dispose]: () => { releaseObservation(observation as never) },
+      }
+    },
     maxActiveCards: config.maxActiveCards,
     tasksDir: config.tasksDir,
     // 记忆停用时整个面缺席：search_history 如实回「记忆服务未配置」、完成不写记忆。
@@ -983,6 +995,7 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         fireAndForget('答问后快照刷新', () => assembled.refreshSnapshot())
       },
       closeTab: (workspaceId, sessionId) => assembled.workbench.closeTab(workspaceId, sessionId),
+      sessionOutput: (sessionId) => assembled.workbench.sessionOutput(sessionId),
       listWorkerTypes: async () => ({ types: await typeStore.list() }),
       createWorkerType: async (input) => {
         const type = await typeStore.create(input)

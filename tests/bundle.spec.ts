@@ -290,7 +290,7 @@ describe('lib/client.js 是页面能装的产物', () => {
     const loaded = row.factory(require)
     expect(loaded.name, '产物必须导出与包名一致的 name').toBe('@goodjin2/dsh-router')
     expect(Array.isArray(loaded.inject), '产物必须导出 inject（页面真实服务名）').toBe(true)
-    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces', 'sessions'])
+    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
     expect(typeof loaded.apply, '产物必须导出 apply').toBe('function')
     // 工厂期只允许 require 外置清单（react 系）；出现别的说明打包把页面模块打了进来。
     for (const specifier of require.required) {

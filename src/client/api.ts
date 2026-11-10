@@ -16,6 +16,7 @@ import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
   RouterState,
+  SessionOutputValue,
   ScopedPauseReport,
   SpawnModeResponse,
   TypesCreateRequest,
@@ -69,6 +70,11 @@ export interface RouterApi {
   /** 已答 409 会以 RouterApiError(status=409) 抛出——调用方视为已完成。 */
   postAnswer(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
+  /**
+   * 某会话最新一段助手输出（v1.5 浮窗预览）：宿主侧截取的有界文字。
+   * 浏览器不再 retain 整条会话事件流（一次几 MB），只按需取这一小段。
+   */
+  getSessionOutput(sessionId: string): Promise<SessionOutputValue>
   /** 消费去重指令的回执（v1.1 Task C4）：幂等，失败抛 RouterApiError。 */
   /* ── worker 类型管理（api 只增函数；类型无编辑、Router 默认区已移除，2026-11-10） ── */
   /** 全量类型记录（含禁用与 builtin），设置管理栏目消费。 */
@@ -90,6 +96,8 @@ export const ROUTER_STATE_PATH = '/router/state'
 export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
+/** v1.5：会话输出尾部（浮窗预览）。 */
+export const ROUTER_SESSION_OUTPUT_PATH = '/router/session-output'
 /** v1.1 Task C3：worker 类型 / Router 默认值（与宿主 routes 一侧逐字对齐）。 */
 export const WORKER_TYPES_PATH = '/router/worker-types'
 export const WORKER_TYPES_UPDATE_PATH = '/router/worker-types/update'
@@ -209,6 +217,22 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
 
     async closeWorkerTab(workspaceId: string, sessionId: string): Promise<void> {
       await postJson(ROUTER_TABS_CLOSE_PATH, { workspaceId, sessionId })
+    },
+
+    async getSessionOutput(sessionId: string): Promise<SessionOutputValue> {
+      const body = await request(
+        `${ROUTER_SESSION_OUTPUT_PATH}?sessionId=${encodeURIComponent(sessionId)}`,
+        { headers: { accept: 'application/json' } },
+      )
+      const record = body as { text?: unknown; source?: unknown } | null
+      if (record === null || typeof record !== 'object' || typeof record.text !== 'string') {
+        throw new RouterApiError('router: session-output response missing text')
+      }
+      const source = record.source
+      return {
+        text: record.text,
+        source: source === 'live' || source === 'ledger' ? source : 'none',
+      }
     },
 
 
