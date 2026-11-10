@@ -74,6 +74,10 @@ function patchRows(): Record<string, unknown>[] {
 export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 宿主工具行：双宿主必填 */
   'worker-tool-fs-search': { sampleOverCapGlobResults: false },
+  /* 执行支撑三件（2026-11-10 工具面补齐；web/todo 带配置、jobs 裸行） */
+  'worker-tool-web': { fetch: true, searchTimeoutMs: 60000 },
+  'worker-tool-todo': { allowParallelInProgress: true },
+  'worker-tool-jobs': {},
   /* 本包自己的行 Config 必填 */
   'supervisor-tools': { role: 'supervisor' },
   'worker-tools': { role: 'worker' },

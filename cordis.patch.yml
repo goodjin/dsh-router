@@ -176,6 +176,20 @@
             config:
               # 宿主必填（无默认；双版本 standard/ptc 均传 false），缺了整树回滚
               sampleOverCapGlobResults: false
+          # 执行支撑三件（2026-11-10 工具面补齐，与动态超集同配置）：没有 web，
+          # worker 会把「需要上网」的任务如实报成「没有合适的工具」。配置抄
+          # superpowers 双宿主验证过的挂法。
+          - id: worker-tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: worker-tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: worker-tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
           - id: worker-compaction
             name: cordis:group
             group: true

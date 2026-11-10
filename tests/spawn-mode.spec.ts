@@ -112,6 +112,9 @@ describe('统一超集组合（cache-priority 模式）', () => {
       'tool-bash',
       'tool-fs',
       'tool-fs-search',
+      'tool-web',
+      'tool-todo',
+      'tool-jobs',
       'delegation',
       'router-context',
       'compaction',
@@ -125,7 +128,11 @@ describe('统一超集组合（cache-priority 模式）', () => {
     expect(rows[3]).toMatchObject({ name: '@deepseek-ai/dsh-tool-bash', disabled: process.platform === 'win32' })
     expect(rows[4]).toMatchObject({ name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } })
     expect(rows[5]).toMatchObject({ name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } })
-    const delegation = rows[6]!
+    // 执行支撑三件（2026-11-10 工具面补齐）
+    expect(rows[6]).toMatchObject({ name: '@deepseek-ai/dsh-tool-web', config: { fetch: true, searchTimeoutMs: 60_000 } })
+    expect(rows[7]).toMatchObject({ name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } })
+    expect(rows[8]).toMatchObject({ name: '@deepseek-ai/dsh-tool-jobs' })
+    const delegation = rows[9]!
     expect(delegation).toMatchObject({ name: 'cordis:group', group: true, isolate: { workflowEngine: true } })
     const delegationChildren = delegation.config as RowSpec[]
     expect(delegationChildren.map((row) => row.id)).toEqual(['tool-subagent-control', 'tool-subagent'])
@@ -133,8 +140,8 @@ describe('统一超集组合（cache-priority 模式）', () => {
       name: '@deepseek-ai/dsh-tool-subagent',
       config: { provider: 'spawn', toolName: 'subagent', maxDepth: 2 },
     })
-    expect(rows[7]).toMatchObject({ name: '@goodjin2/dsh-router/context' })
-    const compaction = rows[8]
+    expect(rows[10]).toMatchObject({ name: '@goodjin2/dsh-router/context' })
+    const compaction = rows[11]
     expect(compaction).toMatchObject({ name: 'cordis:group', group: true, isolate: { compaction: true, toolResultPruner: true } })
   })
 
@@ -187,7 +194,7 @@ describe('minimal-face（缺省）：行为与现状完全一致', () => {
     const def = buildWorkerPresetDefinition(sampleType())
     expect(def.plugins[0]).toMatchObject({ name: '@deepseek-ai/dsh-persona', config: { prefix: '你是文档写手。\n', complete: true } })
     expect(def.plugins.some((row) => row.id === 'delegation')).toBe(false)
-    expect(def.plugins.map((row) => row.id)).toEqual(['persona', 'tools', 'ask-user', 'tool-bash', 'tool-fs', 'tool-fs-search', 'compaction'])
+    expect(def.plugins.map((row) => row.id)).toEqual(['persona', 'tools', 'ask-user', 'tool-bash', 'tool-fs', 'tool-fs-search', 'tool-web', 'tool-todo', 'tool-jobs', 'compaction'])
   })
 
   it('builder 不带 mode：Router = 现行 prompt-section 定义', () => {

@@ -148,6 +148,12 @@ export function buildSupersetPlugins(): RowSpec[] {
     { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
     // 宿主必填（无默认；v1 缺它整树回滚的锚点键）
     { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+    // 执行支撑三件（2026-11-10 工具面补齐）：web 上网查资料、todo 待办、jobs
+    // 后台任务——配置抄 superpowers 双宿主验证过的挂法；没有它们 worker 会把
+    // 「需要上网」的任务如实报成「没有合适的工具」。
+    { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: true, searchTimeoutMs: 60_000 } },
+    { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+    { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs' },
     delegationGroup(),
     { id: 'router-context', name: '@goodjin2/dsh-router/context' },
   ]
@@ -182,6 +188,10 @@ export function buildWorkerPresetDefinition(t: WorkerTypeRecord, options: BuildW
         { id: 'tool-fs', name: '@deepseek-ai/dsh-tool-fs', config: { applyPatch: false } },
         // 宿主必填（无默认；v1 缺它整树回滚的锚点键）
         { id: 'tool-fs-search', name: '@deepseek-ai/dsh-tool-fs-search', config: { sampleOverCapGlobResults: false } },
+        // 执行支撑三件（2026-11-10 工具面补齐，与超集同配置同语义）
+        { id: 'tool-web', name: '@deepseek-ai/dsh-tool-web', config: { fetch: true, searchTimeoutMs: 60_000 } },
+        { id: 'tool-todo', name: '@deepseek-ai/dsh-tool-todo', config: { allowParallelInProgress: true } },
+        { id: 'tool-jobs', name: '@deepseek-ai/dsh-tool-jobs' },
       )
     } else {
       plugins.push(delegationGroup())

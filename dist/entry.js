@@ -1302,14 +1302,18 @@ const ROLE_LABEL = {
 /** ask_user 是宿主原生工具（不在本插件白名单内），三身份都可用。 */
 const ASK_USER_LINE = "- ask_user：向用户提问。只问真正必要的问题；问题直达用户界面浮窗，回答直接回到你的工具结果里。";
 /**
-* 宿主执行工具行（评审 F3）：统一超集给执行身份挂了 bash/fs/fs-search——清单里
-* 必须逐一列名，否则「禁用提醒」会挡住正常执行。router（编排件）按设计不列：
-* 它的产出是任务书与汇报，不是命令与文件（规格 §6 承接的误用风险）。
+* 宿主执行工具行（评审 F3 + 2026-11-10 工具面补齐）：统一超集与最小面 worker
+* 都挂 bash/fs/fs-search/web/todo/jobs——清单里必须逐一列名，否则「禁用提醒」
+* 会挡住正常执行。router（编排件）按设计不列：它的产出是任务书与汇报，不是
+* 命令与文件（规格 §6 承接的误用风险）。
 */
 const EXECUTION_TOOL_LINES = [
 	"- bash：执行 shell 命令（跑测试、构建、查环境事实）。",
 	"- fs：读写文件（读代码与材料、写交付物）。",
-	"- fs-search：按文件名或内容搜索（找代码、找配置、找输入材料）。"
+	"- fs-search：按文件名或内容搜索（找代码、找配置、找输入材料）。",
+	"- web：上网查资料（搜索、抓取网页链接内容）。",
+	"- todo：维护待办清单（多步任务自己列步骤、自己勾）。",
+	"- jobs：把长命令放后台跑、稍后收结果。"
 ];
 /** 技能挂载提示（评审 F6）：技能行按类型挂载，卡面如实声明「以会话实际在场为准」。 */
 const SKILLS_NOTE = "- 若本类型配置了技能，会话里另有技能加载与技能调用工具，按会话实际挂载为准；没有挂载就如实用 report_blocker 说明。";
@@ -7815,6 +7819,23 @@ function buildSupersetPlugins() {
 			name: "@deepseek-ai/dsh-tool-fs-search",
 			config: { sampleOverCapGlobResults: false }
 		},
+		{
+			id: "tool-web",
+			name: "@deepseek-ai/dsh-tool-web",
+			config: {
+				fetch: true,
+				searchTimeoutMs: 6e4
+			}
+		},
+		{
+			id: "tool-todo",
+			name: "@deepseek-ai/dsh-tool-todo",
+			config: { allowParallelInProgress: true }
+		},
+		{
+			id: "tool-jobs",
+			name: "@deepseek-ai/dsh-tool-jobs"
+		},
 		delegationGroup(),
 		{
 			id: "router-context",
@@ -7862,6 +7883,20 @@ function buildWorkerPresetDefinition(t, options = {}) {
 		id: "tool-fs-search",
 		name: "@deepseek-ai/dsh-tool-fs-search",
 		config: { sampleOverCapGlobResults: false }
+	}, {
+		id: "tool-web",
+		name: "@deepseek-ai/dsh-tool-web",
+		config: {
+			fetch: true,
+			searchTimeoutMs: 6e4
+		}
+	}, {
+		id: "tool-todo",
+		name: "@deepseek-ai/dsh-tool-todo",
+		config: { allowParallelInProgress: true }
+	}, {
+		id: "tool-jobs",
+		name: "@deepseek-ai/dsh-tool-jobs"
 	});
 	else plugins.push(delegationGroup());
 	if (t.skills.length > 0 && options.customSkillDirs !== void 0 && options.customSkillDirs.length > 0) plugins.push(...skillRows(options.customSkillDirs));
