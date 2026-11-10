@@ -61,6 +61,21 @@ describe('宿主侧入口 src/entry.ts', () => {
 describe('宿主侧入口 src/entry.ts：收编走受限索引（v1.4 性能修复接线）', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/entry.ts', import.meta.url)), 'utf8')
 
+  /**
+   * 2026-11-10 桌面版崩溃回归：宿主把未捕获的 promise rejection 当致命错误
+   * （fatal load failure → exit(1) → 桌面版记为崩溃）。插件里凡是「发射后
+   * 不管」的异步调用都必须走 fireAndForget，否则撞上插件卸载竞态窗口就会把
+   * 整个桌面版带走。
+   */
+  it('发射后不管的异步调用统一走 fireAndForget（不留裸 void 调用）', () => {
+    expect(source).toMatch(/createFireAndForget\(/)
+    expect(source).toMatch(/fireAndForget\('快照项目列表补刷'/)
+    expect(source, '60 秒补刷不得再裸调 refreshSnapshot').not.toMatch(/void assembled\.refreshSnapshot\(\)/)
+    expect(source, '预设巡检不得再裸调 ensureRouterPresent').not.toMatch(/void engine\.ensureRouterPresent\(/)
+    expect(source, '判定器同步不得再裸调').not.toMatch(/void adjudicator\.syncWatched\(\)/)
+    expect(source, '缓存观测不得再裸调').not.toMatch(/void cacheObserver\.onSessionEvent\(/)
+  })
+
   it('构造 SessionHeaderIndex（root/preset/持久化/成员面）并挂生命周期与 live 事件', () => {
     expect(source).toMatch(/new SessionHeaderIndex\(\{/)
     expect(source).toMatch(/routerPreset: config\.routerPreset/)

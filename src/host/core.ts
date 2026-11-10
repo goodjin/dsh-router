@@ -381,6 +381,24 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     return record
   }
 
+  /**
+   * 项目列表（registry 面）。
+   *
+   * registry 缺席/失效时**无此节**（cwd 模式照常可用）——这本来就是行为定义。
+   * 关键是要兜住「插件被卸载/重载的竞态窗口」：此时读必需的 registry 服务会
+   * 抛 `cannot get required service "workspaceRegistry" in inactive context`，
+   * 抛出去会一路逃到进程级变成未捕获 rejection，宿主按 fatal 处理、整个桌面
+   * 版退出（2026-11-10 现场）。所以这里就地降级为空列表。
+   */
+  const listProjects = (): { id: string; path?: string }[] => {
+    try {
+      return hosts.workspaceRegistry.list().map((workspace) => ({ id: workspace.id, path: workspace.path }))
+    } catch (error) {
+      deps.logger?.warn(`项目列表刷新跳过（registry 面不可用）: ${error instanceof Error ? error.message : String(error)}`)
+      return []
+    }
+  }
+
   const refreshSnapshot = async (): Promise<void> => {
     const records = await ledger.listAll()
     snapshotCache = renderLedgerSnapshot(records, {
@@ -388,7 +406,7 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       openQuestions: await waitingCounts(),
       // 项目列表（2026-11-09 行为定义）：Router 判断任务所属项目/模块的数据源；
       // registry 面缺席时无此节（cwd 模式照常可用）。
-      projects: hosts.workspaceRegistry.list().map((workspace) => ({ id: workspace.id, path: workspace.path })),
+      projects: listProjects(),
     })
   }
 
