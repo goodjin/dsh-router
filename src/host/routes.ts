@@ -21,6 +21,7 @@ import type {
   AskUserQuestionAnswerItem,
   RouterDefaults,
   RouterState,
+  SessionOutputValue,
   SessionPromptResponse,
   SpawnModeResponse,
   TypesCreateRequest,
@@ -36,6 +37,8 @@ export const ROUTER_STATE_PATH = '/router/state'
 export const ROUTER_SESSION_PATH = '/router/router-session'
 export const ROUTER_ANSWER_PATH = '/router/answer'
 export const ROUTER_TABS_CLOSE_PATH = '/router/tabs/close'
+/** v1.5：某会话最新一段助手输出（浮窗预览用；有界，不把会话流交给浏览器）。 */
+export const ROUTER_SESSION_OUTPUT_PATH = '/router/session-output'
 /** 入口去重指令的消费回执（v1.1 Task C4）。 */
 /** Worker 类型管理（v1.1 Task C3，规格 §5/§6）：同路径 GET 列表 / POST 新建 / DELETE 删。 */
 export const WORKER_TYPES_PATH = '/router/worker-types'
@@ -87,6 +90,11 @@ export interface RouterRoutesDeps {
   createRouterSession(workspaceId: string | undefined, name?: string): Promise<{ sessionId: string }>
   answerQuestion(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeTab(workspaceId: string, sessionId: string): Promise<boolean>
+  /**
+   * 某会话最新一段助手输出（v1.5 浮窗预览）：已结束任务给账本摘要，
+   * 运行中任务给宿主观察到的实时尾部；都没有时给空串。
+   */
+  sessionOutput(sessionId: string): Promise<SessionOutputValue>
     /** Worker 类型管理（v1.1 C3）：读全量记录（含禁用与 builtin）。 */
   listWorkerTypes(): Promise<TypesListResponse>
   createWorkerType(input: TypesCreateRequest): Promise<TypesItemResponse>
@@ -297,8 +305,23 @@ export function registerRouterRoutes(ctx: RouterRoutesContext, deps: RouterRoute
     if (typeof body.workspaceId !== 'string' || typeof body.sessionId !== 'string') {
       throw new LedgerError('bad-request', 'workspaceId 与 sessionId 必填')
     }
-    await deps.closeTab(body.workspaceId, body.sessionId)
+    // v1.5：没真删掉就别回成功——旧行为是「静默不删 + 200」，界面表现为
+    // 「灰一下又回来」且毫无提示。现在回 404，客户端会显示失败原因。
+    const removed = await deps.closeTab(body.workspaceId, body.sessionId)
+    if (!removed) {
+      throw new LedgerError('card-not-found', `标签不存在或已关闭: ${body.sessionId}`)
+    }
     return { status: 200, body: JSON.stringify({ ok: true }) }
+  })
+
+  /* ── v1.5：会话输出尾部（浮窗预览；只回一段，浏览器不留驻整条会话流） ── */
+
+  handle(ROUTER_SESSION_OUTPUT_PATH, ['GET'], async (request) => {
+    const url = new URL(request.url ?? '/', 'http://localhost')
+    const sessionId = url.searchParams.get('sessionId') ?? ''
+    if (sessionId === '') throw new LedgerError('bad-request', 'sessionId 查询参数必填')
+    const output = await deps.sessionOutput(sessionId)
+    return { status: 200, body: JSON.stringify(output) }
   })
 
   /* ── Worker 类型管理（v1.1 Task C3）：写路径走 WorkerTypeStore，变更后由 deps 实现方触发引擎同步 ── */

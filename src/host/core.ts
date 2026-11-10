@@ -27,6 +27,7 @@ import type {
   RouterTypeCreateInput,
 } from './core-types.ts'
 import { isTerminal, type RoleKind, type TaskRecord, type TaskStatus } from '../shared/types.ts'
+import { extractLatestOutput } from './session/tail.ts'
 import type { CircuitBreaker, BreakerVisibility } from './guard/breaker.ts'
 import { runScopedPause, scopedPauseTargets } from './guard/emergency.ts'
 import type { DispatchBudgets, BudgetSnapshot } from './guard/budgets.ts'
@@ -37,6 +38,7 @@ import type {
   QuestionCard,
   RouterDefaults,
   RouterState,
+  SessionOutputValue,
   TaskCard,
   WorkerTemplate,
   WorkerTypeRecord,
@@ -126,6 +128,11 @@ export interface RouterCoreAssemblyDeps {
   newId(): string
   signal?: AbortSignal
   isRunning(sessionId: string): boolean
+  /**
+   * 宿主会话观察面（读某会话当前的 surface 事件；v1.5 浮窗预览的尾部取数源）。
+   * 缺席 = 没有尾部预览（界面显示摘要/暂无输出，不报错）。
+   */
+  observeSession?(sessionId: string): Promise<{ events?: readonly unknown[]; [Symbol.dispose]?: () => void }>
   /** 活动快照卡上限（缺省 12）。 */
   maxActiveCards?: number
   /** 任务文档目录名（缺省 '.router'；result.md 相对路径用它拼）。 */
@@ -151,6 +158,11 @@ export interface RouterWorkbench {
   answerQuestion(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeTab(workspaceId: string, sessionId: string): Promise<boolean>
   pendingQuestions(): QuestionCard[]
+  /**
+   * 某会话最新一段助手输出（v1.5 浮窗预览；只回有界的一段，不把会话流交给浏览器）。
+   * 已结束任务走账本摘要（零读盘）；运行中任务走宿主会话观察取尾部。
+   */
+  sessionOutput(sessionId: string): Promise<SessionOutputValue>
 }
 
 /** 深度：根任务 1，子任务 +1；parentId 链带 visited 防护。 */
@@ -181,6 +193,8 @@ function toCard(record: TaskRecord, waiting: number): TaskCard {
     docVersion: record.docVersion,
   }
   if (record.progress !== undefined) card.progress = record.progress
+  // v1.5：完成摘要进卡——浮窗预览用它替代「读整条会话」，已结束任务零读盘。
+  if (record.result?.summary !== undefined) card.summary = record.result.summary
   if (record.sessionId !== undefined) card.sessionId = record.sessionId
   if (record.parentId !== undefined) card.parentId = record.parentId
   if (record.dispatchedBySessionId !== undefined) card.dispatchedBySessionId = record.dispatchedBySessionId
@@ -1004,6 +1018,8 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
               taskId: taskRecord?.id ?? row.taskId,
               taskStatus: taskRecord?.status,
               running: deps.isRunning(row.sessionId),
+              // v1.5：标签行自己的工作区（关标签按它发请求，不再猜当前会话的工作区）。
+              workspaceId: row.workspaceId,
             }
           }),
         templates: enabledTemplates(),
@@ -1050,7 +1066,41 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
     },
 
     async closeTab(workspaceId, sessionId) {
-      return ui.removeTab(workspaceId, sessionId)
+      // 双键精确匹配先试；不中时按 sessionId 兜底（会话 id 全局唯一，
+      // 标签行的工作区是「派发落点」，与当前会话所在工作区可能不同——
+      // v1.5 现场：客户端传错工作区时静默不删，标签灰一下又回来）。
+      const removed = await ui.removeTab(workspaceId, sessionId)
+      if (removed) return true
+      return ui.removeTabBySession(sessionId)
+    },
+
+    async sessionOutput(sessionId) {
+      // 1) 已结束任务：账本摘要（不读会话、不读盘）。
+      const records = await ledger.listAll()
+      const record = records.find((entry) => entry.sessionId === sessionId)
+      if (record !== undefined && isTerminal(record.status)) {
+        const summary = record.result?.summary
+        return summary !== undefined && summary !== ''
+          ? { text: summary, source: 'ledger' as const }
+          : { text: '', source: 'none' as const }
+      }
+      // 2) 运行中任务：宿主会话观察取尾部（live 会话读内存，不落盘）。
+      if (!deps.isRunning(sessionId)) return { text: '', source: 'none' }
+      const observe = deps.observeSession
+      if (observe === undefined) return { text: '', source: 'none' }
+      let observation: { events?: readonly unknown[]; [Symbol.dispose]?: () => void } | undefined
+      try {
+        observation = await observe(sessionId)
+        const text = extractLatestOutput(observation.events ?? [])
+        return text === ''
+          ? { text: '', source: 'none' as const }
+          : { text, source: 'live' as const }
+      } catch (error) {
+        deps.logger?.warn(`会话输出尾部读取失败（降级为空）: ${error instanceof Error ? error.message : String(error)}`)
+        return { text: '', source: 'none' as const }
+      } finally {
+        observation?.[Symbol.dispose]?.()
+      }
     },
 
     pendingQuestions(): QuestionCard[] {

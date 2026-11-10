@@ -301,7 +301,7 @@ describe('closeWorkerTab：× 关闭 worker 标签', () => {
     expect(store.get().closingSessionIds).toEqual([])
   })
 
-  it('失败：标签保留、closing 标记清除、错误可读', async () => {
+  it('失败：标签保留、closing 标记清除、错误可读（动作错误不被轮询抹掉）', async () => {
     const api = fakeApi(
       [emptyState({ routerSessions: [{ sessionId: 'router-1', title: 'R' }], tabs })],
       { closeWorkerTab: async () => { throw new Error('network down') } },
@@ -310,7 +310,18 @@ describe('closeWorkerTab：× 关闭 worker 标签', () => {
     await store.closeWorkerTab('w-a')
     expect(store.get().routerState?.tabs.map((tab) => tab.sessionId)).toEqual(['w-a', 'w-b'])
     expect(store.get().closingSessionIds).toEqual([])
-    expect(store.get().lastError).toContain('network down')
+    expect(store.get().actionError).toContain('network down')
+    // 动作错误不会被下一次成功轮询抹掉（否则用户根本来不及看到）。
+    await store.pollOnce()
+    expect(store.get().actionError).toContain('network down')
+  })
+
+  it('按标签自己的工作区发请求（标签行的工作区 ≠ 当前会话工作区时也能关掉）', async () => {
+    const scopedTabs: WorkerTabInfo[] = [{ sessionId: 'w-a', title: 'A', running: false, workspaceId: 'ws-target' }]
+    const api = fakeApi([emptyState({ routerSessions: [{ sessionId: 'router-1', title: 'R' }], tabs: scopedTabs })])
+    const store = await seeded(api) // 当前会话在 ws-1
+    await store.closeWorkerTab('w-a')
+    expect(api.closeCalls).toEqual([['ws-target', 'w-a']])
   })
 })
 

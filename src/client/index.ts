@@ -25,7 +25,6 @@
 import { createRouterApi } from './api.ts'
 import { registerBackButton } from './back-button.tsx'
 import { browserPrefsStorage, startClientPrefs } from './client-prefs.ts'
-import type { PreviewSessions } from './session-preview.tsx'
 import { registerNotificationCards } from './notification-cards.tsx'
 import { registerSettingsSection } from './settings.tsx'
 import { registerWorkbenchTabs } from './workbench-tabs.tsx'
@@ -41,13 +40,12 @@ export const name = '@goodjin2/dsh-router'
  * 'ui-workspace'/'ui-session'——页面注册表里没有连字符名，声明错 = 整条
  * entry 启动失败（启动审计判 failed，整页打不开）。
  */
-export const inject = ['slots', 'uiSession', 'uiWorkspace', 'workspaces', 'sessions'] as const
+export const inject = ['slots', 'uiSession', 'uiWorkspace', 'workspaces'] as const
 
 /** apply 收到的 ctx 的最小面（全部可选：缺失时降级，不抛）。 */
 export interface PluginContext {
   logger?(name: string): { info(message: string): void; warn(message: string): void }
   effect?(callback: () => unknown): unknown
-  sessions?: PreviewSessions
   slots?: Partial<SlotsHost>
   uiSession?: {
     adapter?: {
@@ -146,7 +144,7 @@ export function apply(ctx?: PluginContext): void {
   }
 
   try {
-    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace, sessions: safeCtx.sessions })
+    registerNotificationCards(slotsHost, { store, api, prefs, uiWorkspace })
   } catch (error) {
     log.warn(`question overlay failed to register: ${error instanceof Error ? error.message : String(error)}`)
   }

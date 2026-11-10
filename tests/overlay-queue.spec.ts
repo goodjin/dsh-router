@@ -124,7 +124,7 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
     { action: 'cancel', label: '取消' }, { action: 'accept', label: '通过' },
     { action: 'reject', label: '驳回' }, { action: 'ack', label: '知道了' },
   ] }]
-  let state: WorkbenchState = { ready: true, lastError: null, currentSessionId: 'r1', closingSessionIds: [], routerState: data, board: emptyBoard() }
+  let state: WorkbenchState = { ready: true, lastError: null, actionError: null, currentSessionId: 'r1', closingSessionIds: [], routerState: data, board: emptyBoard() }
   const listeners = new Set<() => void>()
   const emit = () => listeners.forEach((listener) => listener())
   const store = { get: () => state, subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } } } as unknown as WorkbenchStore
@@ -132,23 +132,20 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
   const prefs = { get: () => prefsValue, subscribe: () => () => {}, set: () => {} } as ClientPrefsStore
   const ack = vi.fn(async () => {})
   const control = vi.fn(async () => {})
-  const api = { ackNotification: ack, controlTask: control } as unknown as RouterApi
+  // v1.5：预览不再 retain 整条会话流；只有运行中的会话才向宿主要一段尾部。
+  const outputCalls: string[] = []
+  const api = {
+    ackNotification: ack,
+    controlTask: control,
+    getSessionOutput: (sessionId: string) => {
+      outputCalls.push(sessionId)
+      return Promise.resolve({ text: `输出 ${sessionId}`, source: 'live' as const })
+    },
+  } as unknown as RouterApi
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
   const openMain = vi.fn()
-  const retained = new Set<string>()
-  const subscribed = new Set<string>()
-  const sessions = { retain: (id: string) => {
-    retained.add(id)
-    return { release: () => { retained.delete(id) }, ready: Promise.resolve({
-      session: { getSnapshot: () => ({ openState: 'open' }) },
-      eventSource: {
-        getSnapshot: () => ({ entries: [{ event: { type: 'assistant/live-chunk', data: { attemptId: id, chunk: { type: 'text-delta', text: `输出 ${id}` } } } }] }),
-        subscribe: (_listener: () => void) => { subscribed.add(id); return () => { subscribed.delete(id) } },
-      },
-    }) }
-  } }
 
   const click = async (selector: string) => {
     const button = container.querySelector<HTMLElement>(selector)
@@ -158,10 +155,13 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
   const switchTo = async (id: string) => { await act(async () => { state = { ...state, currentSessionId: id }; emit() }) }
   const count = () => container.querySelectorAll('[data-router-session-window]').length
   try {
-    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, sessions, uiWorkspace: { openSession: openMain } })) })
+    // v1.5：浮窗延后挂载——这里让空闲回调立刻触发，省掉等待。
+    vi.stubGlobal('requestIdleCallback', (callback: () => void) => { callback(); return 1 })
+    await act(async () => { root.render(createElement(NotificationOverlay, { store, api, prefs, uiWorkspace: { openSession: openMain } })) })
+    await act(async () => { await Promise.resolve() })
     expect(count()).toBe(3)
-    expect([...retained]).toEqual(['s-t1', 's-t2', 's-t3'])
-    expect(subscribed.size).toBe(3)
+    // 只有在跑的那个会话去取尾部（s-t1 的 sessionRunning 为 true）。
+    expect(outputCalls).toEqual(['s-t1'])
     const card = container.querySelector('[data-router-session-window="s-t1"]')!
     expect(card.children[0]?.textContent).toBe(data.tasks[0]!.title)
     expect(card.children[1]?.hasAttribute('data-session-status-line')).toBe(true)
@@ -171,8 +171,7 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
     for (const id of ['s-t1', 's-child', 's-foreign', 'ordinary']) {
       await switchTo(id)
       expect(container.innerHTML).toBe('')
-      expect(retained.size).toBe(0)
-      expect(subscribed.size).toBe(0)
+      expect(outputCalls).toEqual(['s-t1'])
       // 后续轮询刷新不得把窗口重新带回 worker 视图。
       await act(async () => { state = { ...state, routerState: { ...data } }; emit() })
       expect(container.innerHTML).toBe('')
@@ -202,17 +201,12 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
     expect(openMain).toHaveBeenLastCalledWith('s-t1')
     await click('[data-overlay-more]')
     expect(count()).toBe(5)
-    expect(retained.size).toBe(5)
-    expect(subscribed.size).toBe(5)
     expect(container.querySelector('[data-overlay-more]')).toBeNull()
     await click('[data-overlay-toggle]')
     expect(count()).toBe(0)
-    expect(retained.size).toBe(0)
-    expect(subscribed.size).toBe(0)
     expect(container.querySelector('[data-overlay-toggle]')?.getAttribute('aria-label')).toBe('展开派发会话')
     await click('[data-overlay-toggle]')
     expect(count()).toBe(3)
-    expect([...retained]).toEqual(['s-t1', 's-t2', 's-t3'])
     await click('[data-notification-action="n1:ack"]')
     expect(ack).not.toHaveBeenCalled()
     expect(control).not.toHaveBeenCalled()
@@ -246,6 +240,5 @@ it('会话卡追加加载、收起重置、隐藏只改可见性、底部操作�
     container.remove()
   }
   expect(listeners.size).toBe(0)
-  expect(retained.size).toBe(0)
-  expect(subscribed.size).toBe(0)
+  vi.unstubAllGlobals()
 })

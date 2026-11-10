@@ -10,7 +10,7 @@ import { emptyBoard } from '../src/client/question-state.ts'
 
 it('会话切换时仅 Router 及派发会话保留标签，普通会话和无会话完全不占位', async () => {
   let snapshot: WorkbenchState = {
-    ready: true, lastError: null, board: emptyBoard(), closingSessionIds: [],
+    ready: true, lastError: null, actionError: null, board: emptyBoard(), closingSessionIds: [],
     currentSessionId: 'ordinary',
     routerState: {
       routerSessions: [{ sessionId: 'router', title: 'Router' }],

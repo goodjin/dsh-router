@@ -1028,6 +1028,7 @@ describe('POST /router/notifications/ack（C1 只消费）', () => {
       },
       answerQuestion: async () => {},
       closeTab: async () => true,
+      sessionOutput: async () => ({ text: '', source: 'none' }),
       listWorkerTypes: async () => ({ types: [] }),
       createWorkerType: async () => {
         throw new Error('not used')

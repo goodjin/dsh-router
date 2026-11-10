@@ -221,6 +221,10 @@ async function coreWith(
     breaker?: CircuitBreaker
     /** 2026-11-10 分叉范围测试：桥的 worker 生成模式（缺省 minimal-face）。 */
     mode?: 'cache-priority' | 'minimal-face'
+    /** v1.5：会话是否在跑（缺省 = 都不在跑）。 */
+    isRunning?: (sessionId: string) => boolean
+    /** v1.5：宿主会话观察面（浮窗尾部取数源）。 */
+    observeSession?: (sessionId: string) => Promise<{ events?: readonly unknown[]; [Symbol.dispose]?: () => void }>
   } = {},
 ) {
   const persistence = new MemoryPersistence()
@@ -281,7 +285,8 @@ async function coreWith(
     routerDefaults: opts.routerDefaults,
     newId: () => `q-${++questionSeq}`,
     signal: new AbortController().signal,
-    isRunning: () => false,
+    isRunning: opts.isRunning ?? (() => false),
+    ...(opts.observeSession !== undefined ? { observeSession: opts.observeSession } : {}),
     memory,
     tasksDir: '.router',
     notifications: opts.notifications,
@@ -1306,5 +1311,67 @@ describe('createRouterCore：冻结期间的解锁派发与解冻补派（M1）'
     expect(ledger.get('T-010')?.sessionId).toBe('session-1')
     // 幂等：再补一轮无任务可派
     expect((await core.dispatchReady()).dispatched).toBe(0)
+  })
+})
+
+
+/* ────────────────────────── v1.5：浮窗尾部与会话输出 ────────────────────────── */
+
+describe('createRouterCore：sessionOutput（浮窗尾部）', () => {
+  it('已结束任务：给账本里的结果摘要，不读会话', async () => {
+    const record = task({
+      status: 'completed',
+      sessionId: 'w-done',
+      result: { summary: '已完成：写完文档', deliverables: [], acceptanceEvidence: [], openIssues: [], accepted: true },
+    } as never)
+    const observed: string[] = []
+    const { workbench } = await coreWith([record], {
+      observeSession: async (sessionId) => { observed.push(sessionId); return { events: [] } },
+    })
+    await expect(workbench.sessionOutput('w-done')).resolves.toEqual({ text: '已完成：写完文档', source: 'ledger' })
+    expect(observed).toEqual([])
+  })
+
+  it('运行中任务：取宿主观察到的最后一段助手输出（live）', async () => {
+    const record = task({ status: 'running', sessionId: 'w-live' })
+    const { workbench } = await coreWith([record], {
+      isRunning: (sessionId) => sessionId === 'w-live',
+      observeSession: async () => ({
+        events: [
+          { seq: 1, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '旧输出' }] } } },
+          { seq: 2, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '新输出' }] } } },
+        ],
+      }),
+    })
+    await expect(workbench.sessionOutput('w-live')).resolves.toEqual({ text: '新输出', source: 'live' })
+  })
+
+  it('观察抛错：降级为空串，不把异常抛给界面', async () => {
+    const record = task({ status: 'running', sessionId: 'w-live' })
+    const { workbench } = await coreWith([record], {
+      isRunning: () => true,
+      observeSession: async () => { throw new Error('lease failed') },
+    })
+    await expect(workbench.sessionOutput('w-live')).resolves.toEqual({ text: '', source: 'none' })
+  })
+
+  it('没在跑又没有摘要：空串（不读会话）', async () => {
+    const record = task({ status: 'running', sessionId: 'w-live' })
+    const { workbench } = await coreWith([record], { isRunning: () => false })
+    await expect(workbench.sessionOutput('w-live')).resolves.toEqual({ text: '', source: 'none' })
+  })
+})
+
+describe('createRouterCore：closeTab（关标签的工作区兜底）', () => {
+  it('标签行的工作区与传入不一致时，按会话 id 兜底仍能关掉', async () => {
+    const { workbench, ui } = await coreWith()
+    await ui.addTab('ws-target', 'w-1')
+    await expect(workbench.closeTab('ws-other', 'w-1')).resolves.toBe(true)
+    expect(ui.tabs('ws-target')).toHaveLength(0)
+  })
+
+  it('标签不存在：如实回 false（路由据此回 404，不再假装成功）', async () => {
+    const { workbench } = await coreWith()
+    await expect(workbench.closeTab('ws-1', 'w-ghost')).resolves.toBe(false)
   })
 })

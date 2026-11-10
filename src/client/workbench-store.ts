@@ -52,6 +52,12 @@ export interface WorkbenchState {
   ready: boolean
   routerState: RouterState | null
   lastError: string | null
+  /**
+   * 用户动作的错误（关标签、答问）。与 lastError 分开：lastError 是读取类
+   * 错误（下次成功轮询即清），动作错误要留到下一次动作，不该被轮询抹掉。
+   * v1.5 之前这里没有任何界面出口，失败完全无声。
+   */
+  actionError: string | null
   board: QuestionBoardState
   /** 关闭中的 worker 标签（× 点下后、服务端确认前），UI 禁点防重复。 */
   closingSessionIds: readonly string[]
@@ -89,6 +95,8 @@ export interface WorkbenchStore {
    */
   invalidateGate(): void
   closeWorkerTab(sessionId: string): Promise<void>
+  /** 清掉动作错误（用户点掉提示条）。 */
+  clearActionError(): void
   toggleCollapsed(questionId: string): void
   setAnswer(questionId: string, itemId: string, patch: { selected?: string[]; custom?: string | null }): void
   submitAnswer(questionId: string): Promise<void>
@@ -123,6 +131,7 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     ready: false,
     routerState: null,
     lastError: null,
+    actionError: null,
     board: emptyBoard(),
     closingSessionIds: [],
   }
@@ -210,11 +219,15 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
     },
 
     async closeWorkerTab(sessionId: string): Promise<void> {
-      const workspaceId = currentWorkspaceIdOf(workspaceItems(), state.currentSessionId)
+      // v1.5：按**标签自己的**工作区发请求（标签行的工作区是派发落点，与当前
+      // 会话所在工作区可能不同；用当前会话的工作区会让服务端双键对不上、
+      // 静默不删，界面表现为「灰一下又回来」）。拿不到标签行时退回当前工作区。
+      const tab = state.routerState?.tabs.find((row) => row.sessionId === sessionId)
+      const workspaceId = tab?.workspaceId ?? currentWorkspaceIdOf(workspaceItems(), state.currentSessionId)
       if (workspaceId === undefined) {
-        const message = 'router: 无法确定当前工作区，关闭标签被跳过'
+        const message = 'router: 无法确定标签所属工作区，关闭标签被跳过'
         report(message)
-        apply(() => ({ ...state, lastError: message }))
+        apply(() => ({ ...state, actionError: message }))
         return
       }
       mutationSeq += 1 // 在途的轮询快照从此作废（不得复活被关的标签）
@@ -228,7 +241,7 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
         await api.closeWorkerTab(workspaceId, sessionId)
         apply(() => ({
           ...state,
-          lastError: null,
+          actionError: null,
           // 服务端确认后本地移除：关的是视图，不是会话、不是任务。
           routerState: state.routerState === null
             ? null
@@ -236,10 +249,15 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
         }))
       } catch (error) {
         report(`router tabs/close failed: ${errorMessage(error)}`)
-        apply(() => ({ ...state, lastError: `关闭标签失败：${errorMessage(error)}` }))
+        apply(() => ({ ...state, actionError: `关闭标签失败：${errorMessage(error)}` }))
       } finally {
         apply(() => ({ ...state, closingSessionIds: state.closingSessionIds.filter((id) => id !== sessionId) }))
       }
+    },
+
+    clearActionError(): void {
+      if (state.actionError === null) return
+      apply(() => ({ ...state, actionError: null }))
     },
 
     toggleCollapsed(questionId: string): void {
@@ -263,15 +281,15 @@ export function startWorkbenchStore(deps: WorkbenchStoreDeps): WorkbenchStore {
         await api.postAnswer(questionId, answers)
         // 成功（或 409 已答过 = 视为已完成）：在【当前】账本上出队（审查 F1——
         // 提交窗口内其他卡的草稿/新卡不动）。
-        apply(() => ({ ...state, lastError: null, board: submitAccepted(state.board, questionId) }))
+        apply(() => ({ ...state, actionError: null, board: submitAccepted(state.board, questionId) }))
       } catch (error) {
         if (errorStatus(error) === 409) {
-          apply(() => ({ ...state, lastError: null, board: submitAccepted(state.board, questionId) }))
+          apply(() => ({ ...state, actionError: null, board: submitAccepted(state.board, questionId) }))
           return
         }
         // 其他失败：卡片保留、已填内容保留、可改后重试（同样落在当前账本上）。
         report(`router answer failed: ${errorMessage(error)}`)
-        apply(() => ({ ...state, lastError: `回答送达失败：${errorMessage(error)}`, board: submitRejected(state.board, questionId) }))
+        apply(() => ({ ...state, actionError: `回答送达失败：${errorMessage(error)}`, board: submitRejected(state.board, questionId) }))
       }
     },
   }
