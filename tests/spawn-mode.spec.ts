@@ -151,13 +151,9 @@ describe('统一超集组合（cache-priority 模式）', () => {
     expect(router.id).toBe('dsh-router')
   })
 
-  it('带技能的类型在 cache 模式 = 超集 + 技能行（技能是类型个性，不进超集基准）', () => {
-    const skilled = buildWorkerPresetDefinition(sampleType(), {
-      mode: 'cache-priority',
-      customSkillDirs: ['/plugins/dsh-superpowers/preset/skills'],
-    })
-    expect(skilled.plugins.slice(0, buildSupersetPlugins().length)).toEqual(buildSupersetPlugins())
-    expect(skilled.plugins.slice(buildSupersetPlugins().length).map((row) => row.id)).toEqual(['skill-filesystem', 'tool-skill'])
+  it('带技能记录的类型在 cache 模式 = 纯超集（技能行不再挂载，2026-11-10）', () => {
+    const def = buildWorkerPresetDefinition(sampleType(), { mode: 'cache-priority' })
+    expect(def.plugins).toEqual(buildSupersetPlugins())
   })
 
   it('超集全部行过宿主行校验（含 superset 角色、无跨版本死键）', async () => {

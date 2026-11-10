@@ -45,12 +45,15 @@ describe('switchCard：三段齐（①身份职责=类型系统提示词 ②工�
     expect(card).not.toContain('create_worker_type')
   })
 
-  it('worker 卡：含宿主执行工具（bash/fs/fs-search）与技能挂载提示（评审 F3/F6）', () => {
+  it('worker 卡：含宿主执行工具（bash/fs/fs-search）与执行支撑三件（web/todo/jobs），不再提技能', () => {
     const card = switchCard(type, 'worker')
     expect(card).toContain('bash')
     expect(card).toContain('fs')
     expect(card).toContain('fs-search')
-    expect(card).toMatch(/技能/)
+    expect(card).toContain('web')
+    expect(card).toContain('todo')
+    expect(card).toContain('jobs')
+    expect(card).not.toMatch(/技能/)
   })
 
   it('supervisor 卡：列 supervisor 白名单 + 子代理工具 + 执行工具；禁主管链工具不出现', () => {

@@ -93,7 +93,6 @@ function workerType(patch: Partial<WorkerTypeRecord> = {}): WorkerTypeRecord {
   }
 }
 
-const SKILL_DIRS = ['/plugins/dsh-superpowers/preset/skills']
 
 function rowById(def: PresetDefinition, id: string): RowSpec | undefined {
   return def.plugins.find((row) => row.id === id)
@@ -102,7 +101,7 @@ function rowById(def: PresetDefinition, id: string): RowSpec | undefined {
 /* ────────────────────────── 定义组合 ────────────────────────── */
 
 describe('buildWorkerPresetDefinition：worker 角色组合', () => {
-  const def = buildWorkerPresetDefinition(workerType(), { customSkillDirs: SKILL_DIRS })
+  const def = buildWorkerPresetDefinition(workerType())
 
   it('预设 id = dsh-router-worker-<templateId>，名称/描述/顺序来自类型', () => {
     expect(def.id).toBe('dsh-router-worker-docs-writer')
@@ -132,14 +131,6 @@ describe('buildWorkerPresetDefinition：worker 角色组合', () => {
       name: '@deepseek-ai/dsh-tool-fs-search',
       config: { sampleOverCapGlobResults: false },
     })
-  })
-
-  it('技能行照 r4 §6 样板（skill-filesystem customSkillDirs + tool-skill，无 realm）', () => {
-    expect(rowById(def, 'skill-filesystem')).toMatchObject({
-      name: '@deepseek-ai/dsh-skill-filesystem',
-      config: { customSkillDirs: SKILL_DIRS },
-    })
-    expect(rowById(def, 'tool-skill')).toMatchObject({ name: '@deepseek-ai/dsh-tool-skill' })
   })
 
   it('压缩组在场且形状同静态（isolate + 三子行）', () => {
@@ -200,16 +191,11 @@ describe('buildWorkerPresetDefinition：supervisor 角色组合（r6 取证）',
   })
 })
 
-describe('技能行挂载条件', () => {
-  it('类型无技能 → 不挂技能行', () => {
-    const def = buildWorkerPresetDefinition(workerType({ skills: [] }), { customSkillDirs: SKILL_DIRS })
-    expect(rowById(def, 'skill-filesystem')).toBeUndefined()
-    expect(rowById(def, 'tool-skill')).toBeUndefined()
-  })
-
-  it('有技能但解析不出目录 → 不挂技能行（不注册坏行）', () => {
+describe('技能行（2026-11-10 裁定：类型不再挂技能）', () => {
+  it('record.skills 有值也不再挂技能行（有提示词就够）', () => {
     const def = buildWorkerPresetDefinition(workerType())
     expect(rowById(def, 'skill-filesystem')).toBeUndefined()
+    expect(rowById(def, 'tool-skill')).toBeUndefined()
   })
 })
 
@@ -303,9 +289,9 @@ describe('buildRouterPresetDefinition：Router 预设动态化（C5：complete s
 /* ────────────────────────── 子行校验 ────────────────────────── */
 
 describe('动态定义逐行过 validateRowSpec', () => {
-  it('worker（含技能）/supervisor/router 三定义的全部宿主行过假宿主 schema', async () => {
+  it('worker/supervisor/router 三定义的全部宿主行过假宿主 schema', async () => {
     const defs = [
-      buildWorkerPresetDefinition(workerType(), { customSkillDirs: SKILL_DIRS }),
+      buildWorkerPresetDefinition(workerType()),
       buildWorkerPresetDefinition(workerType({ templateId: 'lead2', name: '主管二', role: 'supervisor', skills: [] })),
       buildRouterPresetDefinition(),
     ]
@@ -335,7 +321,7 @@ describe('动态定义逐行过 validateRowSpec', () => {
     const { makeHostLoader } = await import('../src/host/presets/validate-row.ts')
     const load = makeHostLoader({ base: cliBase })
     const defs = [
-      buildWorkerPresetDefinition(workerType(), { customSkillDirs: SKILL_DIRS }),
+      buildWorkerPresetDefinition(workerType()),
       buildWorkerPresetDefinition(workerType({ templateId: 'lead2', name: '主管二', role: 'supervisor', skills: [] })),
       buildRouterPresetDefinition(),
     ]

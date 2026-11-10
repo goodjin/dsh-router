@@ -57,7 +57,6 @@ export interface RouterTypeCreateInput {
   role?: 'supervisor' | 'worker'
   systemPrompt?: string
   models?: string[]
-  skills?: string[]
 }
 
 /** 任务编排核心的调用面（工具薄壳只认这个接口，不认识实现）。 */

@@ -70,16 +70,13 @@ export interface RouterApi {
   postAnswer(questionId: string, answers: AskUserQuestionAnswerItem[]): Promise<void>
   closeWorkerTab(workspaceId: string, sessionId: string): Promise<void>
   /** 消费去重指令的回执（v1.1 Task C4）：幂等，失败抛 RouterApiError。 */
-  /* ── v1.1 Task C3：worker 类型 / Router 默认值管理（api 只增函数） ── */
+  /* ── worker 类型管理（api 只增函数；类型无编辑、Router 默认区已移除，2026-11-10） ── */
   /** 全量类型记录（含禁用与 builtin），设置管理栏目消费。 */
   listWorkerTypes(): Promise<WorkerTypeRecord[]>
   createWorkerType(input: TypesCreateRequest): Promise<WorkerTypeRecord>
-  updateWorkerType(request: TypesUpdateRequest): Promise<WorkerTypeRecord>
   setWorkerTypeEnabled(request: TypesEnabledRequest): Promise<WorkerTypeRecord>
   /** 删除类型（builtin 拒 409，错误带 status 透出给 UI）。 */
   removeWorkerType(templateId: string): Promise<void>
-  getDefaults(): Promise<RouterDefaults>
-  saveDefaults(value: RouterDefaults): Promise<RouterDefaults>
   /** 读当前生效的 worker 派生模式（v1.3 C2）。 */
   getSpawnMode(): Promise<SpawnModeResponse>
   /** 写 worker 派生模式（volatile：即时生效，重启回到启动配置值）。 */
@@ -228,28 +225,12 @@ export function createRouterApi(deps: RouterApiDeps = {}): RouterApi {
       return unwrapType(await postJson(WORKER_TYPES_PATH, input as unknown as Record<string, unknown>))
     },
 
-    async updateWorkerType(req: TypesUpdateRequest): Promise<WorkerTypeRecord> {
-      return unwrapType(await postJson(WORKER_TYPES_UPDATE_PATH, req as unknown as Record<string, unknown>))
-    },
-
     async setWorkerTypeEnabled(req: TypesEnabledRequest): Promise<WorkerTypeRecord> {
       return unwrapType(await postJson(WORKER_TYPES_ENABLED_PATH, req as unknown as Record<string, unknown>))
     },
 
     async removeWorkerType(templateId: string): Promise<void> {
       await deleteJson(`${WORKER_TYPES_PATH}?templateId=${encodeURIComponent(templateId)}`)
-    },
-
-    async getDefaults(): Promise<RouterDefaults> {
-      const body = await request(ROUTER_DEFAULTS_PATH, { headers: { accept: 'application/json' } })
-      if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
-      return body as RouterDefaults
-    },
-
-    async saveDefaults(value: RouterDefaults): Promise<RouterDefaults> {
-      const body = await postJson(ROUTER_DEFAULTS_PATH, value as unknown as Record<string, unknown>)
-      if (body === null || typeof body !== 'object') throw new RouterApiError('router: defaults response missing body')
-      return body as RouterDefaults
     },
 
     /* ── v1.3 Task C2：worker 派生模式 ── */

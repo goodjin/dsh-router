@@ -3,14 +3,12 @@
  * 设置段真实渲染回归（2026-11 提示词 UI 移除，先红后绿）。
  *
  * 用真 React（createRoot + act）渲染 RouterSettingsSection，驱动真实 DOM 事件，
- * 断言移除后的界面行为（不是源码正则）：
- * 1. 设置页没有任何提示词输入（Worker 类型表单无「系统提示词」多行框；
- *    Router 默认区无「默认系统提示词」多行框——整页零 textarea）；
+ * 断言收敛后的界面行为（不是源码正则；2026-11-10：类型无编辑、无技能、
+ * Router 默认区整体移除）：
+ * 1. 设置页没有任何提示词输入（类型表单无「系统提示词」——整页零 textarea）；
+ *    类型行无编辑按钮、表单无技能勾选、页面无 Router 默认区；
  * 2. 新建类型（worker / supervisor）不需要提示词即可保存，create 请求体
- *    不带 systemPrompt 键（尤其不是空串——宿主 ?? 只挡 nullish）；
- * 3. 编辑类型保存时 patch 不带 systemPrompt 键（宿主逐字保留既有值）；
- * 4. Router 默认区只改默认模型保存时，请求体仍带上未动的既有
- *    routerSystemPrompt（宿主路由两字段都必填，丢值即清空）。
+ *    不带 systemPrompt/skills 键（尤其不是空串——宿主 ?? 只挡 nullish）。
  *
  * act 边界纪律：所有会触发 React 状态更新的动作（输入事件、点击、异步
  * dispatch 的 settle）都包在 act 里——setValue 内部包 act；异步保存/加载以
@@ -29,7 +27,7 @@ import { RouterSettingsSection } from '../src/client/settings.tsx'
 import type { RouterApi } from '../src/client/api.ts'
 import type { ClientPrefsStore } from '../src/client/client-prefs.ts'
 import { defaultClientPrefs } from '../src/client/client-prefs.ts'
-import type { RouterDefaults, WorkerTypeRecord } from '../src/shared/view-contract.ts'
+import type { WorkerTypeRecord } from '../src/shared/view-contract.ts'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -53,38 +51,21 @@ function typeRecord(overrides: Partial<WorkerTypeRecord> = {}): WorkerTypeRecord
   }
 }
 
-const DEFAULTS: RouterDefaults = { routerSystemPrompt: '既有默认提示词，保存默认模型时必须原样带回。', routerModel: '' }
-
 /** 记录型假 api：加载面回放固定数据，写面记录请求体。 */
-function makeApi(types: WorkerTypeRecord[]): RouterApi & {
-  created: unknown[]
-  updates: unknown[]
-  defaultsSaved: RouterDefaults[]
-} {
+function makeApi(types: WorkerTypeRecord[]): RouterApi & { created: unknown[] } {
   const face = {
     created: [] as unknown[],
-    updates: [] as unknown[],
-    defaultsSaved: [] as RouterDefaults[],
     listWorkerTypes: () => Promise.resolve(types.map((record) => ({ ...record }))),
-    getDefaults: () => Promise.resolve({ ...DEFAULTS }),
     getSpawnMode: () => Promise.resolve({ mode: 'cache-priority' as const }),
     saveSpawnMode: (mode: 'cache-priority' | 'minimal-face') => Promise.resolve({ mode }),
     createWorkerType: (input: unknown) => {
       face.created.push(input)
       return Promise.resolve(typeRecord({ ...(input as object) }))
     },
-    updateWorkerType: (request: unknown) => {
-      face.updates.push(request)
-      return Promise.resolve(typeRecord())
-    },
-    setWorkerTypeEnabled: (request: { templateId: string; enabled: boolean }) => Promise.resolve(typeRecord({ enabled: request.enabled })),
+    setWorkerTypeEnabled: (request: { templateId: string; enabled: boolean }) => Promise.resolve(typeRecord({ templateId: request.templateId, enabled: request.enabled })),
     removeWorkerType: (_templateId: string) => Promise.resolve(),
-    saveDefaults: (value: RouterDefaults) => {
-      face.defaultsSaved.push({ ...value })
-      return Promise.resolve({ ...value })
-    },
   }
-  return face as unknown as RouterApi & { created: unknown[]; updates: unknown[]; defaultsSaved: RouterDefaults[] }
+  return face as unknown as RouterApi & { created: unknown[] }
 }
 
 /** 内存偏好 store（设置段只读展示）。 */
@@ -113,14 +94,14 @@ afterEach(async () => {
   }
 })
 
-/** 渲染并等到「加载完成」的 UI 证据（默认区出现 = loaded 已 dispatch）。 */
+/** 渲染并等到「加载完成」的 UI 证据（当前模式标记出现 = loaded 已 dispatch）。 */
 async function renderSettings(api: RouterApi): Promise<HTMLElement> {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const root = createRoot(container)
   roots.push({ root, container })
   await act(async () => { root.render(createElement(RouterSettingsSection, { prefs: makePrefs(), api })) })
-  await waitUntil(container, () => container.querySelector('[data-router-defaults-section]') !== null, '设置段加载完成（默认区渲染）')
+  await waitUntil(container, () => container.querySelector('[data-router-spawn-current]') !== null, '设置段加载完成（派生模式标记渲染）')
   return container
 }
 
@@ -166,13 +147,15 @@ function formClosed(container: HTMLElement): boolean {
 }
 
 describe('设置段真实渲染：提示词输入已移除', () => {
-  it('整页没有任何提示词 textarea（类型表单与 Router 默认区都没有）', async () => {
+  it('整页没有提示词 textarea；类型行无编辑按钮、表单无技能勾选、无 Router 默认区', async () => {
     const container = await renderSettings(makeApi([typeRecord()]))
-    // 默认区（加载即渲染）与类型列表都不带提示词输入。
-    expect(container.querySelector('[data-router-defaults-prompt]')).toBeNull()
+    expect(container.querySelector('[data-router-defaults-section]')).toBeNull()
+    expect(container.querySelector('[data-router-skills-editor]')).toBeNull()
+    expect(container.querySelector('[data-router-settings-button^="edit-"]')).toBeNull()
     await click(container, 'types-new')
     await waitUntil(container, () => container.querySelector('[data-router-type-form="new"]') !== null, '新建表单打开')
     expect(container.querySelector('[data-router-type-prompt]')).toBeNull()
+    expect(container.querySelector('[data-router-skills-editor]')).toBeNull()
     expect(container.querySelectorAll('textarea').length, '设置页不应残留任何多行输入').toBe(0)
   })
 
@@ -189,6 +172,7 @@ describe('设置段真实渲染：提示词输入已移除', () => {
     const payload = api.created[0] as Record<string, unknown>
     expect(payload['name']).toBe('无提示词工人')
     expect('systemPrompt' in payload, 'create 不得带 systemPrompt 键（空串会盖掉宿主按角色默认）').toBe(false)
+    expect('skills' in payload, 'create 不得带 skills 键（类型不再挂技能）').toBe(false)
   })
 
   it('新建 supervisor 类型：无需提示词仍可创建，role 上送、请求体不带 systemPrompt 键', async () => {
@@ -206,34 +190,10 @@ describe('设置段真实渲染：提示词输入已移除', () => {
     expect('systemPrompt' in payload).toBe(false)
   })
 
-  it('编辑既有类型：改名保存，patch 不带 systemPrompt 键（宿主逐字保留旧值）', async () => {
-    const existing = typeRecord({ templateId: 't-edit', name: '旧名' })
-    const api = makeApi([existing])
+  it('禁用/启用与删除照常可用（收敛只动编辑与默认区）', async () => {
+    const api = makeApi([typeRecord({ templateId: 't-1' })])
     const container = await renderSettings(api)
-    await click(container, 'edit-t-edit')
-    await waitUntil(container, () => container.querySelector('[data-router-type-form="t-edit"]') !== null, '编辑表单打开')
-    expect(container.querySelector('[data-router-type-prompt]')).toBeNull()
-    await setValue(mustQuery<HTMLInputElement>(container, '[data-router-type-name]'), '新名')
-    await click(container, 'form-save')
-    await waitUntil(container, () => formClosed(container), '保存完成（表单关闭返回列表）')
-    expect(api.updates).toHaveLength(1)
-    const request = api.updates[0] as { templateId: string; patch: Record<string, unknown> }
-    expect(request.templateId).toBe('t-edit')
-    expect(request.patch['name']).toBe('新名')
-    expect('systemPrompt' in request.patch, 'update patch 不得带 systemPrompt 键（带上即覆盖既有值）').toBe(false)
-  })
-
-  it('Router 默认区：只改默认模型保存，routerSystemPrompt 原样带回不丢值', async () => {
-    const api = makeApi([typeRecord()])
-    const container = await renderSettings(api)
-    expect(container.querySelector('[data-router-defaults-prompt]')).toBeNull()
-    await setValue(mustQuery<HTMLSelectElement>(container, '[data-router-defaults-model]'), 'p/m')
-    // 改动即脏（脏标记出现 = defaults-draft 已生效）。
-    await waitUntil(container, () => container.querySelector('[data-router-defaults-dirty]') !== null, '改动置脏标记')
-    await click(container, 'defaults-save')
-    // 等保存链路全部 settle：defaults-save-done 清脏标记。
-    await waitUntil(container, () => container.querySelector('[data-router-defaults-dirty]') === null, '保存完成（脏标记清除）')
-    expect(api.defaultsSaved).toHaveLength(1)
-    expect(api.defaultsSaved[0]).toEqual({ routerSystemPrompt: DEFAULTS.routerSystemPrompt, routerModel: 'p/m' })
+    await click(container, 'disable-t-1')
+    await waitUntil(container, () => container.querySelector('[data-router-type-enabled="false"]') !== null, '禁用生效')
   })
 })

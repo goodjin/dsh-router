@@ -1,11 +1,12 @@
 /**
- * 设置管理表单纯逻辑测试（v1.1 计划 Task C3：校验/归一化/reducer，先红后绿）。
+ * 设置管理表单纯逻辑测试（2026-11-10 设置页收敛后：新建-only 表单、无技能、
+ * 无编辑、无 Router 默认区）。
  *
- * 用例 + reducer 往返（2026-11 提示词 UI 移除后表单不再收系统提示词）：
+ * 用例 + reducer 往返：
  * 1. 必填校验：name 必填（提示词由宿主按角色默认，表单不收不发）；
  * 2. 模型去重排序：trim、去空、保序去重（首个为默认模型，顺序即优先级）；
  * 3. 角色默认 worker；
- * 4. builtin 保护：不可编辑/不可删除/不可禁用（reducer 层再拦一道）；
+ * 4. builtin 保护：不可删除/不可禁用（reducer 层再拦一道）；
  * 5. 脏表单提示：有未保存更改时取消先出确认，二次才放弃。
  */
 
@@ -14,7 +15,7 @@ import { describe, expect, it } from 'vitest'
 import {
   SPAWN_MODE_MODEL_HINT,
   canDisableRecord,
-  canEditRecord,
+  canRemoveRecord,
   dedupeOrdered,
   editingIsDirty,
   emptyTypeForm,
@@ -23,10 +24,8 @@ import {
   modelCatalogOf,
   normalizeTypeForm,
   originLabel,
-  skillCatalogOf,
   spawnModeDescription,
   spawnModeLabel,
-  typeFormFromRecord,
   typeManageReducer,
   validateTypeForm,
   type TypeManageState,
@@ -75,14 +74,13 @@ describe('模型去重排序（dedupeOrdered / normalizeTypeForm）', () => {
     expect(dedupeOrdered([])).toEqual([])
   })
 
-  it('normalizeTypeForm：models/skills 归一化，文本字段 trim，输出可作 create 请求体（不带 systemPrompt 键）', () => {
+  it('normalizeTypeForm：models 归一化，文本字段 trim，输出可作 create 请求体（不带 systemPrompt/skills 键）', () => {
     const form: TypeFormState = {
       templateId: null,
       name: '  写手  ',
       description: ' 描述 ',
       role: 'worker',
       models: ['p/b', 'p/a', '', 'p/b'],
-      skills: ['skill-a', ' skill-b ', 'skill-a'],
       enabled: true,
     }
     const normalized = normalizeTypeForm(form)
@@ -91,61 +89,42 @@ describe('模型去重排序（dedupeOrdered / normalizeTypeForm）', () => {
       description: '描述',
       role: 'worker',
       models: ['p/b', 'p/a'],
-      skills: ['skill-a', 'skill-b'],
       enabled: true,
     })
     // 新建类型不需要提示词：归一化输出不得带 systemPrompt 键（尤其不能是空串——
-    // 宿主 ?? 只挡 nullish，空串会盖掉按角色默认）。
+    // 宿主 ?? 只挡 nullish，空串会盖掉按角色默认）；技能已整体移除，也不得带。
     expect('systemPrompt' in normalized).toBe(false)
+    expect('skills' in normalized).toBe(false)
   })
 })
 
 describe('角色默认 worker（emptyTypeForm）', () => {
-  it('新建表单角色默认 worker、启用默认 true、其余空', () => {
+  it('新建表单角色默认 worker、启用默认 true、其余空；表单无 skills 字段', () => {
     const form = emptyTypeForm()
     expect(form.role).toBe('worker')
     expect(form.enabled).toBe(true)
     expect(form.templateId).toBeNull()
     expect(form.name).toBe('')
     expect(form.models).toEqual([])
-    expect(form.skills).toEqual([])
-  })
-
-  it('record → 表单往返：字段一一对应（提示词不进表单）', () => {
-    const source = record({ name: '调研', role: 'supervisor', models: ['p/m'], skills: ['s1'], enabled: false, origin: 'router' })
-    const form = typeFormFromRecord(source)
-    expect(form).toEqual({
-      templateId: source.templateId,
-      name: '调研',
-      description: '',
-      role: 'supervisor',
-      models: ['p/m'],
-      skills: ['s1'],
-      enabled: false,
-    })
-    expect('systemPrompt' in form).toBe(false)
+    expect('skills' in form).toBe(false)
   })
 })
 
 describe('builtin 保护', () => {
-  it('canEditRecord/canRemoveRecord/canDisableRecord：builtin 全 false，其余 true', () => {
+  it('canRemoveRecord/canDisableRecord：builtin 全 false，其余 true', () => {
     const builtin = record({ origin: 'builtin' })
     const user = record({ origin: 'user' })
     const router = record({ origin: 'router' })
-    expect(canEditRecord(builtin)).toBe(false)
+    expect(canRemoveRecord(builtin)).toBe(false)
     expect(canDisableRecord(builtin)).toBe(false)
-    expect(canEditRecord(user)).toBe(true)
-    expect(canEditRecord(router)).toBe(true)
+    expect(canRemoveRecord(user)).toBe(true)
+    expect(canRemoveRecord(router)).toBe(true)
   })
 
-  it('reducer：对 builtin 发 edit-form/remove-arm 被拒，只出提示，不开表单不待删', () => {
+  it('reducer：对 builtin 发 remove-arm 被拒，只出提示，不待删', () => {
     const builtin = record({ origin: 'builtin', templateId: 'general' })
     const seeded: TypeManageState = { ...initialTypeManageState(), types: [builtin] }
-    const edited = typeManageReducer(seeded, { type: 'edit-form', record: builtin })
-    expect(edited.editing).toBeNull()
-    expect(edited.notice).toContain('内置')
-    const armed = typeManageReducer(edited, { type: 'notice-cleared' })
-    const afterArm = typeManageReducer(armed, { type: 'remove-arm', templateId: 'general' })
+    const afterArm = typeManageReducer(seeded, { type: 'remove-arm', templateId: 'general' })
     expect(afterArm.armedRemove).toBeNull()
     expect(afterArm.notice).toContain('内置')
   })
@@ -153,23 +132,19 @@ describe('builtin 保护', () => {
 
 describe('脏表单提示（isFormDirty / reducer form-cancel）', () => {
   it('未改动 = 不脏；任何字段改动 = 脏（models 顺序也计入）', () => {
-    const baseline = typeFormFromRecord(record({ name: '写手', models: ['p/a', 'p/b'] }))
+    const baseline = emptyTypeForm()
     expect(isFormDirty(baseline, baseline)).toBe(false)
     expect(isFormDirty({ ...baseline, name: '改' }, baseline)).toBe(true)
     expect(isFormDirty({ ...baseline, models: ['p/b', 'p/a'] }, baseline)).toBe(true)
     expect(isFormDirty({ ...baseline, description: '补一句' }, baseline)).toBe(true)
   })
 
-  it('干净的表单一次取消即关；脏表单第一次取消只出确认提示，第二次（确认后）才放弃', () => {
-    const recordRow = record({ name: '写手' })
-    const seeded: TypeManageState = { ...initialTypeManageState(), types: [recordRow] }
-    const opened = typeManageReducer(seeded, { type: 'edit-form', record: recordRow })
+  it('干净的新建表单一次取消即关；脏表单第一次取消只出确认提示，第二次（确认后）才放弃', () => {
+    const seeded: TypeManageState = { ...initialTypeManageState(), types: [record()] }
+    const opened = typeManageReducer(seeded, { type: 'new-form' })
     expect(opened.editing).not.toBeNull()
 
-    const cleanCancel = typeManageReducer(opened, { type: 'form-cancel' })
-    expect(cleanCancel.editing).toBeNull()
-
-    const dirtied = typeManageReducer(opened, { type: 'form-change', patch: { name: '改名' } })
+    const dirtied = typeManageReducer(opened, { type: 'form-change', patch: { name: '新类型' } })
     expect(editingIsDirty(dirtied)).toBe(true)
     const armed = typeManageReducer(dirtied, { type: 'form-cancel' })
     expect(armed.editing).not.toBeNull()
@@ -177,13 +152,15 @@ describe('脏表单提示（isFormDirty / reducer form-cancel）', () => {
     const discarded = typeManageReducer(armed, { type: 'form-discard' })
     expect(discarded.editing).toBeNull()
     expect(discarded.confirmDiscard).toBe(false)
+
+    const cleanCancel = typeManageReducer(typeManageReducer(seeded, { type: 'new-form' }), { type: 'form-cancel' })
+    expect(cleanCancel.editing).toBeNull()
   })
 
   it('继续编辑（form-change）清掉放弃确认', () => {
-    const recordRow = record({ name: '写手' })
-    const seeded: TypeManageState = { ...initialTypeManageState(), types: [recordRow] }
+    const seeded: TypeManageState = { ...initialTypeManageState(), types: [record()] }
     const dirtied = typeManageReducer(
-      typeManageReducer(seeded, { type: 'edit-form', record: recordRow }),
+      typeManageReducer(seeded, { type: 'new-form' }),
       { type: 'form-change', patch: { name: '改名' } },
     )
     const armed = typeManageReducer(dirtied, { type: 'form-cancel' })
@@ -194,14 +171,13 @@ describe('脏表单提示（isFormDirty / reducer form-cancel）', () => {
   })
 })
 
-describe('候选清单（modelCatalogOf / skillCatalogOf）与来源标记', () => {
+describe('候选清单（modelCatalogOf）与来源标记', () => {
   it('跨类型取并集并去重保序', () => {
     const types = [
-      record({ models: ['p/a', 'p/b'], skills: ['s1', 's2'] }),
-      record({ models: ['p/b', 'p/c'], skills: ['s2', 's3'] }),
+      record({ models: ['p/a', 'p/b'] }),
+      record({ models: ['p/b', 'p/c'] }),
     ]
     expect(modelCatalogOf(types)).toEqual(['p/a', 'p/b', 'p/c'])
-    expect(skillCatalogOf(types)).toEqual(['s1', 's2', 's3'])
   })
 
   it('originLabel：router=Router 创建、user=手动、builtin=内置', () => {
@@ -211,23 +187,18 @@ describe('候选清单（modelCatalogOf / skillCatalogOf）与来源标记', () 
   })
 })
 
-describe('reducer 往返（保存/启停/删除/加载/默认值）', () => {
-  it('loaded 置数据与 loaded 标记；load-failed 记错误不炸', () => {
+describe('reducer 往返（保存/启停/删除/加载）', () => {
+  it('loaded 置数据与 loaded 标记（无默认值负载）；load-failed 记错误不炸', () => {
     const rows = [record()]
-    const loaded = typeManageReducer(initialTypeManageState(), {
-      type: 'loaded',
-      types: rows,
-      defaults: { routerSystemPrompt: 'd', routerModel: '' },
-    })
+    const loaded = typeManageReducer(initialTypeManageState(), { type: 'loaded', types: rows })
     expect(loaded.loaded).toBe(true)
     expect(loaded.types).toEqual(rows)
-    expect(loaded.defaults).toEqual({ routerSystemPrompt: 'd', routerModel: '' })
     const failed = typeManageReducer(initialTypeManageState(), { type: 'load-failed', message: '网络错' })
     expect(failed.loaded).toBe(true) // 加载动作已完成（失败也是完成态），错误看 loadError
     expect(failed.loadError).toBe('网络错')
   })
 
-  it('save-done：新建进列表、编辑替换原行并关表单', () => {
+  it('save-done：新建进列表并关表单', () => {
     const row = record({ templateId: 't-1', name: '旧名' })
     const seeded: TypeManageState = { ...initialTypeManageState(), types: [row] }
     const opened = typeManageReducer(seeded, { type: 'new-form' })
@@ -239,15 +210,6 @@ describe('reducer 往返（保存/启停/删除/加载/默认值）', () => {
     expect(created.types.some((entry) => entry.templateId === 't-9')).toBe(true)
     expect(created.editing).toBeNull()
     expect(created.error).toBeNull()
-
-    const editOpened = typeManageReducer(created, { type: 'edit-form', record: created.types[0]! })
-    const renamed = typeManageReducer(editOpened, { type: 'form-change', patch: { name: '新名' } })
-    const saved = typeManageReducer(renamed, {
-      type: 'save-done',
-      record: { ...created.types[0]!, name: '新名' },
-    })
-    expect(saved.types.find((entry) => entry.templateId === created.types[0]!.templateId)?.name).toBe('新名')
-    expect(saved.types).toHaveLength(2) // 改名替换 t-1，另一行 t-9 不受影响
   })
 
   it('toggle-done 替换行；remove-done 移除行并撤待删', () => {
@@ -265,53 +227,34 @@ describe('reducer 往返（保存/启停/删除/加载/默认值）', () => {
   it('op-failed 记错误且不关表单（保存失败留在表单里改）', () => {
     const row = record({ templateId: 't-1' })
     const seeded: TypeManageState = { ...initialTypeManageState(), types: [row] }
-    const opened = typeManageReducer(seeded, { type: 'edit-form', record: row })
+    const opened = typeManageReducer(seeded, { type: 'new-form' })
     const failed = typeManageReducer(opened, { type: 'op-failed', message: '同名类型已存在' })
     expect(failed.error).toBe('同名类型已存在')
     expect(failed.editing).not.toBeNull()
   })
-
-  it('defaults 草稿：改草稿置脏；save-done 落库清脏；defaults-reset 回已存值', () => {
-    const loaded = typeManageReducer(initialTypeManageState(), {
-      type: 'loaded',
-      types: [],
-      defaults: { routerSystemPrompt: 'd', routerModel: '' },
-    })
-    const drafting = typeManageReducer(loaded, { type: 'defaults-draft', patch: { routerModel: 'p/m' } })
-    expect(drafting.defaultsDraft).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
-    expect(drafting.defaultsDirty).toBe(true)
-    const saved = typeManageReducer(drafting, {
-      type: 'defaults-save-done',
-      defaults: { routerSystemPrompt: 'd', routerModel: 'p/m' },
-    })
-    expect(saved.defaults).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
-    expect(saved.defaultsDirty).toBe(false)
-    expect(saved.defaultsDraft).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
-    const reset = typeManageReducer(saved, { type: 'defaults-reset' })
-    expect(reset.defaultsDraft).toEqual({ routerSystemPrompt: 'd', routerModel: 'p/m' })
-  })
 })
 
-/* ────────────────────────── v1.3 Task C2：派生模式 ────────────────────────── */
+/* ────────────────────────── 派生模式 ────────────────────────── */
 
 describe('spawn-mode 文案（spawnModeLabel / spawnModeDescription / 提示）', () => {
-  it('两模式各有标签；语义说明按模式区分（缓存优先 vs 最小面）', () => {
+  it('两模式各有标签；语义说明按 2026-11-10 分叉范围如实区分', () => {
     expect(spawnModeLabel('cache-priority')).toContain('缓存优先')
     expect(spawnModeLabel('minimal-face')).toContain('最小面')
-    expect(spawnModeDescription('cache-priority')).toContain('缓存')
-    expect(spawnModeDescription('cache-priority')).toContain('分叉')
+    expect(spawnModeDescription('cache-priority')).toContain('全新创建')
+    expect(spawnModeDescription('cache-priority')).toContain('主管')
     expect(spawnModeDescription('minimal-face')).toContain('最小工具')
     expect(spawnModeDescription('minimal-face')).toContain('钉')
     expect(spawnModeDescription('cache-priority')).not.toBe(spawnModeDescription('minimal-face'))
   })
 
-  it('「切模型即换缓存」提示常在且提到模型切换的缓存代价', () => {
-    expect(SPAWN_MODE_MODEL_HINT).toContain('切模型')
+  it('模型语义提示常在：分叉继承（切换断缓存）与全新创建钉默认', () => {
+    expect(SPAWN_MODE_MODEL_HINT).toContain('切换')
     expect(SPAWN_MODE_MODEL_HINT).toContain('缓存')
+    expect(SPAWN_MODE_MODEL_HINT).toContain('钉定')
   })
 })
 
-describe('reducer：spawn-mode 状态（v1.3 C2）', () => {
+describe('reducer：spawn-mode 状态', () => {
   it('初始 spawnMode 为 null（未加载）；spawn-loaded 落当前生效值', () => {
     expect(initialTypeManageState().spawnMode).toBeNull()
     const loaded = typeManageReducer(initialTypeManageState(), { type: 'spawn-loaded', mode: 'cache-priority' })

@@ -557,9 +557,8 @@ const TOOL_SPECS: Record<
         name: { type: 'string', minLength: 1, description: '类型名（如 文档写手；同名已存在会被拒）' },
         description: { type: 'string', description: '一句话说明这个类型做什么' },
         role: { type: 'string', enum: ['worker', 'supervisor'], description: '角色（缺省 worker）' },
-        systemPrompt: { type: 'string', minLength: 1, description: '该类型的系统提示词（persona 整段替换）' },
+        systemPrompt: { type: 'string', minLength: 1, description: '该类型的系统提示词（persona 整段替换；worker 收到时经身份切换卡生效）' },
         models: stringArray('允许模型列表（provider/model，有序；首个为该类型会话默认模型）'),
-        skills: stringArray('初始技能名清单'),
       },
       required: ['name', 'systemPrompt'],
     },
@@ -576,7 +575,6 @@ const TOOL_SPECS: Record<
         role: args.role as RouterTypeCreateInput['role'],
         systemPrompt: String(args.systemPrompt),
         models: args.models as string[] | undefined,
-        skills: args.skills as string[] | undefined,
       }
       return core.createWorkerType(sid, input)
     },

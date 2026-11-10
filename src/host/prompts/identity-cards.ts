@@ -51,9 +51,6 @@ const EXECUTION_TOOL_LINES: readonly string[] = [
   '- jobs：把长命令放后台跑、稍后收结果。',
 ]
 
-/** 技能挂载提示（评审 F6）：技能行按类型挂载，卡面如实声明「以会话实际在场为准」。 */
-const SKILLS_NOTE = '- 若本类型配置了技能，会话里另有技能加载与技能调用工具，按会话实际挂载为准；没有挂载就如实用 report_blocker 说明。'
-
 /** 本插件白名单内一个工具的卡面行（描述与注册定义同源）。 */
 function toolLine(name: string): string {
   return `- ${name}：${orchestrationToolDescription(name as never)}`
@@ -67,7 +64,6 @@ function toolSection(role: RoleKind): string {
   }
   if (role !== 'router') {
     lines.push(...EXECUTION_TOOL_LINES)
-    lines.push(SKILLS_NOTE)
   }
   lines.push(ASK_USER_LINE)
   return lines.join('\n')

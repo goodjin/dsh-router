@@ -1256,10 +1256,9 @@ const TOOL_SPECS = {
 				systemPrompt: {
 					type: "string",
 					minLength: 1,
-					description: "该类型的系统提示词（persona 整段替换）"
+					description: "该类型的系统提示词（persona 整段替换；worker 收到时经身份切换卡生效）"
 				},
-				models: stringArray("允许模型列表（provider/model，有序；首个为该类型会话默认模型）"),
-				skills: stringArray("初始技能名清单")
+				models: stringArray("允许模型列表（provider/model，有序；首个为该类型会话默认模型）")
 			},
 			required: ["name", "systemPrompt"]
 		},
@@ -1278,8 +1277,7 @@ const TOOL_SPECS = {
 				description: typeof args.description === "string" ? args.description : void 0,
 				role: args.role,
 				systemPrompt: String(args.systemPrompt),
-				models: args.models,
-				skills: args.skills
+				models: args.models
 			};
 			return core.createWorkerType(sid, input);
 		},
@@ -1315,8 +1313,6 @@ const EXECUTION_TOOL_LINES = [
 	"- todo：维护待办清单（多步任务自己列步骤、自己勾）。",
 	"- jobs：把长命令放后台跑、稍后收结果。"
 ];
-/** 技能挂载提示（评审 F6）：技能行按类型挂载，卡面如实声明「以会话实际在场为准」。 */
-const SKILLS_NOTE = "- 若本类型配置了技能，会话里另有技能加载与技能调用工具，按会话实际挂载为准；没有挂载就如实用 report_blocker 说明。";
 /** 本插件白名单内一个工具的卡面行（描述与注册定义同源）。 */
 function toolLine(name$1) {
 	return `- ${name$1}：${orchestrationToolDescription(name$1)}`;
@@ -1325,10 +1321,7 @@ function toolLine(name$1) {
 function toolSection(role) {
 	const lines = toolsForRole(role).map(toolLine);
 	if (role === "supervisor") lines.push("- subagent：一次性子代理（进程内 spawn，空会话起步）：轻量收尾快的工作用它，提示词写自包含，结果随完成通知回来。");
-	if (role !== "router") {
-		lines.push(...EXECUTION_TOOL_LINES);
-		lines.push(SKILLS_NOTE);
-	}
+	if (role !== "router") lines.push(...EXECUTION_TOOL_LINES);
 	lines.push(ASK_USER_LINE);
 	return lines.join("\n");
 }
@@ -7769,17 +7762,6 @@ function delegationGroup() {
 		}]
 	};
 }
-/** 技能行（r4 §6.2 样板：只注册进本预设 scope 层，无需 realm）。 */
-function skillRows(customSkillDirs) {
-	return [{
-		id: "skill-filesystem",
-		name: "@deepseek-ai/dsh-skill-filesystem",
-		config: { customSkillDirs: [...customSkillDirs] }
-	}, {
-		id: "tool-skill",
-		name: "@deepseek-ai/dsh-tool-skill"
-	}];
-}
 /**
 * cache-priority 统一超集组合（v1.3 规格 §1/§2；每次调用产全新数组，调用方可
 * 自由追加技能行不改基准）。三预设（Router 动态定义 / worker 类型动态定义 /
@@ -7906,7 +7888,6 @@ function buildWorkerPresetDefinition(t, options = {}) {
 		name: "@deepseek-ai/dsh-tool-jobs"
 	});
 	else plugins.push(delegationGroup());
-	if (t.skills.length > 0 && options.customSkillDirs !== void 0 && options.customSkillDirs.length > 0) plugins.push(...skillRows(options.customSkillDirs));
 	if (options.mode !== "cache-priority") plugins.push(compactionGroup());
 	return {
 		id: dynamicPresetId(t.templateId),
@@ -8161,10 +8142,7 @@ var DynamicPresetEngine = class {
 	async ensureRegistered(record, mode = "minimal-face") {
 		if (record.origin === "builtin") return false;
 		const id = dynamicPresetId(record.templateId);
-		const definition = buildWorkerPresetDefinition(record, {
-			customSkillDirs: this.deps.skillDirs?.(record),
-			mode
-		});
+		const definition = buildWorkerPresetDefinition(record, { mode });
 		try {
 			const problems = await this.validate(definition.plugins);
 			if (problems.length > 0) {
@@ -10017,7 +9995,6 @@ function apply(ctx, rawConfig) {
 	const engine = new DynamicPresetEngine({
 		presets: ctx.agentPresets,
 		effect: (factory, label) => ctx.effect(factory, label),
-		skillDirs: () => void 0,
 		logger: {
 			info: (message) => log.info(message),
 			warn: (message) => log.warn(message)

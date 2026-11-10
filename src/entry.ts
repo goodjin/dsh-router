@@ -561,7 +561,6 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   const engine = new DynamicPresetEngine({
     presets: ctx.agentPresets,
     effect: (factory, label) => ctx.effect(factory, label),
-    skillDirs: () => undefined, // 初始技能目录解析（C3 设置页接入已装技能包时落地）
     logger: { info: (message: string) => log.info(message), warn: (message: string) => log.warn(message) },
   })
 

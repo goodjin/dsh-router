@@ -224,22 +224,6 @@ describe('C3 worker 类型 / Router 默认值（api 只增函数）', () => {
     expect(result).toEqual(createdType)
   })
 
-  it('updateWorkerType：POST /router/worker-types/update {templateId, patch}', async () => {
-    let path = ''
-    let body = ''
-    const api = createRouterApi({
-      fetch: jsonFetch((input, init) => {
-        path = input
-        body = String(init?.body)
-        return jsonResponse(200, { type: { ...createdType, name: '新名' } })
-      }),
-    })
-    const result = await api.updateWorkerType({ templateId: 't-1', patch: { name: '新名', models: ['x/y'] } })
-    expect(path).toBe('/router/worker-types/update')
-    expect(JSON.parse(body)).toEqual({ templateId: 't-1', patch: { name: '新名', models: ['x/y'] } })
-    expect(result.name).toBe('新名')
-  })
-
   it('setWorkerTypeEnabled：POST /router/worker-types/enabled {templateId, enabled}', async () => {
     let path = ''
     let body = ''
@@ -272,22 +256,6 @@ describe('C3 worker 类型 / Router 默认值（api 只增函数）', () => {
     expect(error).toBeInstanceOf(RouterApiError)
     expect((error as RouterApiError).status).toBe(409)
     expect((error as RouterApiError).message).toContain('内置类型不可删除')
-  })
-
-  it('getDefaults / saveDefaults：GET 读、POST 写回 RouterDefaults', async () => {
-    const calls: Array<{ input: string; method?: string; body?: string }> = []
-    const defaultsValue = { routerSystemPrompt: '默认提示词', routerModel: 'p/m' }
-    const api = createRouterApi({
-      fetch: jsonFetch((input, init) => {
-        calls.push({ input, method: init?.method, body: init?.body === undefined ? undefined : String(init?.body) })
-        return jsonResponse(200, defaultsValue)
-      }),
-    })
-    await expect(api.getDefaults()).resolves.toEqual(defaultsValue)
-    await expect(api.saveDefaults(defaultsValue)).resolves.toEqual(defaultsValue)
-    expect(calls[0]).toEqual({ input: '/router/defaults', method: undefined })
-    expect(calls[1]?.method).toBe('POST')
-    expect(JSON.parse(calls[1]?.body ?? '{}')).toEqual(defaultsValue)
   })
 })
 

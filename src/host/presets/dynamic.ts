@@ -64,8 +64,6 @@ export function supersetPersona(): string {
 }
 
 export interface BuildWorkerOptions {
-  /** record.skills 解析出的技能目录（有技能且目录非空才挂技能行）。 */
-  customSkillDirs?: string[]
   /** 组合模式（v1.3 A1；缺省 minimal-face = 现行组合，静态行为不变）。 */
   mode?: WorkerSpawnMode
 }
@@ -112,14 +110,6 @@ function delegationGroup(): RowSpec {
       },
     ],
   }
-}
-
-/** 技能行（r4 §6.2 样板：只注册进本预设 scope 层，无需 realm）。 */
-function skillRows(customSkillDirs: string[]): RowSpec[] {
-  return [
-    { id: 'skill-filesystem', name: '@deepseek-ai/dsh-skill-filesystem', config: { customSkillDirs: [...customSkillDirs] } },
-    { id: 'tool-skill', name: '@deepseek-ai/dsh-tool-skill' },
-  ]
 }
 
 /**
@@ -197,9 +187,8 @@ export function buildWorkerPresetDefinition(t: WorkerTypeRecord, options: BuildW
       plugins.push(delegationGroup())
     }
   }
-  if (t.skills.length > 0 && options.customSkillDirs !== undefined && options.customSkillDirs.length > 0) {
-    plugins.push(...skillRows(options.customSkillDirs))
-  }
+  // 2026-11-10 裁定：类型不再挂技能行（有提示词就够）——record.skills 字段
+  // 保留在存量数据里，但预设组合不再消费它。
   if (options.mode !== 'cache-priority') {
     plugins.push(compactionGroup())
   }

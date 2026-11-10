@@ -1,21 +1,20 @@
 /**
- * 设置段（计划 Task B7 起；v1.1 Task C3 重写为「Router 管理」完整栏目）。
+ * 设置段（「Router 管理」栏目；2026-11-10 设置页收敛后三块）。
  *
- * 挂点 settings.section（slot key 以 R3 报告为准）。栏目四块：
+ * 挂点 settings.section（slot key 以 R3 报告为准）。栏目：
  * 1. 原偏好展示（pollMs/浮窗/活动卡上限——client-prefs 只读，写通道同前）；
- * 2. 派生模式选择（v1.3 C2）；
- * 3. Worker 类型管理（规格 §6）：列表（名称/角色/模型数/技能数/启用态/来源）
- *    + 行内操作（编辑/禁用启用/删除，builtin 无删除不可编辑）+ 新建/编辑表单
- *    （名称、描述、角色下拉、模型有序列表、技能勾选）；
- * 4. Router 默认区：默认模型（默认系统提示词的编辑 UI 已移除，2026-11；
- *    既有 routerSystemPrompt 数据保留，保存默认模型时原样带回）。
+ * 2. 派生模式选择（说明文案按 2026-11-10 分叉范围裁定如实表述）；
+ * 3. Worker 类型管理：列表（名称/角色/模型/启用态/来源）+ 行内操作（禁用/启用/
+ *    删除，builtin 无删除不可禁用）+ **新建**表单（名称、描述、角色、模型有序
+ *    列表）。类型**无编辑入口**（要改就删了重建）；**不再挂技能**（有提示词就够）。
+ *    「Router 默认」区已整体移除：Router 身份由预设 persona 直定，无需默认模型。
  *
  * 样式基线（规格 §9）：全部浅色，无黑底回退；悬浮提示一律 ui-kit 的
  * LightTooltip（禁原生 title），hover 反馈一律「颜色稍变深」（useHoverDarken）。
  * 交互的纯逻辑（校验/归一化/reducer）在 settings-model.ts，本文件只做组装。
  */
 
-import { useCallback, useEffect, useReducer, useSyncExternalStore, useState } from 'react'
+import { useCallback, useEffect, useReducer, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 
 import type { RouterApi } from './api.ts'
@@ -23,7 +22,6 @@ import type { ClientPrefsStore } from './client-prefs.ts'
 import {
   SPAWN_MODE_MODEL_HINT,
   canDisableRecord,
-  canEditRecord,
   canRemoveRecord,
   initialTypeManageState,
   isFormDirty,
@@ -31,7 +29,6 @@ import {
   normalizeTypeForm,
   originLabel,
   roleLabel,
-  skillCatalogOf,
   spawnModeDescription,
   spawnModeLabel,
   typeManageReducer,
@@ -201,7 +198,6 @@ function TypeRow(props: {
   record: WorkerTypeRecord
   busy: boolean
   armedRemove: string | null
-  onEdit(record: WorkerTypeRecord): void
   onToggle(record: WorkerTypeRecord): void
   onArmRemove(templateId: string): void
   onConfirmRemove(templateId: string): void
@@ -215,21 +211,11 @@ function TypeRow(props: {
       <OriginTag origin={record.origin} />
       <span style={NOTE_STYLE}>
         模型 {record.models.length} 个{record.models.length > 0 ? `（默认 ${record.models[0]}）` : ''}
-        ｜技能 {record.skills.length} 个
       </span>
       <span style={{ ...TAG_STYLE, opacity: record.enabled ? 1 : 0.6 }} data-router-type-enabled={String(record.enabled)}>
         {record.enabled ? '已启用' : '已禁用'}
       </span>
       <span style={{ display: 'inline-flex', gap: 6, marginLeft: 'auto' }}>
-        {canEditRecord(record) ? (
-          <LightTooltip label="编辑名称/描述/模型/技能（系统提示词不经此处改动）">
-            <HoverButton label="编辑" dataTag={`edit-${record.templateId}`} onClick={() => props.onEdit(record)} />
-          </LightTooltip>
-        ) : (
-          <LightTooltip label="内置类型固定不可编辑">
-            <HoverButton label="编辑" dataTag={`edit-${record.templateId}`} disabled onClick={() => undefined} />
-          </LightTooltip>
-        )}
         {record.enabled ? (
           canDisableRecord(record) ? (
             <LightTooltip label="禁用后保留预设注册，仅拒绝新派发；已建会话不受影响">
@@ -337,62 +323,7 @@ function ModelsEditor(props: {
   )
 }
 
-/* ────────────────────────── 技能勾选编辑器 ────────────────────────── */
-
-function SkillsEditor(props: {
-  skills: string[]
-  catalog: string[]
-  disabled?: boolean
-  onChange(skills: string[]): void
-}): ReactNode {
-  const [draft, setDraft] = useState('')
-  const extras = props.skills.filter((entry) => !props.catalog.includes(entry))
-  const toggle = (skill: string, on: boolean): void => {
-    props.onChange(on ? [...props.skills, skill] : props.skills.filter((entry) => entry !== skill))
-  }
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} data-router-skills-editor>
-      {props.catalog.length === 0 && extras.length === 0 ? (
-        <span style={NOTE_STYLE}>还没有任何技能（保存类型后，技能清单会随已装技能包出现）</span>
-      ) : null}
-      {[...new Set([...props.catalog, ...extras])].map((skill) => (
-        <label key={skill} style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-          <input
-            type="checkbox"
-            data-router-skill-checkbox={skill}
-            checked={props.skills.includes(skill)}
-            disabled={props.disabled}
-            onChange={(event) => { toggle(skill, event.target.checked) }}
-          />
-          <span>{skill}</span>
-        </label>
-      ))}
-      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-        <input
-          data-router-skill-custom
-          style={FIELD_STYLE}
-          placeholder="自定义技能名"
-          value={draft}
-          disabled={props.disabled}
-          onChange={(event) => { setDraft(event.target.value) }}
-        />
-        <LightTooltip label="勾选清单之外的技能名（预设内真实挂载）">
-          <HoverButton
-            label="添加"
-            dataTag="skill-add-custom"
-            disabled={props.disabled || draft.trim() === ''}
-            onClick={() => {
-              toggle(draft.trim(), true)
-              setDraft('')
-            }}
-          />
-        </LightTooltip>
-      </div>
-    </div>
-  )
-}
-
-/* ────────────────────────── 新建/编辑表单 ────────────────────────── */
+/* ────────────────────────── 新建表单 ────────────────────────── */
 
 function TypeForm(props: {
   api: RouterApi
@@ -402,7 +333,6 @@ function TypeForm(props: {
   busy: boolean
   error: string | null
   modelCatalog: string[]
-  skillCatalog: string[]
   dispatch(action: TypeManageAction): void
   onSaved(record: WorkerTypeRecord): void
 }): ReactNode {
@@ -416,26 +346,8 @@ function TypeForm(props: {
     dispatch({ type: 'save-start' })
     try {
       const normalized = normalizeTypeForm(editing)
-      if (isNew) {
-        // 不带 systemPrompt 键：宿主按角色补默认提示词（空串会盖掉默认，故不发）。
-        props.onSaved(await api.createWorkerType(normalized))
-        return
-      }
-      const saved = await api.updateWorkerType({
-        templateId: editing.templateId!,
-        patch: {
-          name: normalized.name,
-          description: normalized.description,
-          models: normalized.models,
-          skills: normalized.skills,
-          // patch 不含 systemPrompt：宿主逐字保留既有提示词（含首尾空白）。
-        },
-      })
-      if (props.baseline !== null && normalized.enabled !== props.baseline.enabled) {
-        props.onSaved(await api.setWorkerTypeEnabled({ templateId: editing.templateId!, enabled: normalized.enabled }))
-        return
-      }
-      props.onSaved(saved)
+      // 不带 systemPrompt/skills 键：宿主按角色补默认提示词；类型不挂技能。
+      props.onSaved(await api.createWorkerType(normalized))
     } catch (caught) {
       dispatch({ type: 'op-failed', message: caught instanceof Error ? caught.message : String(caught) })
     }
@@ -450,7 +362,7 @@ function TypeForm(props: {
         void submit()
       }}
     >
-      <strong>{isNew ? '新建 worker 类型' : `编辑：${editing.name}`}</strong>
+      <strong>新建 worker 类型</strong>
       <label style={FIELD_LABEL_STYLE}>
         <span>名称（必填）</span>
         <input data-router-type-name value={editing.name} autoFocus onChange={(event) => { dispatch({ type: 'form-change', patch: { name: event.target.value } }) }} />
@@ -461,20 +373,16 @@ function TypeForm(props: {
         <input data-router-type-description value={editing.description} onChange={(event) => { dispatch({ type: 'form-change', patch: { description: event.target.value } }) }} />
       </label>
       <label style={FIELD_LABEL_STYLE}>
-        <span>角色{isNew ? '' : '（保存后不可改）'}</span>
-        {isNew ? (
-          <select
-            data-router-type-role
-            style={FIELD_STYLE}
-            value={editing.role}
-            onChange={(event) => { dispatch({ type: 'form-change', patch: { role: event.target.value === 'supervisor' ? 'supervisor' : 'worker' } }) }}
-          >
-            <option value="worker">worker（执行者）</option>
-            <option value="supervisor">supervisor（可继续拆分子任务）</option>
-          </select>
-        ) : (
-          <span style={TAG_STYLE}>{roleLabel(editing.role)}</span>
-        )}
+        <span>角色</span>
+        <select
+          data-router-type-role
+          style={FIELD_STYLE}
+          value={editing.role}
+          onChange={(event) => { dispatch({ type: 'form-change', patch: { role: event.target.value === 'supervisor' ? 'supervisor' : 'worker' } }) }}
+        >
+          <option value="worker">worker（执行者）</option>
+          <option value="supervisor">supervisor（可继续拆分子任务）</option>
+        </select>
       </label>
       <div style={FIELD_LABEL_STYLE}>
         <span>允许模型（有序：首个为该类型会话默认模型，其余为候选）</span>
@@ -482,14 +390,6 @@ function TypeForm(props: {
           models={editing.models}
           catalog={props.modelCatalog}
           onChange={(models) => { dispatch({ type: 'form-change', patch: { models } }) }}
-        />
-      </div>
-      <div style={FIELD_LABEL_STYLE}>
-        <span>初始技能（勾选；预设内真实挂载）</span>
-        <SkillsEditor
-          skills={editing.skills}
-          catalog={props.skillCatalog}
-          onChange={(skills) => { dispatch({ type: 'form-change', patch: { skills } }) }}
         />
       </div>
       <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
@@ -514,9 +414,9 @@ function TypeForm(props: {
         {props.confirmDiscard ? (
           <HoverButton label="不放弃，继续编辑" dataTag="form-resume" onClick={() => { dispatch({ type: 'form-change', patch: {} }) }} />
         ) : null}
-        <LightTooltip label={isNew ? '创建类型（即刻注册动态预设；系统提示词按角色取默认）' : '保存修改（系统提示词不受影响）'}>
+        <LightTooltip label="创建类型（即刻注册动态预设；系统提示词按角色取默认，worker 收到时经身份切换卡生效）">
           <HoverButton
-            label={props.busy ? '保存中…' : '保存'}
+            label={props.busy ? '保存中…' : '创建'}
             dataTag="form-save"
             style={PRIMARY_BUTTON_STYLE}
             disabled={props.busy || problems['name'] !== null}
@@ -539,7 +439,7 @@ function onOff(enabled: boolean): string {
   return enabled ? '开' : '关'
 }
 
-/** 设置段：偏好展示 + Worker 类型管理 + Router 默认（v1.1 规格 §5/§6/§9）。 */
+/** 设置段：偏好展示 + 派生模式 + Worker 类型管理（2026-11-10 收敛后三块）。 */
 export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
   const prefs = useSyncExternalStore(props.prefs.subscribe, props.prefs.get)
   const [state, dispatch] = useReducer(typeManageReducer, undefined, initialTypeManageState)
@@ -547,12 +447,11 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
   const reload = useCallback(async (): Promise<void> => {
     dispatch({ type: 'load-start' })
     try {
-      const [types, defaults, spawn] = await Promise.all([
+      const [types, spawn] = await Promise.all([
         props.api.listWorkerTypes(),
-        props.api.getDefaults(),
         props.api.getSpawnMode(),
       ])
-      dispatch({ type: 'loaded', types, defaults })
+      dispatch({ type: 'loaded', types })
       dispatch({ type: 'spawn-loaded', mode: spawn.mode })
     } catch (caught) {
       dispatch({ type: 'load-failed', message: caught instanceof Error ? caught.message : String(caught) })
@@ -581,18 +480,7 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
     }
   }
 
-  async function saveDefaults(): Promise<void> {
-    if (state.defaultsDraft === null) return
-    dispatch({ type: 'defaults-save-start' })
-    try {
-      const saved = await props.api.saveDefaults({ ...state.defaultsDraft })
-      dispatch({ type: 'defaults-save-done', defaults: saved })
-    } catch (caught) {
-      dispatch({ type: 'op-failed', message: caught instanceof Error ? caught.message : String(caught) })
-    }
-  }
-
-  /** 切派生模式（v1.3 C2）：选择即保存（volatile，即时生效；失败保旧值提示）。 */
+  /** 切派生模式：选择即保存（volatile，即时生效；失败保旧值提示）。 */
   async function changeSpawnMode(mode: WorkerSpawnMode): Promise<void> {
     if (state.spawnMode === null) return
     dispatch({ type: 'spawn-save-start' })
@@ -605,7 +493,6 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
   }
 
   const modelCatalog = modelCatalogOf(state.types)
-  const skillCatalog = skillCatalogOf(state.types)
 
   return (
     <div data-router-settings style={PAGE_STYLE}>
@@ -692,7 +579,6 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
             record={record}
             busy={state.busy}
             armedRemove={state.armedRemove}
-            onEdit={(row) => { dispatch({ type: 'edit-form', record: row }) }}
             onToggle={(row) => { void toggleRecord(row) }}
             onArmRemove={(templateId) => { dispatch({ type: 'remove-arm', templateId }) }}
             onConfirmRemove={(templateId) => { void confirmRemove(templateId) }}
@@ -710,67 +596,15 @@ export function RouterSettingsSection(props: SettingsSectionProps): ReactNode {
             busy={state.busy}
             error={state.error}
             modelCatalog={modelCatalog}
-            skillCatalog={skillCatalog}
             dispatch={dispatch}
             onSaved={(record) => { dispatch({ type: 'save-done', record }) }}
           />
         ) : null}
         <div style={NOTE_STYLE}>
           禁用 = 保留预设注册、仅拒绝新派发；删除 = 注销预设，已关闭的该类型会话将无法重开（重建同名类型可恢复）。
+          类型不支持编辑——要改就删除后重建（Router 会话里也可随时 create_worker_type）。
         </div>
       </div>
-
-      {/* 4. Router 默认区（规格 §6；默认系统提示词编辑 UI 已移除——数据保留，
-            保存时把加载到的 routerSystemPrompt 原样带回，宿主路由两字段都必填）。 */}
-      {state.defaultsDraft !== null ? (
-        <div style={CARD_STYLE} data-router-defaults-section>
-          <div style={SECTION_TITLE_STYLE}>
-            <strong>Router 默认</strong>
-            {state.defaultsDirty ? <span style={NOTE_STYLE} data-router-defaults-dirty>有未保存的更改。</span> : null}
-          </div>
-          <div style={FIELD_LABEL_STYLE}>
-            <span>默认模型（创建 Router 会话时钉定；空 = 跟随宿主默认）</span>
-            <select
-              data-router-defaults-model
-              style={FIELD_STYLE}
-              value={state.defaultsDraft.routerModel}
-              onChange={(event) => { dispatch({ type: 'defaults-draft', patch: { routerModel: event.target.value } }) }}
-            >
-              <option value="">（不钉，跟随宿主默认）</option>
-              {modelCatalog.map((model) => (
-                <option key={model} value={model}>{model}</option>
-              ))}
-              {state.defaultsDraft.routerModel !== '' && !modelCatalog.includes(state.defaultsDraft.routerModel) ? (
-                <option value={state.defaultsDraft.routerModel}>{state.defaultsDraft.routerModel}（自定义）</option>
-              ) : null}
-            </select>
-            <DefaultsFreeModel onApply={(model) => { dispatch({ type: 'defaults-draft', patch: { routerModel: model } }) }} />
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <LightTooltip label="保存后新建的 Router 会话按此默认（已有会话不变）">
-              <HoverButton label={state.defaultsBusy ? '保存中…' : '保存默认'} dataTag="defaults-save" style={PRIMARY_BUTTON_STYLE} disabled={state.defaultsBusy} onClick={() => { void saveDefaults() }} />
-            </LightTooltip>
-            <HoverButton label="还原" dataTag="defaults-reset" onClick={() => { dispatch({ type: 'defaults-reset' }) }} />
-          </div>
-        </div>
-      ) : null}
     </div>
-  )
-}
-
-/** 默认模型的自定义输入行（候选清单之外的 provider/model）。 */
-function DefaultsFreeModel(props: { onApply(model: string): void }): ReactNode {
-  const [draft, setDraft] = useState('')
-  return (
-    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
-      <input
-        data-router-defaults-model-custom
-        style={FIELD_STYLE}
-        placeholder="或填 provider/model"
-        value={draft}
-        onChange={(event) => { setDraft(event.target.value) }}
-      />
-      <HoverButton label="采用" dataTag="defaults-model-apply" disabled={draft.trim() === ''} onClick={() => { props.onApply(draft.trim()); setDraft('') }} />
-    </span>
   )
 }

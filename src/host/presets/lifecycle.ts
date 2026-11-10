@@ -47,8 +47,6 @@ export interface DynamicPresetEngineDeps {
   effect(factory: () => unknown, label?: string): unknown
   /** 行校验口（缺省 = collectHostRows + validateRowSpec 多宿主装载）。 */
   validate?(rows: RowSpec[]): Promise<string[]>
-  /** record.skills → 技能目录解析（缺省 = 无目录，不挂技能行）。 */
-  skillDirs?(record: WorkerTypeRecord): string[] | undefined
   logger?: { info(message: string): void; warn(message: string): void }
 }
 
@@ -127,7 +125,6 @@ export class DynamicPresetEngine {
     if (record.origin === 'builtin') return false
     const id = dynamicPresetId(record.templateId)
     const definition = buildWorkerPresetDefinition(record, {
-      customSkillDirs: this.deps.skillDirs?.(record),
       mode,
     })
     try {

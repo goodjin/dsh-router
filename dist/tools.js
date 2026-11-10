@@ -554,10 +554,9 @@ const TOOL_SPECS = {
 				systemPrompt: {
 					type: "string",
 					minLength: 1,
-					description: "该类型的系统提示词（persona 整段替换）"
+					description: "该类型的系统提示词（persona 整段替换；worker 收到时经身份切换卡生效）"
 				},
-				models: stringArray("允许模型列表（provider/model，有序；首个为该类型会话默认模型）"),
-				skills: stringArray("初始技能名清单")
+				models: stringArray("允许模型列表（provider/model，有序；首个为该类型会话默认模型）")
 			},
 			required: ["name", "systemPrompt"]
 		},
@@ -576,8 +575,7 @@ const TOOL_SPECS = {
 				description: typeof args.description === "string" ? args.description : void 0,
 				role: args.role,
 				systemPrompt: String(args.systemPrompt),
-				models: args.models,
-				skills: args.skills
+				models: args.models
 			};
 			return core.createWorkerType(sid, input);
 		},
