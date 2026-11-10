@@ -83,3 +83,41 @@ it('会话切换时仅 Router 及派发会话保留标签，普通会话和无�
     otherHeader.remove()
   }
 })
+
+it('动作失败时在标签条上显示原因（此前失败完全无声）', async () => {
+  let snapshot: WorkbenchState = {
+    ready: true, lastError: null, actionError: null, board: emptyBoard(), closingSessionIds: [],
+    currentSessionId: 'router',
+    routerState: {
+      routerSessions: [{ sessionId: 'router', title: 'Router' }],
+      tabs: [{ sessionId: 'worker', title: '执行任务', running: true }],
+      tasks: [], questions: [], templates: [],
+    },
+  }
+  const listeners = new Set<() => void>()
+  const clearActionError = vi.fn()
+  const store = {
+    get: () => snapshot,
+    subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+    closeWorkerTab: vi.fn(),
+    clearActionError,
+  } as unknown as WorkbenchStore
+  const container = document.createElement('div')
+  document.body.append(container)
+  const root = createRoot(container)
+  try {
+    await act(async () => { root.render(createElement(WorkbenchTabs, { store, uiWorkspace: { openSession: vi.fn() } })) })
+    expect(container.querySelector('[data-router-tab-error]')).toBeNull()
+    await act(async () => {
+      snapshot = { ...snapshot, actionError: '关闭标签失败：标签不存在或已关闭: worker' }
+      listeners.forEach((listener) => listener())
+    })
+    const chip = container.querySelector('[data-router-tab-error]')!
+    expect(chip.textContent).toContain('关闭标签失败')
+    await act(async () => { chip.querySelector('button')!.click() })
+    expect(clearActionError).toHaveBeenCalled()
+  } finally {
+    await act(async () => root.unmount())
+    container.remove()
+  }
+})
