@@ -38,6 +38,7 @@ const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', imp
 const PATCH_TEXT = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)), 'utf8')
 
 const BUNDLE_PATH = fileURLToPath(new URL('../lib/client.js', import.meta.url))
+const COMPACTION_PATH = fileURLToPath(new URL('../dist/compaction.js', import.meta.url))
 const ENTRY_PATH = fileURLToPath(new URL('../dist/entry.js', import.meta.url))
 const TOOLS_PATH = fileURLToPath(new URL('../dist/tools.js', import.meta.url))
 const CONTEXT_PATH = fileURLToPath(new URL('../dist/context.js', import.meta.url))

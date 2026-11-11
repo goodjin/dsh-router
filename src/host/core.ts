@@ -677,6 +677,15 @@ export function createRouterCore(deps: RouterCoreAssemblyDeps): RouterCoreAssemb
       return result
     },
 
+    // 压缩引擎行的数据源（可选面；旧接线缺席时引擎回退默认摘要）：
+    // 全量账本里按派发会话过滤——「该会话派发的任务」归它自己，终态与否由
+    // 引擎侧装配裁决（活跃任务才进描述清单）。账本读失败如实抛，引擎按
+    // 「账本不可用」回退默认摘要，不炸压缩。
+    async listDispatchedTasks(sessionId) {
+      const records = await ledger.listAll()
+      return records.filter((record) => record.dispatchedBySessionId === sessionId)
+    },
+
     async controlTask(callerSessionId, taskId, action, note) {
       const record = ledger.get(taskId)
       if (record === undefined) throw new LedgerError('task-not-found', `任务不存在: ${taskId}`)

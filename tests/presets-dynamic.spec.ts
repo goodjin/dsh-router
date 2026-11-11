@@ -57,6 +57,7 @@ const FAKE_MODULES: Record<string, { Config?: unknown }> = {
   '@deepseek-ai/dsh-tool-skill': {},
   '@goodjin2/dsh-router/context': {},
   '@goodjin2/dsh-router/prompt-section': {},
+  '@goodjin2/dsh-router/compaction': {},
   '@deepseek-ai/dsh-tool-subagent-control': {},
   '@deepseek-ai/dsh-compaction-basic': {},
   '@deepseek-ai/dsh-command-compact': {},
@@ -140,6 +141,9 @@ describe('buildWorkerPresetDefinition：worker 角色组合', () => {
     expect(compaction!.isolate).toEqual({ compaction: true, toolResultPruner: true })
     const children = compaction!.config as RowSpec[]
     expect(children.map((row) => row.id)).toEqual(['compaction-basic', 'command-compact', 'tool-result-pruner'])
+    // 2026-11-11 用户裁定流程：引擎行换成 Router 的任务描述引擎（无活跃任务
+    // 时回退官方默认摘要），静态 yml 的 minimal-face 预设不受影响。
+    expect(children[0]).toMatchObject({ name: '@goodjin2/dsh-router/compaction' })
     expect(children[2]!.config).toEqual({ thresholdChars: 8192, headChars: 4096, tailChars: 1024 })
   })
 
@@ -222,17 +226,32 @@ describe('内置通用 worker：等价修复后的静态 worker 组合', () => {
     // 行 id 约定不同（静态带 worker- 前缀、动态统一无前缀）：剥前缀后逐行比对
     // name/config/结构。yml 的 `|-` 块标量剥掉末尾换行（bundle.spec 的原文还原
     // 会补回），person a 前缀两侧各剥一个尾换行再比；disabled 单独断言。
+    // 压缩引擎行是 2026-11-11 的有意分歧（见下一断言）：比对时把行名归一成
+    // 占位符，保证「其余全部逐行等价」仍然成立。
     const normalize = (rows: RowSpec[]): RowSpec[] =>
       rows.map((row) => {
         const clone: RowSpec = { ...row, id: row.id.replace(/^worker-/, '') }
         delete clone.disabled
+        if (Array.isArray(clone.config)) clone.config = normalize(clone.config as RowSpec[])
         const config = clone.config
         if (config !== null && typeof config === 'object' && !Array.isArray(config) && typeof (config as { prefix?: unknown }).prefix === 'string') {
           clone.config = { ...(config as Record<string, unknown>), prefix: (config as { prefix: string }).prefix.replace(/\n$/, '') }
         }
+        if (clone.id === 'compaction-basic') clone.name = '<engine-row>'
         return clone
       })
     expect(normalize(def.plugins)).toEqual(normalize(staticPlugins))
+  })
+
+  it('压缩引擎行有意分歧：动态组合换任务描述引擎，静态 yml 保持官方行', () => {
+    const dynamicEngine = (buildWorkerPresetDefinition(builtinGeneralType(0)).plugins
+      .find((row) => row.id === 'compaction')!.config as RowSpec[])
+      .find((row) => row.id === 'compaction-basic')!
+    const staticEngine = staticPresetPlugins('dsh-router-worker')
+      .flatMap((row) => (row.id === 'worker-compaction' ? ((row.config as RowSpec[]) ?? []) : []))
+      .find((row) => row.id === 'compaction-basic')!
+    expect(dynamicEngine.name).toBe('@goodjin2/dsh-router/compaction')
+    expect(staticEngine.name).toBe('@deepseek-ai/dsh-compaction-basic')
   })
 
   it('通用 worker 的提示词与 prompts/worker.ts 逐字一致（含尾换行）', () => {

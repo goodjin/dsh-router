@@ -114,4 +114,10 @@ export interface RouterCore {
    * await。缺席（旧接线）= 工具层全走兜底。
    */
   callerRoleOf?(sessionId: string): RoleKind | undefined | Promise<RoleKind | undefined>
+  /**
+   * 该会话派发的全部任务（压缩引擎行消费；按账本 dispatchedBySessionId 过滤）。
+   * 可选面：旧接线缺席时引擎回退默认摘要。失败抛错由调用方兜（引擎按「账本
+   * 不可用」回退，不炸压缩）。
+   */
+  listDispatchedTasks?(sessionId: string): Promise<TaskRecord[]>
 }

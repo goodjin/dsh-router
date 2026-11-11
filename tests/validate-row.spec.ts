@@ -34,6 +34,7 @@ const FAKE_MODULES: Record<string, { Config?: unknown }> = {
   '@deepseek-ai/dsh-tool-fs-search': { Config: fakeSearchConfig },
   '@deepseek-ai/dsh-tool-fs': { Config: fakeFsConfig },
   '@deepseek-ai/dsh-compaction-basic': {},
+  '@goodjin2/dsh-router/compaction': {},
 }
 
 function fakeLoad(): ValidateLoad {
