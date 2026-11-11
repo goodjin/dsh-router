@@ -112,10 +112,10 @@ describe('renderLedgerSnapshot', () => {
 
 interface DriverHarness {
   driver: CompactionDriver
-  calls: { compact: [number, number, string][]; balancedBefore: number[]; balancedAfter: number[] }
+  calls: { compactNow: string[]; skipReported: string[] }
   setAgent(sessionId: string | undefined, status?: string): void
-  setLastUserSeq(seq: number | null): void
-  setBalanced(before: boolean, after: boolean): void
+  /** compactNow 的返回：null = 引擎判定无有效范围；对象 = 压缩成功。 */
+  setCompactResult(result: { endSeq?: number } | null): void
   failCompact(error: Error): void
   clearCompact(): void
   holdCompact(): void
@@ -127,33 +127,24 @@ interface DriverHarness {
 
 function harness(): DriverHarness {
   const agents = new Map<string, { session: string; status: string }>()
-  let lastUserSeq: number | null = null
-  let balanced: [boolean, boolean] = [true, true]
+  let compactResult: { endSeq?: number } | null = { endSeq: 5 }
   let compactError: Error | null = null
   let gate: { promise: Promise<void>; release(): void } | null = null
   let queueEmpty: boolean | null = null
   let queueError: Error | null = null
-  const calls = { compact: [] as [number, number, string][], balancedBefore: [] as number[], balancedAfter: [] as number[] }
+  const calls = { compactNow: [] as string[], skipReported: [] as string[] }
   const deps: CompactionDeps = {
     getAgent(sessionId) {
       return agents.get(sessionId)
     },
-    async lastUserMessageSeq() {
-      return lastUserSeq
-    },
-    async balancedBefore(_session, seq) {
-      calls.balancedBefore.push(seq)
-      return balanced[0]
-    },
-    async balancedAfter(_session, seq) {
-      calls.balancedAfter.push(seq)
-      return balanced[1]
-    },
-    async compactRegion(start, end, agent) {
-      calls.compact.push([start, end, (agent as { session: string }).session])
+    async compactNow(agent) {
+      calls.compactNow.push((agent as { session: string }).session)
       if (gate !== null) await gate.promise
       if (compactError !== null) throw compactError
-      return { endSeq: end }
+      return compactResult
+    },
+    reportSkip(sessionId, reason) {
+      calls.skipReported.push(`${sessionId}: ${reason}`)
     },
     async queueEmpty() {
       if (queueError !== null) throw queueError
@@ -168,11 +159,8 @@ function harness(): DriverHarness {
       agents.clear()
       if (sessionId !== undefined) agents.set(sessionId, { session: sessionId, status })
     },
-    setLastUserSeq(seq) {
-      lastUserSeq = seq
-    },
-    setBalanced(before, after) {
-      balanced = [before, after]
+    setCompactResult(result) {
+      compactResult = result
     },
     failCompact(error) {
       compactError = error
@@ -204,101 +192,75 @@ describe('CompactionDriver', () => {
   it('idle 但没有 pending 标记：不动作', async () => {
     const h = harness()
     h.setAgent('s-1')
-    h.setLastUserSeq(9)
     expect(await h.driver.onIdle('s-1')).toBe('no-op')
-    expect(h.calls.compact).toHaveLength(0)
+    expect(h.calls.compactNow).toHaveLength(0)
   })
 
-  it('派发标记 pending，idle 后压缩 [检查点+1 .. 最后一条用户消息前]，成功清标记并推进检查点', async () => {
+  it('派发标记 pending，idle 后调引擎 compactNow（引擎自圈范围），成功清标记', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1')
-    h.setLastUserSeq(12)
     expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact).toEqual([[0, 11, 's-1']])
-    expect(h.calls.balancedBefore).toEqual([0])
-    expect(h.calls.balancedAfter).toEqual([11])
+    expect(h.calls.compactNow).toEqual(['s-1'])
     expect(h.driver.isPending('s-1')).toBe(false)
-    // 下一次派发：区域从上次检查点之后开始
-    h.driver.onDispatched('s-1')
-    h.setLastUserSeq(30)
-    expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact[1]).toEqual([12, 29, 's-1'])
   })
 
-  it('agent 不存活：跳过并保留 pending', async () => {
+  it('compactNow 返回 null（引擎判定无有效范围）：视为完成、清标记', async () => {
+    const h = harness()
+    h.driver.onDispatched('s-1')
+    h.setAgent('s-1')
+    h.setCompactResult(null)
+    expect(await h.driver.onIdle('s-1')).toBe('compacted')
+    expect(h.calls.compactNow).toEqual(['s-1'])
+    expect(h.driver.isPending('s-1')).toBe(false)
+  })
+
+  it('agent 不存活：跳过、保留 pending，且自报原因', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent(undefined)
-    h.setLastUserSeq(5)
     expect(await h.driver.onIdle('s-1')).toBe('skipped')
     expect(h.driver.isPending('s-1')).toBe(true)
-    expect(h.calls.compact).toHaveLength(0)
+    expect(h.calls.compactNow).toHaveLength(0)
+    expect(h.calls.skipReported).toEqual(['s-1: agent-absent'])
   })
 
-  it('agent 仍在运行（非 idle）：跳过并保留 pending', async () => {
+  it('agent 仍在运行（非 idle）：跳过、保留 pending，且自报原因', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1', 'running')
-    h.setLastUserSeq(5)
     expect(await h.driver.onIdle('s-1')).toBe('skipped')
     expect(h.driver.isPending('s-1')).toBe(true)
+    expect(h.calls.skipReported).toEqual(['s-1: agent-not-idle'])
   })
 
-  it('没有用户消息锚点：跳过', async () => {
+  it('同一 skip 原因每会话只自报一次（不刷屏）', async () => {
+    const h = harness()
+    h.driver.onDispatched('s-1')
+    h.setAgent(undefined)
+    await h.driver.onIdle('s-1')
+    await h.driver.onIdle('s-1')
+    expect(h.calls.skipReported).toEqual(['s-1: agent-absent'])
+  })
+
+  it('compactNow 抛错：吞掉、保留 pending 留待下次，且自报原因', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1')
-    h.setLastUserSeq(null)
-    expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
-  })
-
-  it('区域为空（最后一条用户消息就在检查点处）：跳过', async () => {
-    const h = harness()
-    h.driver.onDispatched('s-1')
-    h.setAgent('s-1')
-    h.setLastUserSeq(0)
-    expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
-  })
-
-  it('两端配对校验不通过：不调 compactRegion，保留 pending 留待下次', async () => {
-    const h = harness()
-    h.driver.onDispatched('s-1')
-    h.setAgent('s-1')
-    h.setLastUserSeq(10)
-    h.setBalanced(false, true)
-    expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
-    h.setBalanced(true, false)
-    expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
-    expect(h.driver.isPending('s-1')).toBe(true)
-    h.setBalanced(true, true)
-    expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact).toHaveLength(1)
-  })
-
-  it('compactRegion 抛错：吞掉、保留 pending 留待下次', async () => {
-    const h = harness()
-    h.driver.onDispatched('s-1')
-    h.setAgent('s-1')
-    h.setLastUserSeq(10)
     h.failCompact(new Error('summary failed'))
     expect(await h.driver.onIdle('s-1')).toBe('skipped')
     expect(h.driver.isPending('s-1')).toBe(true)
-    expect(h.calls.compact).toHaveLength(1)
+    expect(h.calls.compactNow).toHaveLength(1)
+    expect(h.calls.skipReported).toEqual(['s-1: compact-failed: summary failed'])
     h.clearCompact()
     expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact).toHaveLength(2)
+    expect(h.calls.compactNow).toHaveLength(2)
   })
 
   it('压缩进行中重复 onIdle：直接 no-op（不重入）', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1')
-    h.setLastUserSeq(10)
     h.holdCompact()
     const first = h.driver.onIdle('s-1')
     await Promise.resolve()
@@ -308,38 +270,51 @@ describe('CompactionDriver', () => {
     expect(h.driver.isPending('s-1')).toBe(false)
   })
 
-  it('会话还有排队消息：跳过并保留 pending（无排队消息才驱动压缩）', async () => {
+  it('会话还有排队消息：跳过并保留 pending（无排队消息才驱动压缩），且自报原因', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1')
-    h.setLastUserSeq(10)
     h.setQueue(false)
     expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
+    expect(h.calls.compactNow).toHaveLength(0)
     expect(h.driver.isPending('s-1')).toBe(true)
+    expect(h.calls.skipReported).toEqual(['s-1: queue-not-empty'])
     // 排队清空后的下一次 idle 才真正压缩
     h.setQueue(true)
     expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact).toHaveLength(1)
+    expect(h.calls.compactNow).toHaveLength(1)
   })
 
-  it('queueEmpty 查询抛错：按跳过处理（保守，不清标记）', async () => {
+  it('queueEmpty 查询抛错：按跳过处理（保守，不清标记），且自报原因', async () => {
     const h = harness()
     h.driver.onDispatched('s-1')
     h.setAgent('s-1')
-    h.setLastUserSeq(10)
     h.setQueueError(new Error('state unavailable'))
     expect(await h.driver.onIdle('s-1')).toBe('skipped')
-    expect(h.calls.compact).toHaveLength(0)
+    expect(h.calls.compactNow).toHaveLength(0)
     expect(h.driver.isPending('s-1')).toBe(true)
+    expect(h.calls.skipReported).toEqual(['s-1: queue-unknown: state unavailable'])
   })
 
-  it('未提供 queueEmpty 依赖：维持既有行为（视为无排队）', async () => {
-    const h = harness()
-    h.driver.onDispatched('s-1')
-    h.setAgent('s-1')
-    h.setLastUserSeq(6)
-    expect(await h.driver.onIdle('s-1')).toBe('compacted')
-    expect(h.calls.compact).toEqual([[0, 5, 's-1']])
+  it('compactNow 依赖缺席：跳过、保留 pending，且自报原因（引擎不可用不能再静默）', async () => {
+    const agents = new Map<string, { session: string; status: string }>()
+    agents.set('s-1', { session: 's-1', status: 'idle' })
+    const skipReported: string[] = []
+    const driver = new CompactionDriver({
+      getAgent(sessionId) {
+        return agents.get(sessionId)
+      },
+      async queueEmpty() {
+        return true
+      },
+      reportSkip(sessionId, reason) {
+        skipReported.push(`${sessionId}: ${reason}`)
+      },
+      now: () => 1,
+    })
+    driver.onDispatched('s-1')
+    expect(await driver.onIdle('s-1')).toBe('skipped')
+    expect(driver.isPending('s-1')).toBe(true)
+    expect(skipReported).toEqual(['s-1: engine-absent'])
   })
 })
