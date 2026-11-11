@@ -81,7 +81,12 @@ function compactionGroup(): RowSpec {
     group: true,
     isolate: { compaction: true, toolResultPruner: true },
     config: [
-      { id: 'compaction-basic', name: '@deepseek-ai/dsh-compaction-basic' },
+      // 压缩引擎行换成 Router 的任务描述引擎（2026-11-11 用户裁定流程）：
+      // summarize 钩子按「该会话派发、仍在推进」的任务描述清单替换压缩段，
+      // 不调 LLM；无活跃任务/worker 会话回退官方默认摘要（行为见
+      // src/compaction.ts）。行 id 保持 compaction-basic——静态 yml 的
+      // minimal-face 预设与动态超集各持一份组，id 只需组内唯一。
+      { id: 'compaction-basic', name: '@goodjin2/dsh-router/compaction' },
       { id: 'command-compact', name: '@deepseek-ai/dsh-command-compact' },
       {
         id: 'tool-result-pruner',

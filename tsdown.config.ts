@@ -42,6 +42,7 @@ const hostEntries = {
   tools: 'src/tools.ts',
   context: 'src/context.ts',
   'prompt-section': 'src/prompt-section.ts',
+  compaction: 'src/compaction.ts',
 } as const
 
 const clientConfig = defineConfig({

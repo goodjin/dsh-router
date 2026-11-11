@@ -6967,6 +6967,9 @@ function createRouterCore(deps) {
 			if (deps.breaker !== void 0) result.breaker = await breakerView(deps.breaker);
 			return result;
 		},
+		async listDispatchedTasks(sessionId) {
+			return (await ledger.listAll()).filter((record) => record.dispatchedBySessionId === sessionId);
+		},
 		async controlTask(callerSessionId$1, taskId, action, note) {
 			const record = ledger.get(taskId);
 			if (record === void 0) throw new LedgerError("task-not-found", `任务不存在: ${taskId}`);
@@ -7921,7 +7924,7 @@ function compactionGroup() {
 		config: [
 			{
 				id: "compaction-basic",
-				name: "@deepseek-ai/dsh-compaction-basic"
+				name: "@goodjin2/dsh-router/compaction"
 			},
 			{
 				id: "command-compact",

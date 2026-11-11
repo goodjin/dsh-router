@@ -76,6 +76,7 @@ const FAKE_MODULES: Record<string, { Config?: unknown }> = {
   '@deepseek-ai/dsh-tool-ask-user': {},
   '@deepseek-ai/dsh-tool-bash': {},
   '@goodjin2/dsh-router/context': {},
+  '@goodjin2/dsh-router/compaction': {},
   '@deepseek-ai/dsh-compaction-basic': {},
   '@deepseek-ai/dsh-command-compact': {},
   '@deepseek-ai/dsh-compaction-tool-result-pruner': {},
