@@ -5644,10 +5644,10 @@ function isValidFailure(value) {
 //#region src/host/context/compaction-driver.ts
 var CompactionDriver = class {
 	deps;
-	/** 每会话上次压缩终点（下一次区域起点 = 检查点 + 1；初始 -1 → 从 0 起）。 */
-	checkpoints = /* @__PURE__ */ new Map();
 	pending = /* @__PURE__ */ new Set();
 	compacting = /* @__PURE__ */ new Set();
+	/** 每会话已自报过的 skip 原因（同一原因只报一次）。 */
+	reported = /* @__PURE__ */ new Map();
 	constructor(deps) {
 		this.deps = deps;
 	}
@@ -5659,37 +5659,50 @@ var CompactionDriver = class {
 	isPending(sessionId) {
 		return this.pending.has(sessionId);
 	}
-	/** 某会话的当前检查点（观测口）。 */
-	checkpointOf(sessionId) {
-		return this.checkpoints.get(sessionId) ?? -1;
+	/** 自报一个 skip 原因（每会话每原因一次）。 */
+	reportSkip(sessionId, reason) {
+		let seen = this.reported.get(sessionId);
+		if (seen === void 0) {
+			seen = /* @__PURE__ */ new Set();
+			this.reported.set(sessionId, seen);
+		}
+		if (seen.has(reason)) return;
+		seen.add(reason);
+		this.deps.reportSkip?.(sessionId, reason);
 	}
-	/** 会话空闲：有 pending 标记、无排队消息才尝试压缩。 */
+	/** 会话空闲：有 pending 标记、无排队消息才驱动压缩。 */
 	async onIdle(sessionId, signal) {
 		if (!this.pending.has(sessionId)) return "no-op";
 		if (this.compacting.has(sessionId)) return "no-op";
 		if (this.deps.queueEmpty !== void 0) try {
-			if (!await this.deps.queueEmpty(sessionId)) return "skipped";
-		} catch {
+			if (!await this.deps.queueEmpty(sessionId)) {
+				this.reportSkip(sessionId, "queue-not-empty");
+				return "skipped";
+			}
+		} catch (error) {
+			this.reportSkip(sessionId, `queue-unknown: ${error instanceof Error ? error.message : String(error)}`);
 			return "skipped";
 		}
 		const agent = this.deps.getAgent(sessionId);
-		if (agent === void 0) return "skipped";
-		if (agent.status !== void 0 && agent.status !== "idle") return "skipped";
+		if (agent === void 0) {
+			this.reportSkip(sessionId, "agent-absent");
+			return "skipped";
+		}
+		if (agent.status !== void 0 && agent.status !== "idle") {
+			this.reportSkip(sessionId, "agent-not-idle");
+			return "skipped";
+		}
+		if (this.deps.compactNow === void 0) {
+			this.reportSkip(sessionId, "engine-absent");
+			return "skipped";
+		}
 		this.compacting.add(sessionId);
 		try {
-			const lastUserSeq = await this.deps.lastUserMessageSeq(sessionId);
-			if (lastUserSeq === null) return "skipped";
-			const start = this.checkpointOf(sessionId) + 1;
-			const end = lastUserSeq - 1;
-			if (end < start) return "skipped";
-			const session = agent.session;
-			if (!await this.deps.balancedBefore(session, start)) return "skipped";
-			if (!await this.deps.balancedAfter(session, end)) return "skipped";
-			const endSeq = (await this.deps.compactRegion(start, end, agent, signal))?.endSeq;
-			this.checkpoints.set(sessionId, typeof endSeq === "number" ? endSeq : end);
+			await this.deps.compactNow(agent, signal);
 			this.pending.delete(sessionId);
 			return "compacted";
-		} catch {
+		} catch (error) {
+			this.reportSkip(sessionId, `compact-failed: ${error instanceof Error ? error.message : String(error)}`);
 			return "skipped";
 		} finally {
 			this.compacting.delete(sessionId);
@@ -10281,25 +10294,7 @@ function apply(ctx, rawConfig) {
 	const isTaskSession = async (sessionId) => {
 		return (await ledger.listAll()).some((record) => record.sessionId === sessionId);
 	};
-	let pairing = null;
 	const queueWarned = /* @__PURE__ */ new Set();
-	const loadPairing = async () => {
-		if (pairing !== null) return pairing;
-		try {
-			const mod = await import("@deepseek-ai/dsh-compaction");
-			pairing = {
-				before: mod.toolPairingBalancedBefore,
-				after: mod.toolPairingBalancedAfter
-			};
-		} catch (error) {
-			log.warn(`dsh-compaction 配对函数不可用，压缩区域预检放行: ${error instanceof Error ? error.message : String(error)}`);
-			pairing = {
-				before: () => true,
-				after: () => true
-			};
-		}
-		return pairing;
-	};
 	const driver = new CompactionDriver({
 		getAgent: (sessionId) => ctx.agents.get(sessionId),
 		queueEmpty: async (sessionId) => {
@@ -10314,23 +10309,13 @@ function apply(ctx, rawConfig) {
 				throw error;
 			}
 		},
-		lastUserMessageSeq: async (sessionId) => {
-			const sessionQuery = ctx.sessionQuery;
-			if (sessionQuery === void 0) return null;
-			try {
-				const events = (await sessionQuery.readSurface?.(sessionId))?.events ?? [];
-				for (let i = events.length - 1; i >= 0; i -= 1) if (events[i]?.type === "user/message") return events[i].seq;
-				return null;
-			} catch {
-				return null;
-			}
-		},
-		balancedBefore: async (session, seq) => Boolean((await loadPairing()).before(session, seq)),
-		balancedAfter: async (session, seq) => Boolean((await loadPairing()).after(session, seq)),
-		compactRegion: async (start, end, agent, signal) => {
+		compactNow: (agent, signal) => {
 			const engine$1 = agent?.ctx?.compaction;
-			if (engine$1?.compactRegion === void 0) throw new Error("compaction engine 在目标会话作用域内不可用（预设未挂 compaction 组？）");
-			return engine$1.compactRegion(start, end, agent, signal);
+			if (engine$1?.compactNow === void 0) throw new Error("compaction engine 在目标会话作用域内不可用（预设未挂 compaction 组？）");
+			return engine$1.compactNow(agent, signal);
+		},
+		reportSkip: (sessionId, reason) => {
+			log.warn(`派发后压缩暂缓（会话 ${sessionId}）：${reason}`);
 		},
 		now: () => Date.now()
 	});

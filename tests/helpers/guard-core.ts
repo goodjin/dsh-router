@@ -130,17 +130,8 @@ function fakeHosts(opts: { failCreate?: (attempt: number) => Error | undefined; 
 function fakeDriver(): CompactionDriver {
   const deps: CompactionDeps = {
     getAgent: () => undefined,
-    async lastUserMessageSeq() {
+    async compactNow() {
       return null
-    },
-    async balancedBefore() {
-      return true
-    },
-    async balancedAfter() {
-      return true
-    },
-    async compactRegion() {
-      return {}
     },
     now: () => 1,
   }

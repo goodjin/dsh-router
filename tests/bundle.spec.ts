@@ -149,7 +149,7 @@ describe('cordis.patch.yml 的装载行', () => {
   })
 
   it('两条静态预设都挂压缩组（isolate 的 cordis:group；动态 Router 定义同款由 presets-dynamic 看守）', () => {
-    // 压缩引擎在会话自身作用域缺席时，驱动的 compactRegion 永远抛错空转
+    // 压缩引擎在会话自身作用域缺席时，驱动的 compactNow 会永远抛错空转
     //（B2 裁定 5 的缺口在此看守）。
     for (const id of ['supervisor-compaction', 'worker-compaction']) {
       expect(PATCH_TEXT, `压缩组 ${id} 缺失`).toMatch(new RegExp(`-\\s+id:\\s*${id}\\n\\s+name:\\s*cordis:group\\n\\s+group:\\s*true\\n\\s+isolate:\\n\\s+compaction:\\s*true\\n\\s+toolResultPruner:\\s*true`))

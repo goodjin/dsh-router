@@ -690,27 +690,12 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     return records.some((record) => record.sessionId === sessionId)
   }
 
-  // 压缩驱动：压缩引擎取会话 agent 自身作用域的 ctx.compaction（预设在 isolate
-  // realm 里装载，根 ctx 看不到）；配对函数动态 import 宿主的 dsh-compaction，
-  // 缺席时放行为 true（只失去预检保护，compactRegion 自身仍会拒绝不平衡区域）。
-  type Pairing = { before(session: unknown, seq: number): Promise<boolean> | boolean; after(session: unknown, seq: number): Promise<boolean> | boolean }
-  let pairing: Pairing | null = null
+  // 压缩驱动：引擎取会话 agent 自身作用域的 ctx.compaction（预设在 isolate
+  // realm 里装载，根 ctx 看不到）。2026-11-11 修复：改调引擎的 compactNow——
+  // 引擎自己圈安全范围、自己以 maintenance 方式独占会话（compactRegion 要求
+  // 打开的 turn，idle 时调必抛「no open turn」，这正是旧实现从未压成的原因之一）；
+  // 每个 skip 原因自报一声（每会话每原因一次），不能再静默。
   const queueWarned = new Set<string>()
-  const loadPairing = async (): Promise<Pairing> => {
-    if (pairing !== null) return pairing
-    try {
-      const specifier = '@deepseek-ai/dsh-compaction'
-      const mod = (await import(specifier)) as Partial<Record<'toolPairingBalancedBefore' | 'toolPairingBalancedAfter', unknown>>
-      pairing = {
-        before: mod.toolPairingBalancedBefore as Pairing['before'],
-        after: mod.toolPairingBalancedAfter as Pairing['after'],
-      }
-    } catch (error) {
-      log.warn(`dsh-compaction 配对函数不可用，压缩区域预检放行: ${error instanceof Error ? error.message : String(error)}`)
-      pairing = { before: () => true, after: () => true }
-    }
-    return pairing
-  }
 
   const driver = new CompactionDriver({
     getAgent: (sessionId) => ctx.agents.get(sessionId) as { session: unknown; status?: string; ctx?: { compaction?: unknown } } | undefined,
@@ -732,29 +717,16 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
         throw error
       }
     },
-    lastUserMessageSeq: async (sessionId) => {
-      const sessionQuery = ctx.sessionQuery
-      if (sessionQuery === undefined) return null
-      try {
-        const surface = await sessionQuery.readSurface?.(sessionId)
-        const events = surface?.events ?? []
-        for (let i = events.length - 1; i >= 0; i -= 1) {
-          if (events[i]?.type === 'user/message') return events[i]!.seq
-        }
-        return null
-      } catch {
-        return null
-      }
-    },
-    balancedBefore: async (session, seq) => Boolean((await loadPairing()).before(session, seq)),
-    balancedAfter: async (session, seq) => Boolean((await loadPairing()).after(session, seq)),
-    compactRegion: async (start, end, agent, signal) => {
-      const engine = (agent as { ctx?: { compaction?: { compactRegion?: (s: number, e: number, a: unknown, sig?: AbortSignal) => Promise<unknown> } } } | undefined)?.ctx
+    compactNow: (agent, signal) => {
+      const engine = (agent as { ctx?: { compaction?: { compactNow?: (a: unknown, sig?: AbortSignal) => Promise<unknown> } } } | undefined)?.ctx
         ?.compaction
-      if (engine?.compactRegion === undefined) {
+      if (engine?.compactNow === undefined) {
         throw new Error('compaction engine 在目标会话作用域内不可用（预设未挂 compaction 组？）')
       }
-      return engine.compactRegion(start, end, agent, signal)
+      return engine.compactNow(agent, signal)
+    },
+    reportSkip: (sessionId, reason) => {
+      log.warn(`派发后压缩暂缓（会话 ${sessionId}）：${reason}`)
     },
     now: () => Date.now(),
   })
