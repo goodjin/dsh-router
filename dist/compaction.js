@@ -1,3 +1,9 @@
+import { createRequire } from "node:module";
+import { existsSync, globSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
 //#region src/shared/types.ts
 /** 终态集合：无出边，进入后任何写操作都走非法迁移。 */
 const TERMINAL_STATUSES = [
@@ -58,6 +64,58 @@ async function taskSummarySummarize(records, fallback, input, agent, signal) {
 }
 
 //#endregion
+//#region src/host/presets/validate-row.ts
+/**
+* 全部宿主安装目录探测（多基准版）：DSH_HOST_BASE（设了就只用它）→ 桌面 asar →
+* ~/.local/share / nvm / homebrew 的 CLI 安装。桌面 asar 只有 Electron 进程读得
+* 进，纯 node 进程 import 会失败——所以运行时校验要按序逐个试（makeHostLoader
+* 的 bases 参数），不能只取第一个。
+*/
+function discoverAllHostBases() {
+	const override = process.env.DSH_HOST_BASE;
+	if (override !== void 0 && override !== "" && existsSync(override)) return [override];
+	const bases = [];
+	if (process.platform === "darwin") {
+		const asar = "/Applications/DeepSeek Harness.app/Contents/Resources/app.asar/dsh/package.json";
+		if (existsSync(asar)) bases.push(asar);
+	}
+	const home = homedir();
+	for (const pattern of [
+		join(home, ".local/share/node-*/lib/node_modules/@deepseek-ai/dsh/package.json"),
+		join(home, ".nvm/versions/node/*/lib/node_modules/@deepseek-ai/dsh/package.json"),
+		"/opt/homebrew/lib/node_modules/@deepseek-ai/dsh/package.json",
+		"/usr/local/lib/node_modules/@deepseek-ai/dsh/package.json"
+	]) for (const hit of globSync(pattern)) if (existsSync(hit) && !bases.includes(hit)) bases.push(hit);
+	return bases;
+}
+/**
+* 宿主安装目录装载器（脚本与运行时共用同一份解析语义）：
+*  - `@deepseek-ai/*` 行从宿主基准解析；
+*  - 其他行（本包自己的子路径导出）先试插件根（Node 自引用），再退宿主基准；
+*  - 用 import() 而非 require()：宿主加载器走 import，插件 ESM 图有 top-level
+*    await，require 会在插件行上炸 ERR_REQUIRE_ASYNC_MODULE（容器核查器同规则）。
+* 全部候选失败时抛第一条错误（最贴近插件自己那份解析，报错才有指向性）。
+*/
+function makeHostLoader(opts = {}) {
+	const pluginRoot = opts.pluginRoot ?? fileURLToPath(new URL("../../../", import.meta.url));
+	const candidatesFor = (name$1) => {
+		const hosts = opts.bases ?? (opts.base !== void 0 ? [opts.base] : discoverAllHostBases());
+		return name$1.startsWith("@deepseek-ai/") ? hosts : [join(pluginRoot, "package.json"), ...hosts];
+	};
+	return async (name$1) => {
+		const candidates = candidatesFor(name$1);
+		let firstError = null;
+		for (const base of candidates) try {
+			return await import(pathToFileURL(createRequire(base).resolve(name$1)).href);
+		} catch (error) {
+			if (firstError === null) firstError = error;
+		}
+		if (firstError !== null) throw firstError;
+		throw Object.assign(/* @__PURE__ */ new Error(`找不到宿主安装目录，无法装载 ${name$1}（可用 DSH_HOST_BASE 指定 @deepseek-ai/dsh/package.json）`), { code: "HOST_BASE_NOT_FOUND" });
+	};
+}
+
+//#endregion
 //#region src/compaction.ts
 /** 行名字符串（诊断显示用）。 */
 const name = "task-summary-compaction";
@@ -113,7 +171,7 @@ function subclass(base) {
 async function apply(ctx, config) {
 	let mod;
 	try {
-		mod = await import("@deepseek-ai/dsh-compaction-basic");
+		mod = await makeHostLoader()("@deepseek-ai/dsh-compaction-basic");
 	} catch (error) {
 		ctx.logger?.warn?.(`任务描述压缩引擎行未生效（dsh-compaction-basic 装载失败）: ${error instanceof Error ? error.message : String(error)}`);
 		return;

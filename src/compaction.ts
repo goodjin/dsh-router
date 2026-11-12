@@ -3,8 +3,11 @@
  * Router 会话的压缩摘要不是 LLM 聊天摘要，而是「该会话派发、仍在推进」的任务
  * 描述清单——派发时生成的任务描述即历史，替换自上一检查点以来的聊天段。
  *
- * 行形状与官方 @deepseek-ai/dsh-compaction-basic 同构：apply 函数行，行内动态
- * import 宿主基类（本仓 node_modules 没有该包，类型期解析不到，只能运行时取），
+ * 行形状与官方 @deepseek-ai/dsh-compaction-basic 同构：apply 函数行，行内装载
+ * 宿主基类（本仓 node_modules 没有该包，类型期解析不到，只能运行时取；装载必须
+ * 经 makeHostLoader 的宿主基座解析——裸动态 import 在桌面宿主 Electron asar 下
+ * 解析不到，压缩服务缺席会让整棵 Router 预设被判 broken，2026-11-12 现场，看守
+ * 见 tests/bundle.spec.ts），
  * 子类只覆盖 summarize 这一个钩子，其余（压力/模型切换/溢出自动压缩、
  * compactNow、范围圈定、/compact 命令入口）全部继承官方基类。行无 config
  * （官方预设里的 compaction-basic 行同样无 config），不导出 Config——宿主对
@@ -26,6 +29,7 @@ import {
   type SummaryAgent,
   type TaskSummaryEnvelope,
 } from './host/compaction/task-summary.ts'
+import { makeHostLoader } from './host/presets/validate-row.ts'
 import type { TaskRecord } from './shared/types.ts'
 
 /** 行名字符串（诊断显示用）。 */
@@ -116,7 +120,10 @@ export function subclass(base: BasicEngineCtor): BasicEngineCtor {
 export async function apply(ctx: ContextShape, config?: unknown): Promise<void> {
   let mod: { BasicCompactionEngine?: BasicEngineCtor; default?: BasicEngineCtor } | undefined
   try {
-    mod = (await import('@deepseek-ai/dsh-compaction-basic')) as unknown as {
+    // 官方基类必须经宿主基座解析（validate-row.ts 同款语义）：裸动态 import 在
+    // 桌面宿主（Electron asar）下解析不到，压缩服务缺席会让整棵 Router 预设被
+    // 判 broken（2026-11-12 现场；看守见 tests/bundle.spec.ts）。
+    mod = (await makeHostLoader()('@deepseek-ai/dsh-compaction-basic')) as unknown as {
       BasicCompactionEngine?: BasicEngineCtor
       default?: BasicEngineCtor
     }
