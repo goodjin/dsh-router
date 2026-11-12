@@ -1388,7 +1388,7 @@ var SessionBridge = class {
 	docsFor;
 	workspaces;
 	host;
-	presets;
+	executorPreset;
 	forTemplate;
 	types;
 	interruptFace;
@@ -1405,7 +1405,7 @@ var SessionBridge = class {
 		this.docsFor = deps.docsFor;
 		this.workspaces = deps.workspaces;
 		this.host = deps.host;
-		this.presets = deps.presets;
+		this.executorPreset = deps.executorPreset;
 		this.forTemplate = deps.forTemplate;
 		this.types = deps.types;
 		this.interruptFace = deps.interruptFace;
@@ -1440,7 +1440,7 @@ var SessionBridge = class {
 			const resolved = await this.forTemplate(record.templateId, record.role);
 			if (resolved !== void 0 && resolved !== "") return resolved;
 		}
-		return this.presets[record.role];
+		return this.executorPreset;
 	}
 	/**
 	* 默认模型钉定（v1.1 规格 §5 / r4 修正的有界探查）：新会话创建后、首轮投递
@@ -7503,7 +7503,9 @@ const routerPrompt = `你是 Router，一个长期在线的任务编排器，由
 //#region src/host/prompts/worker.ts
 /**
 * 工作型 worker 角色提示词（计划 B2；v1.1 C6 提问纪律修订）。
-* 与 yml persona 前缀逐字同步（bundle.spec 看守）：改这里必须同步改 yml。
+* 2026-11-12 合并裁定起不再进 yml（静态预设只剩「执行者」一条，persona=
+* unified.ts）；本文件保留作 worker 类型（含内置通用 worker）缺省系统提示词的
+* 取值源。
 */
 const workerPrompt = `你是工作型执行者，由 {{model}} 驱动：接受一个任务，把它做完、做对、交付。
 
@@ -7533,7 +7535,8 @@ const workerPrompt = `你是工作型执行者，由 {{model}} 驱动：接受�
 //#region src/host/prompts/supervisor.ts
 /**
 * 主管角色提示词（计划 B2；v1.1 C6 双通道与禁主管链修订）。
-* 与 yml persona 前缀逐字同步（bundle.spec 看守）：改这里必须同步改 yml。
+* 2026-11-12 合并裁定起不再进 yml（静态预设只剩「执行者」一条，persona=
+* unified.ts）；本文件保留作 supervisor 类型缺省系统提示词的取值源。
 */
 const supervisorPrompt = `你是主管型执行者，由 {{model}} 驱动：你自己承担一部分工作，也可以把子任务分派出去，最后对整个父任务的交付负责。
 
@@ -7861,8 +7864,10 @@ var RouterDefaultsStore = class {
 * 提问纪律、用户非执行器、冻结语义。
 *
 * 插值只允许 {{model}}（宿主注册的模板变量；行内不得出现其它 {{...}}，
-* 宿主组装遇未注册变量直接抛错）。最小面模式不用本文件（静态 yml persona
-* 保持现行角色分置，bundle.spec 看守）。
+* 宿主组装遇未注册变量直接抛错）。2026-11-12 合并裁定起：静态「执行者」预设
+* （cordis.patch.yml 的 dsh-router-executor 行）与启动注册的旧 id 兼容别名在两种
+* spawn 模式下都以本文件为 complete persona（组合与 buildSupersetPlugins() 逐字节
+* 一致，bundle.spec 看守）；按角色分置的 supervisor/worker 文本只作类型缺省提示词。
 */
 const unifiedPrompt = `你是本编排系统里的一名会话执行者，由 {{model}} 驱动。系统把「编排」与「执行」分给不同的会话：编排者理解需求、拆解派发、追踪汇总；执行者把单个任务做完做对。你当前的身份由会话历史中的身份卡决定，本提示词不赋予你具体身份。
 
@@ -7907,10 +7912,15 @@ const DYNAMIC_WORKER_PRESET_PREFIX = "dsh-router-worker-";
 function dynamicPresetId(templateId) {
 	return `${DYNAMIC_WORKER_PRESET_PREFIX}${templateId}`;
 }
-/** 动态预设排在静态三预设（10/20/30）之后。 */
+/** 动态预设排在静态预设（Router 10 动态 / 执行者 20 静态）之后。 */
 const DYNAMIC_ORDER = 100;
 /** Router 动态预设 id（会话保存的就是它；v1.3.1 热修供自愈巡检引用）。 */
 const ROUTER_PRESET_ID = "dsh-router";
+/** 合并前的两条静态预设 id：启动时注册同名兼容别名保旧会话重开（r4 §4：会话日志
+*  记录的 preset id 必须在册，不在册即 agent-preset/not-found 无法重开）。 */
+const LEGACY_EXECUTOR_PRESET_IDS = ["dsh-router-supervisor", "dsh-router-worker"];
+/** 兼容别名排在花名册最尾（宿主 PresetDefinition 无隐藏字段，只能靠 order 压尾）。 */
+const LEGACY_ALIAS_ORDER = 999;
 /** 压缩组（与静态三预设同款；isolate realm，r4 条件②的例外形态）。 */
 function compactionGroup() {
 	return {
@@ -7965,8 +7975,9 @@ function delegationGroup() {
 }
 /**
 * cache-priority 统一超集组合（v1.3 规格 §1/§2；每次调用产全新数组，调用方可
-* 自由追加技能行不改基准）。三预设（Router 动态定义 / worker 类型动态定义 /
-* 兜底场景的类型定义）在 cache 模式下全部由它组成——行级逐字节相同是前缀缓存
+* 自由追加技能行不改基准）。cache 模式的三处动态定义（Router / worker 类型 /
+* 兜底场景的类型）与 2026-11-12 合并裁定后的静态执行者预设行（yml 的
+* dsh-router-executor）及旧 id 兼容别名全部由它组成——行级逐字节相同是前缀缓存
 * 的前提，spawn-mode.spec 钉住。注意：
 * - persona = unified 中立全文（身份进历史不进系统提示词，规格 §2.1）；
 * - tools 行 role:'superset'：注册全部编排工具，角色闸在执行层按真实调用者
@@ -8034,6 +8045,34 @@ function buildSupersetPlugins() {
 	];
 	rows.push(compactionGroup());
 	return rows;
+}
+/**
+* 旧 id 兼容别名定义（2026-11-12 合并裁定）：dsh-router-supervisor / dsh-router-worker
+* 各得一条与执行者组合完全一致的定义（order 999 压花名册尾部、名称标注旧会话兼容），
+* 由生命周期在启动时注册——旧执行会话的 preset id 由此保持在册可解析。别名不是
+* 派发目标：config 的 executorPreset 与 builtin 解析都指向 dsh-router-executor。
+*/
+function legacyAliasDefinition(legacyId) {
+	if (!LEGACY_EXECUTOR_PRESET_IDS.includes(legacyId)) throw new Error(`未知旧执行预设 id: ${legacyId}`);
+	return {
+		id: legacyId,
+		name: `执行者（旧会话兼容·${legacyId === "dsh-router-supervisor" ? "supervisor" : "worker"}）`,
+		description: "旧会话重开兼容别名：组合与「执行者」完全一致，请勿手动选用",
+		order: LEGACY_ALIAS_ORDER,
+		plugins: buildSupersetPlugins()
+	};
+}
+/**
+* 派发预设解析（2026-11-12 合并裁定后的单值语义；entry 接线与解析矩阵测试共用）：
+* - 启用且角色匹配的非 builtin 类型 → 动态预设 dsh-router-worker-<templateId>；
+* - builtin 类型 → executorPreset（原 supervisor/worker 两条静态行已合并）；
+* - 未知/禁用/角色不匹配 → undefined（桥回退 executorPreset 单值兜底，由核心
+*   assertTemplateUsable 拒绝派发）。两模式（cache-priority/minimal-face）解析同值。
+*/
+function resolveDispatchPreset(record, role, executorPreset) {
+	if (record === void 0 || !record.enabled || record.role !== role) return void 0;
+	if (record.origin === "builtin") return executorPreset;
+	return dynamicPresetId(record.templateId);
 }
 /**
 * worker 类型 → 动态预设定义。persona 用类型提示词 complete 整段替换；工具行
@@ -8422,6 +8461,33 @@ var DynamicPresetEngine = class {
 			this.disposers.delete(id);
 			await unregister();
 		}
+	}
+	/**
+	* 旧 id 兼容别名（2026-11-12 合并裁定）：dsh-router-supervisor / dsh-router-worker
+	* 注册为执行者同款组合的尾部别名（legacyAliasDefinition：order 999、名称标注
+	* 旧会话兼容），保旧执行会话重开（r4 §4：preset id 不在册即 not-found）。
+	* 逐别名独立 catch：校验或注册失败只告警（花名册少一条别名、对应旧会话不可
+	* 重开），绝不炸装载，也不影响其余别名。
+	*/
+	async syncLegacyAliases() {
+		const registered = [];
+		const failed = [];
+		for (const legacyId of LEGACY_EXECUTOR_PRESET_IDS) {
+			const definition = legacyAliasDefinition(legacyId);
+			try {
+				const problems = await this.validate(definition.plugins);
+				if (problems.length > 0) throw new Error(`校验未过:\n${problems.join("\n")}`);
+				await this.register(definition);
+				registered.push(legacyId);
+			} catch (error) {
+				this.deps.logger?.warn(`旧预设兼容别名注册失败（${legacyId}，对应旧会话暂无法重开，重启宿主会重试）: ${error instanceof Error ? error.message : String(error)}`);
+				failed.push(legacyId);
+			}
+		}
+		return {
+			registered,
+			failed
+		};
 	}
 };
 
@@ -9850,8 +9916,7 @@ const Config = Schema.object({
 	perTypeConcurrency: Schema.number().default(3).volatile(),
 	maxDepth: Schema.number().default(3).volatile(),
 	routerPreset: Schema.string().default("dsh-router").volatile(),
-	supervisorPreset: Schema.string().default("dsh-router-supervisor").volatile(),
-	workerPreset: Schema.string().default("dsh-router-worker").volatile(),
+	executorPreset: Schema.string().default("dsh-router-executor").volatile(),
 	workerSpawnMode: Schema.union(["cache-priority", "minimal-face"]).default("cache-priority").volatile(),
 	summarizationProvider: Schema.string().default("").volatile(),
 	summarizationModel: Schema.string().default("").volatile(),
@@ -9956,8 +10021,7 @@ function resolveRootConfig(raw) {
 		perTypeConcurrency: nonNegative(source.perTypeConcurrency, 3),
 		maxDepth: Math.max(1, nonNegative(source.maxDepth, 3)),
 		routerPreset: stringOr(source.routerPreset, "dsh-router"),
-		supervisorPreset: stringOr(source.supervisorPreset, "dsh-router-supervisor"),
-		workerPreset: stringOr(source.workerPreset, "dsh-router-worker"),
+		executorPreset: stringOr(source.executorPreset, stringOr(source.supervisorPreset, stringOr(source.workerPreset, "dsh-router-executor"))),
 		summarizationProvider: stringOr(source.summarizationProvider, ""),
 		summarizationModel: stringOr(source.summarizationModel, ""),
 		memoryEnabled: booleanOr(source.memoryEnabled),
@@ -10071,15 +10135,11 @@ function apply(ctx, rawConfig) {
 		if (sessionId === void 0) return defaultsText;
 		return sessionPrompts.get(sessionId) ?? defaultsText;
 	};
-	/** templateId → 预设 id：启用类型走动态预设；内置通用 worker 走静态预设
-	*  （保证任何情况下可派发）；禁用/未知 → undefined（回退静态角色预设，
-	*  由核心的 assertTemplateUsable 拒绝派发）。 */
-	const resolvePresetForTemplate = async (templateId, role) => {
-		const record = await typeStore.get(templateId);
-		if (record === void 0 || !record.enabled || record.role !== role) return void 0;
-		if (record.origin === "builtin") return role === "worker" ? config.workerPreset : config.supervisorPreset;
-		return dynamicPresetId(templateId);
-	};
+	/** templateId → 预设 id：启用类型走动态预设；builtin 与回退都收敛到执行者预设
+	*  （2026-11-12 合并裁定：两角色同一条；禁用/未知 → undefined 回退桥的单值
+	*  兜底，由核心的 assertTemplateUsable 拒绝派发）。解析逻辑在
+	*  presets/dynamic.ts 的 resolveDispatchPreset（矩阵测试共用）。 */
+	const resolvePresetForTemplate = async (templateId, role) => resolveDispatchPreset(await typeStore.get(templateId), role, config.executorPreset);
 	const workspaceRegistry = {
 		list: () => ctx.workspaceRegistry.list(),
 		get: (id) => ctx.workspaceRegistry.get(id)
@@ -10146,10 +10206,7 @@ function apply(ctx, rawConfig) {
 		onDelivered: (taskId) => {
 			adjudicatorRef.current?.onDispatched(taskId);
 		},
-		presets: {
-			supervisor: config.supervisorPreset,
-			worker: config.workerPreset
-		},
+		executorPreset: config.executorPreset,
 		forTemplate: resolvePresetForTemplate,
 		types: { get: (templateId) => typeStore.get(templateId) },
 		interruptFace: ctx.agents,
@@ -10458,7 +10515,9 @@ function apply(ctx, rawConfig) {
 			const enabledTypes = (await typeStore.list()).filter((record) => record.enabled);
 			const outcomes = await engine.syncTypes(enabledTypes, spawnMode());
 			if (outcomes.failed.length > 0) log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join("、")}`);
-			log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走静态预设）`);
+			const aliases = await engine.syncLegacyAliases();
+			if (aliases.failed.length > 0) log.warn(`旧预设兼容别名注册失败: ${aliases.failed.join("、")}（对应旧会话暂不可重开，重启宿主会重试）`);
+			log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走执行者预设），旧 id 兼容别名 ${aliases.registered.length}/${aliases.registered.length + aliases.failed.length}`);
 			await sessionPrompts.load();
 			await ui.load();
 			await ledger.listAll();

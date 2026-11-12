@@ -18,8 +18,11 @@ export interface RouterRootConfig {
   perTypeConcurrency?: number
   maxDepth?: number
   routerPreset?: string
-  supervisorPreset?: string
-  workerPreset?: string
+  /**
+   * 统一执行者预设 id（2026-11-12 合并裁定：supervisorPreset/workerPreset 两条
+   * 角色预设合并为单条「执行者」）。旧键在 resolveRootConfig 里作迁移回退。
+   */
+  executorPreset?: string
   templates?: WorkerTemplate[]
   /**
    * worker 派生模式（v1.3 规格 §1）：cache-priority = 统一组合 + 分叉继承
@@ -60,8 +63,7 @@ export const Config = Schema.object({
   perTypeConcurrency: Schema.number().default(3).volatile(),
   maxDepth: Schema.number().default(3).volatile(),
   routerPreset: Schema.string().default('dsh-router').volatile(),
-  supervisorPreset: Schema.string().default('dsh-router-supervisor').volatile(),
-  workerPreset: Schema.string().default('dsh-router-worker').volatile(),
+  executorPreset: Schema.string().default('dsh-router-executor').volatile(),
   workerSpawnMode: Schema.union(['cache-priority', 'minimal-face']).default('cache-priority').volatile(),
   summarizationProvider: Schema.string().default('').volatile(),
   summarizationModel: Schema.string().default('').volatile(),

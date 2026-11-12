@@ -8,8 +8,10 @@
  * 提问纪律、用户非执行器、冻结语义。
  *
  * 插值只允许 {{model}}（宿主注册的模板变量；行内不得出现其它 {{...}}，
- * 宿主组装遇未注册变量直接抛错）。最小面模式不用本文件（静态 yml persona
- * 保持现行角色分置，bundle.spec 看守）。
+ * 宿主组装遇未注册变量直接抛错）。2026-11-12 合并裁定起：静态「执行者」预设
+ * （cordis.patch.yml 的 dsh-router-executor 行）与启动注册的旧 id 兼容别名在两种
+ * spawn 模式下都以本文件为 complete persona（组合与 buildSupersetPlugins() 逐字节
+ * 一致，bundle.spec 看守）；按角色分置的 supervisor/worker 文本只作类型缺省提示词。
  */
 
 export const unifiedPrompt = `你是本编排系统里的一名会话执行者，由 {{model}} 驱动。系统把「编排」与「执行」分给不同的会话：编排者理解需求、拆解派发、追踪汇总；执行者把单个任务做完做对。你当前的身份由会话历史中的身份卡决定，本提示词不赋予你具体身份。

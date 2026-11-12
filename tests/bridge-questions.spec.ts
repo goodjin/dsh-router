@@ -328,7 +328,7 @@ interface FakeHostEvents {
   renames: { sessionId: string; title: string }[]
 }
 
-function fakeHost(presets = { router: 'dsh-router', supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' }) {
+function fakeHost(presets = { router: 'dsh-router', executor: 'dsh-router-executor' }) {
   const events: FakeHostEvents = { created: [], prompts: [], renames: [] }
   const statusCallbacks: ((sessionId: string, running: boolean) => void)[] = []
   let createdCount = 0
@@ -394,7 +394,7 @@ async function bridgeWith(taskPatch: Partial<TaskRecord> = {}) {
     docsFor: () => docs,
     workspaces: fakeWorkspaces([{ id: 'ws-1', path: '/tmp/proj' }]),
     host,
-    presets,
+    executorPreset: presets.executor,
     workerInstructions: () => instructions,
     signal: new AbortController().signal,
   })
@@ -407,7 +407,7 @@ describe('SessionBridge：派发', () => {
     const { ledger, bridge, events, presets, instructions } = await bridgeWith()
     const result = await bridge.dispatchTask('T-001')
     expect(result.sessionId).toBe('session-1')
-    expect(events.created).toEqual([{ opts: { workspaceId: 'ws-1', agentPreset: presets.worker } }])
+    expect(events.created).toEqual([{ opts: { workspaceId: 'ws-1', agentPreset: presets.executor } }])
     expect(events.renames).toEqual([{ sessionId: 'session-1', title: 'coder · T-001 示例任务' }])
     expect(events.prompts).toHaveLength(1)
     expect(events.prompts[0]!.sessionId).toBe('session-1')
@@ -440,7 +440,7 @@ describe('SessionBridge：派发', () => {
   it('projectId 解析不到 workspace 时回退 cwd 创建', async () => {
     const { bridge, events, presets } = await bridgeWith({ projectId: 'ws-gone' })
     await bridge.dispatchTask('T-001')
-    expect(events.created).toEqual([{ opts: { cwd: '/tmp/proj', agentPreset: presets.worker } }])
+    expect(events.created).toEqual([{ opts: { cwd: '/tmp/proj', agentPreset: presets.executor } }])
   })
 
   it('无 workspace 面时也回退 cwd（registry 可选缺席）', async () => {
@@ -451,7 +451,7 @@ describe('SessionBridge：派发', () => {
       docsFor: () => docs,
       workspaces: undefined,
       host,
-      presets,
+      executorPreset: presets.executor,
       workerInstructions: () => '指引',
       signal: new AbortController().signal,
     })
@@ -465,10 +465,10 @@ describe('SessionBridge：派发', () => {
     await expect(bridge.dispatchTask('T-999')).rejects.toMatchObject({ code: 'task-not-found' })
   })
 
-  it('supervisor 角色任务用主管预设建会话', async () => {
+  it('supervisor 角色任务与 worker 同用执行者预设（2026-11-12 合并裁定：单值）', async () => {
     const { bridge, events, presets } = await bridgeWith({ role: 'supervisor' })
     await bridge.dispatchTask('T-001')
-    expect(events.created[0]!.opts.agentPreset).toBe(presets.supervisor)
+    expect(events.created[0]!.opts.agentPreset).toBe(presets.executor)
   })
 })
 
@@ -856,7 +856,7 @@ describe('SessionBridge：按类型选预设与默认模型钉定（v1.1 C1）',
       docsFor: () => docs,
       workspaces: fakeWorkspaces([{ id: 'ws-1', path: '/tmp/proj' }]),
       host: typedHost,
-      presets,
+      executorPreset: presets.executor,
       workerInstructions: () => '指引',
       signal: new AbortController().signal,
       forTemplate: opts.forTemplate,
@@ -884,12 +884,12 @@ describe('SessionBridge：按类型选预设与默认模型钉定（v1.1 C1）',
     expect(events.created[0]!.opts.agentPreset).toBe('dsh-router-worker-docs-writer')
   })
 
-  it('类型解析不出 → 回退静态角色预设（未知的 templateId 也不炸派发）', async () => {
+  it('类型解析不出 → 回退执行者预设单值（未知的 templateId 也不炸派发）', async () => {
     const { bridge, events, presets } = await typedBridge({ templateId: 'ghost' }, {
       forTemplate: async () => undefined,
     })
     await bridge.dispatchTask('T-001')
-    expect(events.created[0]!.opts.agentPreset).toBe(presets.worker)
+    expect(events.created[0]!.opts.agentPreset).toBe(presets.executor)
   })
 
   it('默认模型钉定：建会话后、首轮投递前 selectModel(models[0])', async () => {

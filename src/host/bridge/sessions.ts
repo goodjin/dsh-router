@@ -100,8 +100,11 @@ export interface SessionBridgeDeps {
   /** registry 可选缺席（缺席即全部回退 cwd 创建）。 */
   workspaces?: WorkspaceFace
   host: SessionBridgeHost
-  /** 按任务角色选预设 id；类型在册时用 forTemplate 解析动态预设（v1.1 C1）。 */
-  presets: { supervisor: string; worker: string }
+  /**
+   * 派发兜底执行预设 id（2026-11-12 合并裁定：supervisor/worker 两角色收敛为
+   * 同一条「执行者」预设）；类型在册时先走 forTemplate 解析动态预设。
+   */
+  executorPreset: string
   /**
    * templateId → 预设 id 解析（entry 接线：启用类型 → dsh-router-worker-<类型>，
    * builtin 通用 worker → 静态预设）。缺席或解析不出 → 回退静态角色预设。
@@ -193,7 +196,7 @@ export class SessionBridge {
   private docsFor: (cwd: string) => TaskDocStore
   private workspaces: WorkspaceFace | undefined
   private host: SessionBridgeHost
-  private presets: SessionBridgeDeps['presets']
+  private executorPreset: string
   private forTemplate: SessionBridgeDeps['forTemplate']
   private types: SessionBridgeDeps['types']
   private interruptFace: SessionBridgeDeps['interruptFace']
@@ -211,7 +214,7 @@ export class SessionBridge {
     this.docsFor = deps.docsFor
     this.workspaces = deps.workspaces
     this.host = deps.host
-    this.presets = deps.presets
+    this.executorPreset = deps.executorPreset
     this.forTemplate = deps.forTemplate
     this.types = deps.types
     this.interruptFace = deps.interruptFace
@@ -253,7 +256,8 @@ export class SessionBridge {
       const resolved = await this.forTemplate(record.templateId, record.role)
       if (resolved !== undefined && resolved !== '') return resolved
     }
-    return this.presets[record.role]
+    // 2026-11-12 合并裁定：两角色同一条执行者预设（forTemplate 未解析出动态预设时）。
+    return this.executorPreset
   }
 
   /**

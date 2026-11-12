@@ -95,8 +95,8 @@ export interface RouterDefaultsFace {
 /** 预设与模板配置。 */
 export interface RouterCoreConfig {
   routerPreset: string
-  supervisorPreset: string
-  workerPreset: string
+  /** 统一执行者预设 id（2026-11-12 合并裁定：两角色同一条）。 */
+  executorPreset: string
   templates: WorkerTemplate[]
 }
 

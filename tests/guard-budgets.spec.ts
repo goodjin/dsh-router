@@ -131,7 +131,7 @@ describe('轮次边界接线：bridge watchStatus 的 running→true 映射 onTu
         throw new Error('unused')
       },
       host,
-      presets: { supervisor: 'sup', worker: 'worker' },
+      executorPreset: 'executor-p',
       workerInstructions: () => '',
     })
     bridge.watchStatus()
@@ -169,7 +169,7 @@ describe('轮次边界接线：bridge watchStatus 的 running→true 映射 onTu
         throw new Error('unused')
       },
       host,
-      presets: { supervisor: 'sup', worker: 'worker' },
+      executorPreset: 'executor-p',
       workerInstructions: () => '',
     })
     bridge.watchStatus()

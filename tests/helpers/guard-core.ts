@@ -193,7 +193,7 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
     docsFor: () => docs,
     workspaces: hosts.workspaceRegistry,
     host: bridgeHost,
-    presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
+    executorPreset: 'dsh-router-executor',
     workerInstructions: () => '【执行指引】',
     interruptFace: opts.interruptFace,
     signal: new AbortController().signal,
@@ -237,8 +237,7 @@ export async function guardCoreWith(opts: GuardCoreOptions = {}) {
     ui,
     config: {
       routerPreset: 'dsh-router',
-      supervisorPreset: 'dsh-router-supervisor',
-      workerPreset: 'dsh-router-worker',
+      executorPreset: 'dsh-router-executor',
       templates: GUARD_TEMPLATES,
     },
     breaker,

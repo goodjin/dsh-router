@@ -146,7 +146,7 @@ function harness(opts: HarnessOptions) {
     },
     resolvePreset: opts.presetNotFound === true
       ? async () => {
-          throw new Error('agent-preset/not-found: Unknown agent preset: dsh-router-worker')
+          throw new Error('agent-preset/not-found: Unknown agent preset: dsh-router-executor')
         }
       : opts.omitPresetFaces === true
         ? undefined
@@ -160,7 +160,7 @@ function harness(opts: HarnessOptions) {
     ledger,
     docsFor: () => docs,
     host,
-    presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
+    executorPreset: 'dsh-router-executor',
     workerInstructions: () => '【执行指引】',
     mode: opts.mode,
     types: { get: async (templateId) => (templateId === 'coder' ? CODER_TYPE : undefined) },
@@ -281,7 +281,7 @@ describe('minimal-face：五步复刻（规格 §3.2）', () => {
     expect(create.seed.length).toBe(4) // 前缀 3 + 合成 end-seed
     expect(create.seed[3]).toMatchObject({ type: 'session/end-seed', data: { inherited: true } })
     expect(create.inheritedEventCount).toBe(3)
-    expect(create.meta).toMatchObject({ cwd: '/proj', isSeeded: true, agentPreset: 'dsh-router-worker' })
+    expect(create.meta).toMatchObject({ cwd: '/proj', isSeeded: true, agentPreset: 'dsh-router-executor' })
     expect(create.setupGiven).toBe(true)
     expect(h.captured.attachCalls).toHaveLength(0) // 无 workspace 解析面时跳过
   })

@@ -1,6 +1,7 @@
 /**
  * 主管角色提示词（计划 B2；v1.1 C6 双通道与禁主管链修订）。
- * 与 yml persona 前缀逐字同步（bundle.spec 看守）：改这里必须同步改 yml。
+ * 2026-11-12 合并裁定起不再进 yml（静态预设只剩「执行者」一条，persona=
+ * unified.ts）；本文件保留作 supervisor 类型缺省系统提示词的取值源。
  */
 
 export const supervisorPrompt = `你是主管型执行者，由 {{model}} 驱动：你自己承担一部分工作，也可以把子任务分派出去，最后对整个父任务的交付负责。

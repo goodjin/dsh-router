@@ -41,7 +41,7 @@ import { workerInstructions as WORKER_INSTRUCTIONS } from './host/prompts/worker
 import { SessionPromptStore } from './host/prompts/session-prompt.ts'
 import { routerPrompt } from './host/prompts/router.ts'
 import { BUILTIN_GENERAL_ID, BUILTIN_TEMPLATES, RouterDefaultsStore, WorkerTypeStore } from './host/templates.ts'
-import { dynamicPresetId } from './host/presets/dynamic.ts'
+import { resolveDispatchPreset } from './host/presets/dynamic.ts'
 import { DynamicPresetEngine, type AgentPresetsFace } from './host/presets/lifecycle.ts'
 import { MemoryDocStore } from './host/memory/store.ts'
 import { ClosureIntentStore, OutcomeAdjudicator } from './host/guard/adjudicator.ts'
@@ -145,8 +145,8 @@ interface ResolvedRootConfig extends RouterCoreConfig {
   perTypeConcurrency: number
   maxDepth: number
   routerPreset: string
-  supervisorPreset: string
-  workerPreset: string
+  /** 统一执行者预设 id（2026-11-12 合并裁定：两角色同一条）。 */
+  executorPreset: string
   /** worker 派生模式（v1.3 C2）：volatile，运行时经 /router/spawn-mode 可改。 */
   workerSpawnMode: WorkerSpawnMode
   summarizationProvider: string
@@ -229,8 +229,14 @@ export function resolveRootConfig(raw: unknown): ResolvedRootConfig {
     perTypeConcurrency: nonNegative(source.perTypeConcurrency, 3),
     maxDepth: Math.max(1, nonNegative(source.maxDepth, 3)),
     routerPreset: stringOr(source.routerPreset, 'dsh-router'),
-    supervisorPreset: stringOr(source.supervisorPreset, 'dsh-router-supervisor'),
-    workerPreset: stringOr(source.workerPreset, 'dsh-router-worker'),
+    // 2026-11-12 合并裁定：supervisorPreset/workerPreset → executorPreset。旧键作
+    // 迁移回退（用户旧配置显式设置过角色预设时不丢）：executorPreset >
+    // supervisorPreset > workerPreset > 默认。两个旧 id 启动时注册兼容别名，
+    // 即使回退取到旧值也可解析（旧会话照常重开）。
+    executorPreset: stringOr(
+      source.executorPreset,
+      stringOr(source.supervisorPreset, stringOr(source.workerPreset, 'dsh-router-executor')),
+    ),
     // v1.3 C2（规格 §1）：防御性解析——两枚举值之外一律回默认 cache-priority
     //（宿主各版本对 union schema 缺省行为不一致时插件自己兜底，与 resolveRootConfig 总口径一致）。
     summarizationProvider: stringOr(source.summarizationProvider, ''),
@@ -382,18 +388,15 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     return sessionPrompts.get(sessionId) ?? defaultsText
   }
 
-  /** templateId → 预设 id：启用类型走动态预设；内置通用 worker 走静态预设
-   *  （保证任何情况下可派发）；禁用/未知 → undefined（回退静态角色预设，
-   *  由核心的 assertTemplateUsable 拒绝派发）。 */
+  /** templateId → 预设 id：启用类型走动态预设；builtin 与回退都收敛到执行者预设
+   *  （2026-11-12 合并裁定：两角色同一条；禁用/未知 → undefined 回退桥的单值
+   *  兜底，由核心的 assertTemplateUsable 拒绝派发）。解析逻辑在
+   *  presets/dynamic.ts 的 resolveDispatchPreset（矩阵测试共用）。 */
   const resolvePresetForTemplate = async (
     templateId: string,
     role: 'supervisor' | 'worker',
-  ): Promise<string | undefined> => {
-    const record = await typeStore.get(templateId)
-    if (record === undefined || !record.enabled || record.role !== role) return undefined
-    if (record.origin === 'builtin') return role === 'worker' ? config.workerPreset : config.supervisorPreset
-    return dynamicPresetId(templateId)
-  }
+  ): Promise<string | undefined> =>
+    resolveDispatchPreset(await typeStore.get(templateId), role, config.executorPreset)
 
   const workspaceRegistry: RouterCoreHosts['workspaceRegistry'] = {
     list: () => (ctx.workspaceRegistry.list() as WorkspaceInfo[]),
@@ -494,7 +497,8 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
     docsFor,
     workspaces: workspaceRegistry,
     onDelivered: (taskId) => { void adjudicatorRef.current?.onDispatched(taskId) },
-    presets: { supervisor: config.supervisorPreset, worker: config.workerPreset },
+    // 2026-11-12 合并裁定：两角色预设收敛为单值（类型在册时 forTemplate 先解析）。
+    executorPreset: config.executorPreset,
     forTemplate: resolvePresetForTemplate,
     types: { get: (templateId) => typeStore.get(templateId) },
     // 紧急暂停的中断面（v1.2 B4，r8 §5）：agents.get(id)?.cancel —— 幂等、
@@ -905,7 +909,13 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
       if (outcomes.failed.length > 0) {
         log.warn(`动态预设注册失败被跳过的类型（派发会被拒）: ${outcomes.failed.join('、')}`)
       }
-      log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走静态预设）`)
+      // 旧 id 兼容别名（2026-11-12 合并裁定）：dsh-router-supervisor/worker 注册为
+      // 执行者同款组合的尾部别名，保旧执行会话重开；失败仅告警（逐别名独立兜底）。
+      const aliases = await engine.syncLegacyAliases()
+      if (aliases.failed.length > 0) {
+        log.warn(`旧预设兼容别名注册失败: ${aliases.failed.join('、')}（对应旧会话暂不可重开，重启宿主会重试）`)
+      }
+      log.info(`动态预设同步完成：Router=${routerOutcome}，类型注册 ${outcomes.registered.length} 个（内置 ${BUILTIN_GENERAL_ID} 走执行者预设），旧 id 兼容别名 ${aliases.registered.length}/${aliases.registered.length + aliases.failed.length}`)
       await sessionPrompts.load()
       await ui.load()
       await ledger.listAll()

@@ -916,7 +916,7 @@ describe('SessionBridge onDelivered：投递成功即回调（B3 定时器武装
       ledger,
       docsFor: () => docs,
       host,
-      presets: { supervisor: 'sup-p', worker: 'worker-p' },
+      executorPreset: 'executor-p',
       workerInstructions: () => '【执行指引】',
       onDelivered: (taskId, sessionId) => delivered.push({ taskId, sessionId }),
     })
@@ -956,7 +956,7 @@ describe('SessionBridge onDelivered：投递成功即回调（B3 定时器武装
         },
         onStatus: () => {},
       },
-      presets: { supervisor: 'sup-p', worker: 'worker-p' },
+      executorPreset: 'executor-p',
       workerInstructions: () => '【执行指引】',
       onDelivered: (taskId, sessionId) => delivered.push({ taskId, sessionId }),
     })
