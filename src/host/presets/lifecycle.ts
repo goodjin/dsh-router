@@ -22,6 +22,8 @@ import {
   buildWorkerPresetDefinition,
   collectHostRows,
   dynamicPresetId,
+  legacyAliasDefinition,
+  LEGACY_EXECUTOR_PRESET_IDS,
   staticRouterDefinition,
   type PresetDefinition,
   type RowSpec,
@@ -209,5 +211,30 @@ export class DynamicPresetEngine {
       this.disposers.delete(id)
       await unregister()
     }
+  }
+
+  /**
+   * 旧 id 兼容别名（2026-11-12 合并裁定）：dsh-router-supervisor / dsh-router-worker
+   * 注册为执行者同款组合的尾部别名（legacyAliasDefinition：order 999、名称标注
+   * 旧会话兼容），保旧执行会话重开（r4 §4：preset id 不在册即 not-found）。
+   * 逐别名独立 catch：校验或注册失败只告警（花名册少一条别名、对应旧会话不可
+   * 重开），绝不炸装载，也不影响其余别名。
+   */
+  async syncLegacyAliases(): Promise<{ registered: string[]; failed: string[] }> {
+    const registered: string[] = []
+    const failed: string[] = []
+    for (const legacyId of LEGACY_EXECUTOR_PRESET_IDS) {
+      const definition = legacyAliasDefinition(legacyId)
+      try {
+        const problems = await this.validate(definition.plugins)
+        if (problems.length > 0) throw new Error(`校验未过:\n${problems.join('\n')}`)
+        await this.register(definition)
+        registered.push(legacyId)
+      } catch (error) {
+        this.deps.logger?.warn(`旧预设兼容别名注册失败（${legacyId}，对应旧会话暂无法重开，重启宿主会重试）: ${error instanceof Error ? error.message : String(error)}`)
+        failed.push(legacyId)
+      }
+    }
+    return { registered, failed }
   }
 }

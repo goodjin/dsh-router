@@ -15,18 +15,20 @@
  *  5. lib/client.js 必须是「单文件 CJS 工厂」，顶层不得有 import/export；
  *  6. exports["."] 指向宿主侧入口 dist/entry.js——浏览器代码不许混进宿主进程。
  *
- * Part B 起 patch 还有三条预设行（工具/上下文子路径导出、persona 文本与 TS 模板
- * 逐字同步），一并在这里断言。
+ * Part B 起 patch 还带预设行（工具/上下文子路径导出、persona 文本与 TS 模板逐字
+ * 同步）。2026-11-12 合并裁定后静态预设只剩一条「执行者」行：persona 与
+ * prompts/unified.ts 逐字同步、组合与 buildSupersetPlugins() 逐行逐字节等价
+ * （前缀缓存一致性前提），一并在这里断言。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
+import { parse } from 'yaml'
 
 import { routerPrompt } from '../src/host/prompts/router.ts'
-import { supervisorPrompt } from '../src/host/prompts/supervisor.ts'
-import { workerPrompt } from '../src/host/prompts/worker.ts'
-import { buildRouterPresetDefinition, staticRouterDefinition } from '../src/host/presets/dynamic.ts'
+import { unifiedPrompt } from '../src/host/prompts/unified.ts'
+import { buildRouterPresetDefinition, buildSupersetPlugins, staticRouterDefinition, type RowSpec } from '../src/host/presets/dynamic.ts'
 
 const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
   name: string
@@ -122,51 +124,94 @@ describe('package.json 满足浏览器半边的接线条件', () => {
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context、./compaction', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
     // 子路径行是宿主行（node 里 import 构建产物）；浏览器半边只有裸包名一条。
-    // v1.1 C1 起 Router 预设动态注册：静态 yml 只剩 supervisor/worker 两条预设，
-    // tools 行各一条（×2）；context 行只在动态 Router 定义里（presets-dynamic
-    // 看守）。其它任何子路径（尤其指向浏览器产物的）都会静默失效，直接禁止。
+    // 2026-11-12 合并裁定后静态 yml 只剩执行者一条预设：tools/context/compaction
+    // 各一行（与动态超集同款）。其它任何子路径（尤其指向浏览器产物的）都会
+    // 静默失效，直接禁止。
     const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
-    expect(subpathRows.sort()).toEqual(['tools', 'tools'])
+    expect(subpathRows.sort()).toEqual(['compaction', 'context', 'tools'])
   })
 
-  it('有两条静态预设行，config.id 互异且即两个静态预设 id', () => {
+  it('静态预设行只有一条：执行者（2026-11-12 合并裁定，旧 supervisor/worker 行已删）', () => {
     const presetRows = [...PATCH_TEXT.matchAll(/- id:\s*(dsh-router-[\w-]*)\n\s*name:\s*'@deepseek-ai\/dsh-agent-preset'\n\s*config:\n\s*id:\s*([\w-]+)/g)]
-    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router-supervisor', 'dsh-router-worker'])
-    expect(new Set(presetRows.map((m) => m[2])).size).toBe(2)
+    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router-executor'])
+    // 旧 id 不再以静态行存在（兼容别名走启动时动态注册，order 999）
+    expect(PATCH_TEXT).not.toMatch(/id:\s*dsh-router-supervisor\b/)
+    expect(PATCH_TEXT).not.toMatch(/id:\s*dsh-router-worker\b/)
   })
 
-  it('预设树内的工具行按角色分流（role: supervisor/worker 各一次；router 行在动态 Router 定义）', () => {
-    for (const role of ['supervisor', 'worker']) {
-      expect(PATCH_TEXT, `role: ${role} 行缺失`).toMatch(new RegExp(`name:\\s*'@goodjin2/dsh-router/tools'\\n\\s+config:\\n\\s+role: ${role}`))
-    }
+  it('tools 行 role=superset（角色闸在执行层，preset 层不再分置角色）', () => {
+    expect(PATCH_TEXT).toMatch(/name:\s*'@goodjin2\/dsh-router\/tools'\n\s+config:\n\s+role: superset/)
+    expect(PATCH_TEXT).not.toMatch(/role: supervisor\s*$/m)
+    expect(PATCH_TEXT).not.toMatch(/role: worker\s*$/m)
   })
 
-  it('context 行只在动态 Router 定义（静态 yml 里没有）', () => {
-    expect(PATCH_TEXT.match(/name:\s*'@goodjin2\/dsh-router\/context'/g)?.length ?? 0).toBe(0)
-  })
-
-  it('两条静态预设都挂压缩组（isolate 的 cordis:group；动态 Router 定义同款由 presets-dynamic 看守）', () => {
+  it('压缩组在场（isolate 的 cordis:group；动态 Router 定义同款由 presets-dynamic 看守）', () => {
     // 压缩引擎在会话自身作用域缺席时，驱动的 compactNow 会永远抛错空转
     //（B2 裁定 5 的缺口在此看守）。
-    for (const id of ['supervisor-compaction', 'worker-compaction']) {
-      expect(PATCH_TEXT, `压缩组 ${id} 缺失`).toMatch(new RegExp(`-\\s+id:\\s*${id}\\n\\s+name:\\s*cordis:group\\n\\s+group:\\s*true\\n\\s+isolate:\\n\\s+compaction:\\s*true\\n\\s+toolResultPruner:\\s*true`))
-    }
+    expect(PATCH_TEXT).toMatch(/-\s+id:\s*compaction\n\s+name:\s*cordis:group\n\s+group:\s*true\n\s+isolate:\n\s+compaction:\s*true\n\s+toolResultPruner:\s*true/)
   })
 
-  it('supervisor 预设挂 r6 双绿子代理行：control 裸行 + spawn 行；禁 ./list-agents、禁死键', () => {
-    expect(PATCH_TEXT).toMatch(/- id:\s*supervisor-tool-subagent-control\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
-    expect(PATCH_TEXT).toMatch(/- id:\s*supervisor-tool-subagent\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s+config:\n\s+provider:\s*spawn\n\s+toolName:\s*subagent\n\s+maxDepth:\s*2\n/)
+  it('delegation 组挂 r6 双绿子代理行：control 裸行 + spawn 行；禁 ./list-agents、禁死键', () => {
+    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
+    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s+config:\n\s+provider:\s*spawn\n\s+toolName:\s*subagent\n\s+maxDepth:\s*2\n/)
     // 禁的是行（子路径导出 0.2.2 已删）；注释里的事故说明不算
     expect(PATCH_TEXT).not.toMatch(/name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'/)
     for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
       expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
     }
   })
+
+  it('yml 执行者组合 ≡ buildSupersetPlugins()（逐行逐字节；前缀缓存一致性）', () => {
+    const doc = parseYml(PATCH_TEXT) as unknown
+    const staticPlugins = executorPluginsFrom(doc)
+    const dynamicPlugins = buildSupersetPlugins()
+    // yml `|-` 块标量剥末尾换行（personaPrefix 的原文还原补回），比对前两侧归一；
+    // disabled：yml 是 !!js 表达式串、动态是求值布尔——单独断言（下一用例）。
+    const normalize = (rows: RowSpec[]): unknown =>
+      rows.map((row) => {
+        const clone: Record<string, unknown> = { ...row }
+        delete clone.disabled
+        if (Array.isArray(clone.config)) clone.config = normalize(clone.config as RowSpec[])
+        const config = clone.config
+        if (config !== null && typeof config === 'object' && !Array.isArray(config) && typeof (config as { prefix?: unknown }).prefix === 'string') {
+          const prefix = (config as { prefix: string }).prefix
+          clone.config = { ...(config as Record<string, unknown>), prefix: prefix.replace(/\n$/, '') }
+        }
+        return clone
+      })
+    expect(normalize(staticPlugins)).toEqual(normalize(dynamicPlugins))
+  })
+
+  it('bash 行禁用语义一致：yml !!js 表达式 ⇄ 动态布尔', () => {
+    const doc = parseYml(PATCH_TEXT) as unknown
+    const bash = executorPluginsFrom(doc).find((row) => row.id === 'tool-bash')
+    expect(String(bash?.disabled)).toContain('process.platform')
+    expect(buildSupersetPlugins().find((row) => row.id === 'tool-bash')?.disabled).toBe(process.platform === 'win32')
+  })
 })
+
+/** 用包内 yaml 解析 patch 文本（logLevel 静默——!!js 表达式只读得下来即可）。 */
+function parseYml(text: string): unknown {
+  const doc = parse(text, { logLevel: 'silent' }) as unknown
+  return doc
+}
+
+/** 取执行者预设行的 plugins（顶层是 [ { insert: [...] } ]）。 */
+function executorPluginsFrom(doc: unknown): RowSpec[] {
+  const documents = Array.isArray(doc) ? doc : [doc]
+  for (const document of documents) {
+    const inserts = (document as { insert?: unknown[] } | null)?.insert ?? []
+    for (const row of inserts) {
+      const entry = row as { config?: { id?: string; plugins?: RowSpec[] } }
+      if (entry.config?.id === 'dsh-router-executor') return entry.config.plugins ?? []
+    }
+  }
+  throw new Error('yml 里找不到执行者预设 dsh-router-executor')
+}
 
 /** 从 yml 抽 persona 前缀块（prefix: |- 下的 16 空格缩进文本），还原成原文。 */
 function personaPrefix(yml: string, personaRowId: string): string {
@@ -199,11 +244,8 @@ describe('persona 文本与 TS 模板逐字同步', () => {
     const fallbackPersona = staticRouterDefinition().plugins.find((row) => row.name === '@deepseek-ai/dsh-persona')
     expect(fallbackPersona?.config).toMatchObject({ prefix: routerPrompt, complete: true })
   })
-  it('supervisor-persona === supervisorPrompt', () => {
-    expect(personaPrefix(PATCH_TEXT, 'supervisor-persona')).toBe(supervisorPrompt)
-  })
-  it('worker-persona === workerPrompt', () => {
-    expect(personaPrefix(PATCH_TEXT, 'worker-persona')).toBe(workerPrompt)
+  it('执行者 persona（yml 静态行）=== unifiedPrompt（2026-11-12 合并裁定后唯一 persona 源）', () => {
+    expect(personaPrefix(PATCH_TEXT, 'persona')).toBe(unifiedPrompt)
   })
 })
 

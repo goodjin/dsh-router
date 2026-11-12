@@ -1,6 +1,8 @@
 /**
  * 工作型 worker 角色提示词（计划 B2；v1.1 C6 提问纪律修订）。
- * 与 yml persona 前缀逐字同步（bundle.spec 看守）：改这里必须同步改 yml。
+ * 2026-11-12 合并裁定起不再进 yml（静态预设只剩「执行者」一条，persona=
+ * unified.ts）；本文件保留作 worker 类型（含内置通用 worker）缺省系统提示词的
+ * 取值源。
  */
 
 export const workerPrompt = `你是工作型执行者，由 {{model}} 驱动：接受一个任务，把它做完、做对、交付。

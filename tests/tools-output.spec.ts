@@ -143,7 +143,7 @@ async function coreWith(records: TaskRecord[], opts: { withTypeStore?: boolean }
       prompt: (request, signal) => hosts.sessionController.prompt(request, signal),
       onStatus: () => {},
     },
-    presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
+    executorPreset: 'dsh-router-executor',
     workerInstructions: () => '【执行指引】',
     signal: new AbortController().signal,
   })
@@ -170,8 +170,7 @@ async function coreWith(records: TaskRecord[], opts: { withTypeStore?: boolean }
     ui,
     config: {
       routerPreset: 'dsh-router',
-      supervisorPreset: 'dsh-router-supervisor',
-      workerPreset: 'dsh-router-worker',
+      executorPreset: 'dsh-router-executor',
       templates: TEMPLATES,
     },
     types:

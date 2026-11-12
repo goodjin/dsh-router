@@ -21,9 +21,13 @@ import { parse } from 'yaml'
 
 import {
   buildRouterPresetDefinition,
+  buildSupersetPlugins,
   buildWorkerPresetDefinition,
   collectHostRows,
   dynamicPresetId,
+  legacyAliasDefinition,
+  LEGACY_ALIAS_ORDER,
+  LEGACY_EXECUTOR_PRESET_IDS,
   staticRouterDefinition,
   type PresetDefinition,
   type RowSpec,
@@ -203,11 +207,11 @@ describe('技能行（2026-11-10 裁定：类型不再挂技能）', () => {
   })
 })
 
-describe('内置通用 worker：等价修复后的静态 worker 组合', () => {
+describe('静态执行者预设（2026-11-12 合并裁定：组合 ≡ buildSupersetPlugins）', () => {
   const ymlPath = fileURLToPath(new URL('../cordis.patch.yml', import.meta.url))
   const doc = parse(readFileSync(ymlPath, 'utf8'), { logLevel: 'silent' }) as unknown
 
-  /** 从 yml 收集预设行的 plugins（顶层是 [ { insert: [...] } ]）。 */
+  /** 从 yml 收集执行者预设行的 plugins（顶层是 [ { insert: [...] } ]）。 */
   function staticPresetPlugins(presetId: string): RowSpec[] {
     const documents = Array.isArray(doc) ? doc : [doc]
     for (const document of documents) {
@@ -220,50 +224,104 @@ describe('内置通用 worker：等价修复后的静态 worker 组合', () => {
     throw new Error(`yml 里找不到预设 ${presetId}`)
   }
 
-  it('动态生成的通用 worker 组合 ≡ 静态 yml worker 预设（逐行 name/config）', () => {
-    const def = buildWorkerPresetDefinition(builtinGeneralType(0))
-    const staticPlugins = staticPresetPlugins('dsh-router-worker')
-    // 行 id 约定不同（静态带 worker- 前缀、动态统一无前缀）：剥前缀后逐行比对
-    // name/config/结构。yml 的 `|-` 块标量剥掉末尾换行（bundle.spec 的原文还原
-    // 会补回），person a 前缀两侧各剥一个尾换行再比；disabled 单独断言。
-    // 压缩引擎行是 2026-11-11 的有意分歧（见下一断言）：比对时把行名归一成
-    // 占位符，保证「其余全部逐行等价」仍然成立。
+  it('yml 只剩一条静态预设行（旧 supervisor/worker 行已删）', () => {
+    const documents = Array.isArray(doc) ? doc : [doc]
+    const presetIds: string[] = []
+    for (const document of documents) {
+      for (const row of (document as { insert?: unknown[] } | null)?.insert ?? []) {
+        const entry = row as { name?: string; config?: { id?: string } }
+        if (entry.name === '@deepseek-ai/dsh-agent-preset') presetIds.push(String(entry.config?.id))
+      }
+    }
+    expect(presetIds).toEqual(['dsh-router-executor'])
+  })
+
+  it('yml 执行者组合 ≡ buildSupersetPlugins()（逐行 name/config/结构；含压缩引擎行同款）', () => {
+    const staticPlugins = staticPresetPlugins('dsh-router-executor')
+    // yml `|-` 块标量剥末尾换行（bundle.spec 的原文还原补回），比对前两侧归一；
+    // disabled：yml 是 !!js 表达式串、动态是求值布尔——单独断言（下一用例）。
     const normalize = (rows: RowSpec[]): RowSpec[] =>
       rows.map((row) => {
-        const clone: RowSpec = { ...row, id: row.id.replace(/^worker-/, '') }
+        const clone: RowSpec = { ...row }
         delete clone.disabled
         if (Array.isArray(clone.config)) clone.config = normalize(clone.config as RowSpec[])
         const config = clone.config
         if (config !== null && typeof config === 'object' && !Array.isArray(config) && typeof (config as { prefix?: unknown }).prefix === 'string') {
           clone.config = { ...(config as Record<string, unknown>), prefix: (config as { prefix: string }).prefix.replace(/\n$/, '') }
         }
-        if (clone.id === 'compaction-basic') clone.name = '<engine-row>'
         return clone
       })
-    expect(normalize(def.plugins)).toEqual(normalize(staticPlugins))
-  })
-
-  it('压缩引擎行有意分歧：动态组合换任务描述引擎，静态 yml 保持官方行', () => {
-    const dynamicEngine = (buildWorkerPresetDefinition(builtinGeneralType(0)).plugins
-      .find((row) => row.id === 'compaction')!.config as RowSpec[])
-      .find((row) => row.id === 'compaction-basic')!
-    const staticEngine = staticPresetPlugins('dsh-router-worker')
-      .flatMap((row) => (row.id === 'worker-compaction' ? ((row.config as RowSpec[]) ?? []) : []))
-      .find((row) => row.id === 'compaction-basic')!
-    expect(dynamicEngine.name).toBe('@goodjin2/dsh-router/compaction')
-    expect(staticEngine.name).toBe('@deepseek-ai/dsh-compaction-basic')
-  })
-
-  it('通用 worker 的提示词与 prompts/worker.ts 逐字一致（含尾换行）', () => {
-    const def = buildWorkerPresetDefinition(builtinGeneralType(0))
-    expect((rowById(def, 'persona')!.config as { prefix: string }).prefix).toBe(workerPrompt)
+    expect(normalize(staticPlugins)).toEqual(normalize(buildSupersetPlugins()))
   })
 
   it('bash 行禁用语义一致：yml !!js 表达式 ⇄ 动态布尔', () => {
-    const staticBash = staticPresetPlugins('dsh-router-worker').find((row) => row.id === 'worker-tool-bash')
-    const dynamicBash = buildWorkerPresetDefinition(builtinGeneralType(0)).plugins.find((row) => row.id === 'tool-bash')
+    const staticBash = staticPresetPlugins('dsh-router-executor').find((row) => row.id === 'tool-bash')
     expect(String(staticBash?.disabled)).toContain('process.platform')
-    expect(dynamicBash?.disabled).toBe(process.platform === 'win32')
+    expect(buildSupersetPlugins().find((row) => row.id === 'tool-bash')?.disabled).toBe(process.platform === 'win32')
+  })
+
+  it('通用 worker 的提示词与 prompts/worker.ts 逐字一致（类型缺省提示词取值源，含尾换行）', () => {
+    const def = buildWorkerPresetDefinition(builtinGeneralType(0))
+    expect((rowById(def, 'persona')!.config as { prefix: string }).prefix).toBe(workerPrompt)
+  })
+})
+
+describe('旧 id 兼容别名（2026-11-12 合并裁定）', () => {
+  it('legacyAliasDefinition：两个旧 id、order 999、名称标注旧会话兼容、组合 ≡ 执行者超集', () => {
+    for (const legacyId of LEGACY_EXECUTOR_PRESET_IDS) {
+      const def = legacyAliasDefinition(legacyId)
+      expect(def.id).toBe(legacyId)
+      expect(def.order).toBe(LEGACY_ALIAS_ORDER)
+      expect(LEGACY_ALIAS_ORDER).toBe(999)
+      expect(def.name).toContain('执行者')
+      expect(def.name).toContain('旧会话兼容')
+      expect(def.description).toContain('请勿手动选用')
+      expect(def.plugins).toEqual(buildSupersetPlugins())
+    }
+    expect([...LEGACY_EXECUTOR_PRESET_IDS]).toEqual(['dsh-router-supervisor', 'dsh-router-worker'])
+  })
+
+  it('legacyAliasDefinition 拒绝未知 id（防手滑注册野别名）', () => {
+    expect(() => legacyAliasDefinition('dsh-router-executor')).toThrow('未知旧执行预设')
+    expect(() => legacyAliasDefinition('dsh-router-ghost')).toThrow('未知旧执行预设')
+  })
+
+  it('syncLegacyAliases：两个旧 id 注册进花名册（校验过、注销器自接线）', async () => {
+    const { engine, registry, effect } = engineHarness()
+    const outcome = await engine.syncLegacyAliases()
+    expect(outcome).toEqual({ registered: [...LEGACY_EXECUTOR_PRESET_IDS], failed: [] })
+    for (const legacyId of LEGACY_EXECUTOR_PRESET_IDS) {
+      expect(registry.registered.has(legacyId)).toBe(true)
+      expect(engine.has(legacyId)).toBe(true)
+    }
+    expect(effect.calls).toHaveLength(2)
+    expect(effect.calls.map((call) => call.label).join(' ')).toContain('dsh-router-supervisor')
+  })
+
+  it('注册失败仅告警：逐别名独立兜底，一个失败不挡另一个、不炸调用方', async () => {
+    const { engine, registry, warns } = engineHarness((def) => def.id === 'dsh-router-worker')
+    const outcome = await engine.syncLegacyAliases()
+    expect(outcome).toEqual({ registered: ['dsh-router-supervisor'], failed: ['dsh-router-worker'] })
+    expect(registry.registered.has('dsh-router-supervisor')).toBe(true)
+    expect(registry.registered.has('dsh-router-worker')).toBe(false)
+    expect(warns.some((m) => m.includes('dsh-router-worker') && m.includes('旧会话'))).toBe(true)
+  })
+
+  it('校验失败也仅告警（坏行不进花名册，别名缺位不炸装载）', async () => {
+    const registry = fakeRegistry()
+    const effect = fakeEffect()
+    const warns: string[] = []
+    const engine = new DynamicPresetEngine({
+      presets: registry.face,
+      effect: effect.effect,
+      validate: async () => ['tool-fs-search: Config 校验失败: 假装缺键'],
+      logger: { info: () => {}, warn: (m) => warns.push(m) },
+    })
+    const outcome = await engine.syncLegacyAliases()
+    expect(outcome.registered).toEqual([])
+    expect(outcome.failed).toEqual([...LEGACY_EXECUTOR_PRESET_IDS])
+    expect(registry.registered.size).toBe(0)
+    expect(warns.length).toBe(2)
   })
 })
 
@@ -442,7 +500,7 @@ describe('DynamicPresetEngine：类型注册生命周期', () => {
     expect(def.plugins.some((row) => row.id === 'skill-filesystem')).toBe(false)
   })
 
-  it('builtin 通用 worker 不动态注册（映射静态 dsh-router-worker）', async () => {
+  it('builtin 通用 worker 不动态注册（派发解析映射静态执行者预设）', async () => {
     const { engine, registry } = engineHarness()
     await engine.ensureRegistered(builtinGeneralType(0))
     expect(registry.registered.size).toBe(0)

@@ -59,8 +59,8 @@ function patchRows(): Record<string, unknown>[] {
  *
  * - worker-tool-fs-search：宿主必填 `sampleOverCapGlobResults`（无默认），双版本
  *   standard/ptc 均传 `false` —— v1 缺它导致整树回滚（本 fixture 的锚点行）。
- * - supervisor/worker-tools：本包自己的行 Config 要求 `role`（缺了注册
- *   不出任何编排工具，行会静默空转）。
+ * - tools：本包自己的行 Config 要求 `role`（缺了注册不出任何编排工具，行会
+ *   静默空转）；2026-11-12 合并裁定后静态行与动态超集同为 `superset`。
  * - supervisor-tool-subagent：宿主 schema 唯一必填键 `provider`（r6 §0.4 实测
  *   缺它 FAIL）；maxDepth: 2 允许二级派发（spawn 有 depthLimit 能力）。
  * - worker-tool-fs：`applyPatch: false` 与桌面 standard/ptc 同款；CLI 0.2.1-rc.2
@@ -68,38 +68,36 @@ function patchRows(): Record<string, unknown>[] {
  * - 其余行（persona/ask-user/delegation 组及其 control 子行/compaction 组及其
  *   子行/bash）：双版本宿主 standard 预设均无必填 config（control 包两版本都不
  *   导出 Config；bash 只有 disabled 表达式，与宿主同款），以空登记纳入完整性守卫。
- * - v1.1 C1 起 Router 预设动态注册，静态 yml 行已移除（动态行的审计在
- *   presets-dynamic.spec.ts，同一套 validateRowSpec）。
+ * - v1.1 C1 起 Router 预设动态注册；2026-11-12 合并裁定起静态 yml 只剩执行者
+ *   一条预设行（组合与动态超集同构；动态行的审计在 presets-dynamic.spec.ts，
+ *   同一套 validateRowSpec）。
  */
 export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 宿主工具行：双宿主必填 */
-  'worker-tool-fs-search': { sampleOverCapGlobResults: false },
+  'tool-fs-search': { sampleOverCapGlobResults: false },
   /* 执行支撑三件（2026-11-10 工具面补齐；web/todo 带配置、jobs 裸行） */
-  'worker-tool-web': { fetch: true, searchTimeoutMs: 60000 },
-  'worker-tool-todo': { allowParallelInProgress: true },
-  'worker-tool-jobs': {},
-  /* 本包自己的行 Config 必填 */
-  'supervisor-tools': { role: 'supervisor' },
-  'worker-tools': { role: 'worker' },
+  'tool-web': { fetch: true, searchTimeoutMs: 60000 },
+  'tool-todo': { allowParallelInProgress: true },
+  'tool-jobs': {},
+  'tool-fs': { applyPatch: false },
+  /* 本包自己的行 Config 必填（superset：全编排工具注册，角色闸在执行层） */
+  'tools': { role: 'superset' },
   /* 宿主 schema 必填（r6 实测） */
-  'supervisor-tool-subagent': { provider: 'spawn' },
-  /* 无必填 config 的行：空登记（完整性守卫） */
+  'tool-subagent': { provider: 'spawn' },
+  /* 无必填 config 的行：空登记（完整性守卫；组合与 buildSupersetPlugins 同构，
+   * 2026-11-12 合并裁定后静态 yml 只剩执行者一条预设） */
   'dsh-router-client': {},
-  'dsh-router-supervisor-preset': {},
-  'dsh-router-worker-preset': {},
+  'dsh-router-executor-preset': {},
+  'persona': {},
+  'ask-user': {},
+  'tool-bash': {},
+  'delegation': {},
+  'tool-subagent-control': {},
+  'router-context': {},
+  'compaction': {},
   'compaction-basic': {},
   'command-compact': {},
   'tool-result-pruner': {},
-  'supervisor-persona': {},
-  'supervisor-delegation': {},
-  'supervisor-tool-subagent-control': {},
-  'supervisor-ask-user': {},
-  'supervisor-compaction': {},
-  'worker-persona': {},
-  'worker-ask-user': {},
-  'worker-tool-bash': {},
-  'worker-tool-fs': {},
-  'worker-compaction': {},
 }
 
 /* ────────────────────────── 断言 ────────────────────────── */

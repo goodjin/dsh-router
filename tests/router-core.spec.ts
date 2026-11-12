@@ -245,7 +245,7 @@ async function coreWith(
         return { sessionId: `forked-${forkCalls.length}` }
       },
     },
-    presets: { supervisor: 'dsh-router-supervisor', worker: 'dsh-router-worker' },
+    executorPreset: 'dsh-router-executor',
     workerInstructions: () => '【执行指引】',
     // 2026-11-10 分叉范围测试：类型面（切换卡类型名 + 全新创建钉 models[0]）
     types: { get: async () => ({ templateId: 'coder', name: 'coder', description: '', role: 'worker' as const, models: ['fake-provider/fake-model'], systemPrompt: '', skills: [], enabled: true, origin: 'builtin' as const, createdAt: 1, updatedAt: 1 }) },
@@ -268,8 +268,7 @@ async function coreWith(
     ui,
     config: {
       routerPreset: 'dsh-router',
-      supervisorPreset: 'dsh-router-supervisor',
-      workerPreset: 'dsh-router-worker',
+      executorPreset: 'dsh-router-executor',
       templates: TEMPLATES,
     },
     types: opts.types,
@@ -334,7 +333,7 @@ describe('createRouterCore：dispatchTask', () => {
     expect(result.taskId).toBe('T-001')
     expect(result.docPath).toBe('/proj/.router/tasks/T-001/task.v1.md')
     expect(result.sessionId).toBe('session-1')
-    expect(events.created[0]!.opts).toEqual({ workspaceId: 'ws-1', agentPreset: 'dsh-router-worker' })
+    expect(events.created[0]!.opts).toEqual({ workspaceId: 'ws-1', agentPreset: 'dsh-router-executor' })
     // v1.3 规格 §3.1：标题 = `类型名 · T-xxx 任务名`（类型面缺席时退 templateId）。
     expect(events.renames[0]!.title).toBe('coder · T-001 修登录')
     expect(events.prompts[0]!.requestId).toBe('dispatch-T-001-v1')

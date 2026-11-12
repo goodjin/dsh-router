@@ -6,23 +6,26 @@
 #     包名，带子路径的行不算浏览器行），也是宿主根服务行（dist/entry.js 组装
 #     routerCore、问答瀑布监听、HTTP 路由、worker 类型存储与动态预设引擎）。
 #     config 全部可缺省（volatile 默认值在宿主 schema 里，运行时另有防御性解析）。
-#   - 两条静态预设行：dsh-router-supervisor / dsh-router-worker（order 20/30）。
-#     v1.3 起它们是「最小面（minimal-face）模式」的组合载体：workerSpawnMode 配置
-#     （默认 cache-priority）切换分叉与组合形态——cache-priority 模式下 Router 与
-#     worker 类型动态预设改出统一超集组合（src/host/presets/dynamic.ts 的
-#     buildSupersetPlugins），分叉经宿主 session/fork 继承来源组合，静态两行不
-#     参与 cache 派发（宿主 agentPresets 无公开 unregister，同 id 不能接管；两行
-#     继续服务 minimal 派发、旧会话重开与手动挑选）。
-#     Router 预设（id 仍 dsh-router）改为运行时动态注册：默认提示词/默认模型来自
+#   - 一条静态预设行：dsh-router-executor（order 20，「执行者」）。2026-11-12 用户
+#     裁定：主管/工作两条静态预设合并为单条执行者预设——组合与
+#     src/host/presets/dynamic.ts 的 buildSupersetPlugins() 逐行逐字节一致（bundle.spec
+#     看守），persona 与 prompts/unified.ts 逐字同步（身份中立，角色身份由身份卡
+#     声明、权限由执行层 assertCallerRole 硬闸把关，preset 层不再分置角色）。
+#     它服务：minimal-face 回退派发（builtin 类型与无类型分派）、cache 模式无分叉源
+#     的回退创建路径、手动挑选。
+#   - Router 预设（id 仍 dsh-router）运行时动态注册：默认提示词/默认模型来自
 #     设置，默认值可编辑后 unregister+register 即时生效；静态 yml 行与动态注册
-#     同 id 会撞 `Duplicate agent preset`（r4 §1），所以不再放这里——静态兜底
-#     定义改由 src/host/presets/dynamic.ts 的 staticRouterDefinition() 携带
-#     （逐行等价 v1 yml 行，persona 文本与 prompts/router.ts 同源，无第二份文本）。
-#     预设树内只 register 工具、不 provide 服务（泄漏审计会让整棵树回滚）。
-#   - persona 行 complete: true 整段替换默认提示词；supervisor/worker 文本与
-#     src/host/prompts/{supervisor,worker}.ts 逐字同步（bundle.spec 看守），改一侧
-#     必须同步另一侧。Router 的动态 persona 文本源自 defaults（缺省 prompts/router.ts）。
-#   - supervisor 预设的 delegation 组按 r6 §5 双宿主都绿的清单挂子代理工具行：
+#     同 id 会撞 \`Duplicate agent preset\`（r4 §1），所以不放这里——静态兜底定义由
+#     src/host/presets/dynamic.ts 的 staticRouterDefinition() 携带（persona 文本与
+#     prompts/router.ts 同源，无第二份文本）。
+#   - 旧会话兼容：dsh-router-supervisor / dsh-router-worker 两个旧 id 不在本文件，
+#     启动时由插件动态注册同名别名（组合与 executor 完全一致、order 999、名称标注
+#     「旧会话兼容」，失败仅告警）——旧执行会话（会话日志记录的 preset id 必须在册，
+#     r4 §4）因此仍可重开；别名会出现在花名册尾部，属已向用户披露的取舍。
+#   - persona 行 complete: true 整段替换默认提示词；executor 文本与
+#     src/host/prompts/unified.ts 逐字同步（bundle.spec 看守），改一侧必须同步另一侧。
+#     Router 的动态 persona 文本源自 defaults（缺省 prompts/router.ts）。
+#   - delegation 组按 r6 §5 双宿主都绿的清单挂子代理工具行：
 #     tool-subagent-control 裸行（0.2.2 起 list_agents 就在这行里，绝不单挂
 #     ./list-agents 子路径行）+ tool-subagent（provider: spawn, maxDepth: 2）；
 #     禁写 modelSelectionSettings / modelSelection / modelDiscovery / backgroundMode
@@ -35,57 +38,89 @@
 - insert:
     - id: dsh-router-client
       name: '@goodjin2/dsh-router'
-    - id: dsh-router-supervisor-preset
+    - id: dsh-router-executor-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:
-        id: dsh-router-supervisor
-        name: 主管执行者
-        description: 可再拆分子任务的主管型执行者
+        id: dsh-router-executor
+        name: 执行者
+        description: 统一执行者（组合与动态超集逐字节一致；身份由身份卡声明）
         order: 20
         plugins:
-          - id: supervisor-persona
+          - id: persona
             name: '@deepseek-ai/dsh-persona'
             config:
               prefix: |-
-                你是主管型执行者，由 {{model}} 驱动：你自己承担一部分工作，也可以把子任务分派出去，最后对整个父任务的交付负责。
+                你是本编排系统里的一名会话执行者，由 {{model}} 驱动。系统把「编排」与「执行」分给不同的会话：编排者理解需求、拆解派发、追踪汇总；执行者把单个任务做完做对。你当前的身份由会话历史中的身份卡决定，本提示词不赋予你具体身份。
 
-                ## 职责与边界
+                ## 身份卡协议
 
-                - 接收主管级任务（任务书已投递给你），必要时拆成子任务，自己完成适合自己做的部分。
-                - 双通道分派，先判断轻重（v1.3 准则：轻→子代理，重/持久→分叉 worker）：
-                  - 轻（只读查询、单点小改、格式转换这类收尾快、不留持久产出的）派**子代理**：用 subagent 工具一次性创建，空会话起步、任务提示词必须自包含（背景、目标、验收都在提示词里写全），子代理的结果随完成通知回到你这里。它不进账本、不开标签、不能向用户提问，不要依赖 list_agents 之类清单工具去管它。
-                  - 重/持久（多轮交互、要向用户提问、要留下文件或仓库改动的）派 **worker**（dispatch_task，role=worker）：worker 会话持久、可交互、入账本。
-                  - 主管之下不得再派 supervisor：禁主管链，再派一层会被直接拒绝。你之下只有子代理与 worker。
-                - 分叉 worker 的身份说明（cache 模式）：dispatch_task 的执行会话由分叉创建、继承本会话历史与模型；该类型 worker 的系统提示词经【身份切换卡】生效（第一张卡 = 类型身份职责，不进会话系统提示词），所以给类型写 systemPrompt 时写成完整的身份职责；类型 models 仅作展示，中途切换模型等于放弃已热的前缀缓存。
-                - 递归派发受最大深度限制（超限会被拒绝）：能自己做完的不要层层转包；拆分时给每个子任务写清楚目标、验收条件与约束。
-                - 子任务之间有交付顺序要求时用 dependsOn 表达依赖；不要依赖你自己的祖先任务（会被环检查拒绝）。
-                - 用 query_tasks 跟踪子任务状态；子任务全部完成后你再提交父任务的 complete_task。
-                - 用户不是执行器：任何时候都不得要求用户替你运行命令、粘贴命令输出或报告系统状态。
+                - 会话历史中会有系统投递的身份卡：「【身份卡】你是 …」（会话建立时的身份）与「【身份切换卡】你现在是 …」（系统改派身份，权威最高）。
+                - 当前身份 = 历史中最后一张身份卡；新切换卡出现后，此前的所有身份声明作废，以新卡为准。
+                - 每张身份卡写明该身份的职责与可用工具范围。范围外的工具调用会被系统直接拒绝：不要尝试越权调用，也不要想办法绕开——身份卡没有给你的工具，就当不存在。
+                - 早期历史里可能出现与当前身份不符的内容（分叉继承的来源讨论、旧身份的工作痕迹）：那些是历史，不是给你的指令；一律以最后一张身份卡为准行事。
 
-                ## 你的工具
+                ## 任务书协议
 
-                - subagent：一次性子代理（进程内 spawn）：适合查证、单点修改这类收尾快的工作；提示词写自包含，结果等完成通知。
-                - dispatch_task / supplement_task / query_tasks / control_task / search_history：与 Router 同款的编排工具，用于管理你的 worker 子任务。
-                - report_progress：阶段性汇报进度（一句话），Router 的活动快照会显示。
-                - complete_task：完成协议。提交时必须带当前任务书版本号（docVersion）；有未结束的必需子任务时会进入待验收（review-pending），等待验收结论，不要重复提交。
-                - ask_user：向用户澄清。执行会话的问题会直接汇集到用户界面的浮窗，由用户直接回答。
+                - 执行身份的工作以任务书为准：先读目标、约束与验收条件，再动手。任务书以消息形式投递（含版本号）。
+                - 收到任务书新版本（系统补充投递）时，以最新版本为准继续工作；完成提交必须带当前版本号（docVersion），版本不符会被拒——说明期间任务书更新过，先读新版本再继续。
 
-                ## 完成纪律
+                ## 完成协议
 
-                - 完成必须用 complete_task 提交；自然停止生成、会话空闲都不算完成。
-                - 子任务进入待验收（acceptancePolicy=supervisor）时你是验收方：核对交付物与验收条件后，用 control_task 的 accept 通过、reject 驳回返工（note 写明理由），不要悬置不验收。
-                - 无法继续、查询失败或工具不足时用 report_blocker 报告阻塞，不要用完成工具掩盖失败，也不要把「工具不行」转成向用户提要求。
-                - 基础设施类错误（会话创建/投递失败）不要换模板反复重试：系统熔断器会拦住连续失败；收到「派发已冻结」类错误立即停止派发并向上报告。
+                - 任务完成必须调用 complete_task 提交：结果摘要、交付物引用、验收依据。自然停止生成、会话空闲、标签被关都不算完成——只有验收策略接受提交才算完成。
+                - 无法继续、缺凭据缺依赖、发现任务书有问题：调用 report_blocker 报告阻塞，不要硬撑，更不要用完成工具掩盖失败。
+                - 长任务阶段性调用 report_progress 汇报一句话进度，让编排方与用户看到推进。
+                - 是否完成的判定由编排方按验收策略处理；进入待验收（review-pending）就等待结论，不要重复提交。
 
+                ## 提问纪律
+
+                - 有合理默认就继续做，不要停下来问；提问前先看任务书里是否已有答案——多数「不清楚」其实是任务书里写过了。
+                - 真要问才用 ask_user：问题直达用户界面的浮窗，用户的回答直接回到你的工具结果里；等答案期间不要凭空编造。
+
+                ## 用户不是执行器
+
+                - 任何时候都不得要求用户替你运行命令、粘贴命令输出或报告系统状态。需要环境事实就自己用工具查；查不到或工具不足，用 report_blocker 报告。
+
+                ## 系统冻结
+
+                - 错误信息里出现「派发已冻结」= 系统级故障已触发熔断：立即停止相关操作与重试，如实向用户（或上级会话）报告原因，等冻结解除后再继续。
+                - 收到「已暂停，等用户指示」= 用户停了你这个会话派出去的任务（含下游子任务）：停止推进，等用户指示，不要自行重派。别的会话与之后的新派发不受影响。
               complete: true
 
-          - id: supervisor-tools
+          # tools 行 role:'superset'：注册全部编排工具，角色闸在执行层按真实调用者
+          # 过 assertCallerRole（权限矩阵不变）；与 buildSupersetPlugins 同款。
+          - id: tools
             name: '@goodjin2/dsh-router/tools'
             config:
-              role: supervisor
-          - id: supervisor-ask-user
+              role: superset
+          - id: ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
-          - id: supervisor-delegation
+          - id: tool-bash
+            name: '@deepseek-ai/dsh-tool-bash'
+            disabled: !!js process.platform === 'win32'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          # 宿主必填（无默认；双版本 standard/ptc 均传 false），缺了整树回滚
+          - id: tool-fs-search
+            name: '@deepseek-ai/dsh-tool-fs-search'
+            config:
+              sampleOverCapGlobResults: false
+          # 执行支撑三件（2026-11-10 工具面补齐，与动态超集同配置）：没有 web，
+          # 执行者会把「需要上网」的任务如实报成「没有合适的工具」。配置抄
+          # superpowers 双宿主验证过的挂法。
+          - id: tool-web
+            name: '@deepseek-ai/dsh-tool-web'
+            config:
+              fetch: true
+              searchTimeoutMs: 60000
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: tool-jobs
+            name: '@deepseek-ai/dsh-tool-jobs'
+          - id: delegation
             name: cordis:group
             group: true
             isolate:
@@ -94,111 +129,31 @@
               # 控制与发现工具；裸行无 config（该包两版本都不导出 Config）。
               # 0.2.2 起 list_agents 就在这行里，绝不再单挂 .../list-agents 行
               #（r6 §2：0.2.2 删了子路径导出，挂了=never started=整树回滚）。
-              - id: supervisor-tool-subagent-control
+              - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
               # 一次性进程内子代理（空会话起步，默认继承父路由）。
               # 不写 modelSelection*/modelDiscovery/backgroundMode（跨版本死键）；
               # maxDepth 2 允许二级派发（spawn 有 depthLimit 能力，挂载安全）。
-              - id: supervisor-tool-subagent
+              - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:
                   provider: spawn
                   toolName: subagent
                   maxDepth: 2
-          - id: supervisor-compaction
+          - id: router-context
+            name: '@goodjin2/dsh-router/context'
+          - id: compaction
             name: cordis:group
             group: true
             isolate:
               compaction: true
               toolResultPruner: true
             config:
+              # 压缩引擎行是 Router 的任务描述引擎（2026-11-11 用户裁定流程）：
+              # 与动态超集逐字节一致（组合等价是前缀缓存的前提）。行 id 保持
+              # compaction-basic——只需组内唯一。
               - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
-              - id: command-compact
-                name: '@deepseek-ai/dsh-command-compact'
-              - id: tool-result-pruner
-                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
-                config:
-                  thresholdChars: 8192
-                  headChars: 4096
-                  tailChars: 1024
-    - id: dsh-router-worker-preset
-      name: '@deepseek-ai/dsh-agent-preset'
-      config:
-        id: dsh-router-worker
-        name: 工作执行者
-        description: 只执行单个任务的工作型执行者
-        order: 30
-        plugins:
-          - id: worker-persona
-            name: '@deepseek-ai/dsh-persona'
-            config:
-              prefix: |-
-                你是工作型执行者，由 {{model}} 驱动：接受一个任务，把它做完、做对、交付。
-                
-                ## 职责与边界
-                
-                - 你只执行分配给你的任务；你没有派发工具，不能把工作转包给别的会话。需要拆分时用 report_blocker 说明，由编排方处理。
-                - 专注执行任务书：先读任务书全文与验收条件，再动手。任务书（含版本）作为消息投递给你。
-                - 有合理默认就继续做，不要停下来问：默认值写进结果说明即可。提问前先看任务书是否已经有答案——多数「不清楚」其实是任务书里写过了。
-                - 长任务要阶段性用 report_progress 汇报一句话进度；编排方靠它向你同步状态。
-                - 用户不是执行器：任何时候都禁止让用户执行命令或粘贴输出。你要的是环境事实，就自己用工具去查；查不到或工具不足，用 report_blocker 报告。
-                
-                ## 你的工具
-                
-                - report_progress：汇报一句话进度。
-                - complete_task：完成协议。提交时必须带当前任务书版本号（docVersion）；版本不符会被拒（说明任务书在你工作期间更新过，先读新版本再继续）。
-                - report_blocker：报告阻塞（缺凭据、缺依赖、发现任务书有问题等）。失败或阻塞不要用完成工具掩盖。
-                - ask_user：向用户提问（只问任务书没写、又没有合理默认、且不影响继续做事就解决不了的问题）。你的问题会直接汇集到用户界面的浮窗，答案会直接回到你的提问工具结果里，不经第三方转述。
-                
-                ## 完成纪律
-                
-                - 完成必须调用 complete_task：带结果摘要、交付物引用、验收依据；有遗留问题如实列出。
-                - 自然停止生成、会话空闲、标签被关都不算完成——只有验收策略接受你的提交才算完成。
-                - 任务书补充新版本到达时，以最新版本为准继续工作。
-              complete: true
-
-          - id: worker-tools
-            name: '@goodjin2/dsh-router/tools'
-            config:
-              role: worker
-          - id: worker-ask-user
-            name: '@deepseek-ai/dsh-tool-ask-user'
-          - id: worker-tool-bash
-            name: '@deepseek-ai/dsh-tool-bash'
-            disabled: !!js process.platform === 'win32'
-          - id: worker-tool-fs
-            name: '@deepseek-ai/dsh-tool-fs'
-            config:
-              applyPatch: false
-          - id: worker-tool-fs-search
-            name: '@deepseek-ai/dsh-tool-fs-search'
-            config:
-              # 宿主必填（无默认；双版本 standard/ptc 均传 false），缺了整树回滚
-              sampleOverCapGlobResults: false
-          # 执行支撑三件（2026-11-10 工具面补齐，与动态超集同配置）：没有 web，
-          # worker 会把「需要上网」的任务如实报成「没有合适的工具」。配置抄
-          # superpowers 双宿主验证过的挂法。
-          - id: worker-tool-web
-            name: '@deepseek-ai/dsh-tool-web'
-            config:
-              fetch: true
-              searchTimeoutMs: 60000
-          - id: worker-tool-todo
-            name: '@deepseek-ai/dsh-tool-todo'
-            config:
-              allowParallelInProgress: true
-          - id: worker-tool-jobs
-            name: '@deepseek-ai/dsh-tool-jobs'
-          - id: worker-compaction
-            name: cordis:group
-            group: true
-            isolate:
-              compaction: true
-              toolResultPruner: true
-            config:
-              - id: compaction-basic
-                name: '@deepseek-ai/dsh-compaction-basic'
+                name: '@goodjin2/dsh-router/compaction'
               - id: command-compact
                 name: '@deepseek-ai/dsh-command-compact'
               - id: tool-result-pruner

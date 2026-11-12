@@ -52,11 +52,23 @@ export function dynamicPresetId(templateId: string): string {
   return `${DYNAMIC_WORKER_PRESET_PREFIX}${templateId}`
 }
 
-/** 动态预设排在静态三预设（10/20/30）之后。 */
+/** 动态预设排在静态预设（Router 10 动态 / 执行者 20 静态）之后。 */
 const DYNAMIC_ORDER = 100
 
 /** Router 动态预设 id（会话保存的就是它；v1.3.1 热修供自愈巡检引用）。 */
 export const ROUTER_PRESET_ID = 'dsh-router'
+
+/** 静态执行者预设 id（cordis.patch.yml 的 dsh-router-executor 行；2026-11-12 合并裁定：
+ *  supervisor/worker 两条静态预设合并为单条「执行者」，组合与 buildSupersetPlugins
+ *  逐字节一致，config 的 executorPreset 默认指向它）。 */
+export const EXECUTOR_PRESET_ID = 'dsh-router-executor'
+
+/** 合并前的两条静态预设 id：启动时注册同名兼容别名保旧会话重开（r4 §4：会话日志
+ *  记录的 preset id 必须在册，不在册即 agent-preset/not-found 无法重开）。 */
+export const LEGACY_EXECUTOR_PRESET_IDS = ['dsh-router-supervisor', 'dsh-router-worker'] as const
+
+/** 兼容别名排在花名册最尾（宿主 PresetDefinition 无隐藏字段，只能靠 order 压尾）。 */
+export const LEGACY_ALIAS_ORDER = 999
 
 /** cache-priority 模式的统一 persona 文本（= prompts/unified.ts 全文，唯一源）。 */
 export function supersetPersona(): string {
@@ -119,8 +131,9 @@ function delegationGroup(): RowSpec {
 
 /**
  * cache-priority 统一超集组合（v1.3 规格 §1/§2；每次调用产全新数组，调用方可
- * 自由追加技能行不改基准）。三预设（Router 动态定义 / worker 类型动态定义 /
- * 兜底场景的类型定义）在 cache 模式下全部由它组成——行级逐字节相同是前缀缓存
+ * 自由追加技能行不改基准）。cache 模式的三处动态定义（Router / worker 类型 /
+ * 兜底场景的类型）与 2026-11-12 合并裁定后的静态执行者预设行（yml 的
+ * dsh-router-executor）及旧 id 兼容别名全部由它组成——行级逐字节相同是前缀缓存
  * 的前提，spawn-mode.spec 钉住。注意：
  * - persona = unified 中立全文（身份进历史不进系统提示词，规格 §2.1）；
  * - tools 行 role:'superset'：注册全部编排工具，角色闸在执行层按真实调用者
@@ -154,6 +167,43 @@ export function buildSupersetPlugins(): RowSpec[] {
   ]
   rows.push(compactionGroup())
   return rows
+}
+
+/**
+ * 旧 id 兼容别名定义（2026-11-12 合并裁定）：dsh-router-supervisor / dsh-router-worker
+ * 各得一条与执行者组合完全一致的定义（order 999 压花名册尾部、名称标注旧会话兼容），
+ * 由生命周期在启动时注册——旧执行会话的 preset id 由此保持在册可解析。别名不是
+ * 派发目标：config 的 executorPreset 与 builtin 解析都指向 dsh-router-executor。
+ */
+export function legacyAliasDefinition(legacyId: string): PresetDefinition {
+  if (!(LEGACY_EXECUTOR_PRESET_IDS as readonly string[]).includes(legacyId)) {
+    throw new Error(`未知旧执行预设 id: ${legacyId}`)
+  }
+  const label = legacyId === 'dsh-router-supervisor' ? 'supervisor' : 'worker'
+  return {
+    id: legacyId,
+    name: `执行者（旧会话兼容·${label}）`,
+    description: '旧会话重开兼容别名：组合与「执行者」完全一致，请勿手动选用',
+    order: LEGACY_ALIAS_ORDER,
+    plugins: buildSupersetPlugins(),
+  }
+}
+
+/**
+ * 派发预设解析（2026-11-12 合并裁定后的单值语义；entry 接线与解析矩阵测试共用）：
+ * - 启用且角色匹配的非 builtin 类型 → 动态预设 dsh-router-worker-<templateId>；
+ * - builtin 类型 → executorPreset（原 supervisor/worker 两条静态行已合并）；
+ * - 未知/禁用/角色不匹配 → undefined（桥回退 executorPreset 单值兜底，由核心
+ *   assertTemplateUsable 拒绝派发）。两模式（cache-priority/minimal-face）解析同值。
+ */
+export function resolveDispatchPreset(
+  record: WorkerTypeRecord | undefined,
+  role: 'supervisor' | 'worker',
+  executorPreset: string,
+): string | undefined {
+  if (record === undefined || !record.enabled || record.role !== role) return undefined
+  if (record.origin === 'builtin') return executorPreset
+  return dynamicPresetId(record.templateId)
 }
 
 /**

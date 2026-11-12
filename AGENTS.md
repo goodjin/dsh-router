@@ -43,9 +43,12 @@ minify 确定序；将来接入 CSS 时照 chat-power 的「按基名算哈希�
 node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
 ```
 
-patch 现含裸包名根服务行 + 主管/worker 两条静态预设行（Router 预设运行时动态
-注册，不放 yml 以免同 id 相撞）；改行先跑核查再提交，动态注册行另过插件内
-注册校验与 `node scripts/check-subrows.mjs`。
+patch 现含裸包名根服务行 + 一条静态「执行者」预设行（`dsh-router-executor`，
+2026-11-12 合并裁定：主管/工作两条静态预设已合并，组合与 buildSupersetPlugins()
+逐字节一致、persona 与 prompts/unified.ts 逐字同步；Router 预设运行时动态注册，
+不放 yml 以免同 id 相撞；旧 supervisor/worker id 由插件启动时动态注册兼容别名
+保旧会话重开）；改行先跑核查再提交，动态注册行另过插件内注册校验与
+`node scripts/check-subrows.mjs`。
 
 ## 工作方式
 

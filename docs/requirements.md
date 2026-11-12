@@ -303,7 +303,16 @@ result.md    最终交付报告（完成时生成）
   必须带宿主要求的完整 config**，注册时过子行校验（fs-search 缺
   `sampleOverCapGlobResults` 曾让所有 worker 建不出会话）。
 - 内置「通用 worker」类型固定不可删，保证任何情况下可派发。Router 预设
-  动态注册（id 不变 `dsh-router`），注册失败回退静态定义；主管预设静态。
+  动态注册（id 不变 `dsh-router`），注册失败回退静态定义。静态预设只有一条
+  「执行者」（`dsh-router-executor`，2026-11-12 合并裁定：主管/工作两条静态
+  预设合并为单条，组合与 `buildSupersetPlugins()` 逐字节一致，persona=
+  `prompts/unified.ts` 逐字看守）；`supervisorPreset`/`workerPreset` 配置合并为
+  `executorPreset`（默认指向它；旧键作迁移回退：executorPreset >
+  supervisorPreset > workerPreset），builtin 派发与无类型回退两角色同值。
+  旧 id `dsh-router-supervisor`/`dsh-router-worker` 由插件启动时动态注册同名
+  兼容别名（组合同执行者、order 999、名称标注旧会话兼容、失败仅告警）——旧
+  执行会话照常重开，花名册尾部多两条别名条目（宿主无隐藏字段，已向用户披露
+  的取舍）。
 - **禁用** = 保留预设注册 + 拒绝新派发（已关闭会话仍可重开）；**删除** =
   注销 + 明确提示「已关闭的该类型会话将无法重开，重建同名类型可恢复」。
   活跃会话两者均不受影响。**类型无编辑入口**（2026-11-10）：要改就删除后
@@ -328,7 +337,7 @@ result.md    最终交付报告（完成时生成）
 
 | | 缓存优先（默认） | 最小面 |
 |---|---|---|
-| 预设组合 | 三预设完全统一：身份中立 complete persona + 工具超集 | 各预设最小工具白名单 |
+| 预设组合 | 三预设完全统一：身份中立 complete persona + 工具超集 | 类型动态预设按角色最小面；执行者静态预设（builtin/回退派发）= 统一超集（2026-11-12 合并裁定） |
 | 分叉 | **仅主管→子 worker 分叉复用**（2026-11-10 裁定：Router 是长期会话，worker 不复用其历史；Router 派发全新创建 + 钉类型默认模型） | 插件复刻宿主分叉五步（buildForkSeed + worker 预设 setup）；同样仅主管作源 |
 | 前缀缓存 | 主管子 worker 与来源逐字节一致 → 来源缓存全命中 | 缓存断裂（历史仍原样继承） |
 | worker 模型 | 分叉继承来源模型（不钉）；**全新创建（Router 派发/回退）钉类型 models[0]** | 创建后钉类型 models[0] |
@@ -541,3 +550,4 @@ result.md    最终交付报告（完成时生成）
 | A13 | 派发项目只能继承调用方会话所在项目；Router 无项目判定数据源 | 跨项目需求派错位置；提示词无从判断所属项目 | §5.1/§13：上下文注入「项目列表」，dispatch_task 增 `project`（id/路径，匹配不到按清单拒绝）；后续请求对照活动任务走 supplement |
 | A14 | 分叉来源 = 派发者会话（Router 或主管一律分叉，v1.3 A3） | Router 是长期会话，每个 worker 都背上它的全部历史；模型靠缓存折扣掩盖成本 | §11.1：分叉复用仅主管→子 worker（主管自身是任务会话，历史相关且缓存命中）；Router 派发全新创建 + 钉类型默认模型 |
 | A15 | 设置页类型 CRUD 全量（编辑表单+技能勾选）+「Router 默认」区；模式文案描述旧行为（Router 分叉） | 编辑与技能通道几乎不用、说明与实际行为脱节 | §10：类型无编辑（禁用/删除即可，要改就重建）、不挂技能（提示词就够）；Router 默认区移除（persona 直定身份）；两模式说明按 2026-11-10 分叉范围如实改写 |
+| A16 | 主管/工作两条静态预设分置（supervisorPreset/workerPreset 两配置、presetFor 按角色分叉、yml 两行 persona 各自同步） | v1.3 统一超集后 preset 层的角色分置已不承载安全或身份职责（权限=执行层硬闸、身份=身份卡），两行纯属重复维护与看守面翻倍 | §10/§11.1：静态预设合并为单条「执行者」（dsh-router-executor，组合≡buildSupersetPlugins、persona=unified.ts）；executorPreset 单值（旧键迁移回退）；旧 id 启动注册兼容别名保旧会话重开 |
