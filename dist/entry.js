@@ -10192,7 +10192,7 @@ function apply(ctx, rawConfig) {
 	const loadForkSeed = async () => {
 		if (forkSeedFn !== void 0) return forkSeedFn;
 		try {
-			forkSeedFn = (await import("@deepseek-ai/dsh-session/fork")).buildForkSeed;
+			forkSeedFn = (await makeHostLoader()("@deepseek-ai/dsh-session/fork")).buildForkSeed;
 		} catch (error) {
 			log.warn(`@deepseek-ai/dsh-session/fork 不可用，minimal-face 分叉降级为普通创建: ${error instanceof Error ? error.message : String(error)}`);
 		}

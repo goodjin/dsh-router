@@ -123,6 +123,29 @@ describe('package.json 满足浏览器半边的接线条件', () => {
   })
 })
 
+describe('宿主产物的官方包装载必须经宿主基座解析', () => {
+  // 2026-11-12 现场教训：插件产物里的裸 import('@deepseek-ai/...') 按 Node 规则
+  // 从插件自己的 node_modules 解析——桌面宿主（Electron asar）下解析不到，
+  // 行内 catch 只告警，compaction 服务缺席 → command-compact 永远等不到注入
+  // → 整个 Router 预设被宿主判 broken（选择器里消失）。CLI 上「碰巧能解析」
+  // 是目录上溯撞进 CLI 安装树，不是可依赖的行为。装载官方包必须走
+  // validate-row.ts 的 makeHostLoader 同款语义（宿主基座 resolve + file URL）。
+  const builtHostDists = ['../dist/compaction.js', '../dist/entry.js'] as const
+
+  it('dist 产物不得再出现裸 @deepseek-ai/ 动态导入（宿主基座解析语义看守）', () => {
+    const violations: string[] = []
+    for (const rel of builtHostDists) {
+      const file = fileURLToPath(new URL(rel, import.meta.url))
+      if (!existsSync(file)) continue
+      const code = readFileSync(file, 'utf8')
+      for (const match of code.matchAll(/import\(\s*["']@deepseek-ai\/[^"']+["']\s*\)/g)) {
+        violations.push(`${rel}: ${match[0]}`)
+      }
+    }
+    expect(violations, '官方包装载必须经宿主基座解析，裸动态导入在桌面宿主上静默失败').toEqual([])
+  })
+})
+
 describe('cordis.patch.yml 的装载行', () => {
   it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context、./compaction', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)

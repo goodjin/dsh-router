@@ -42,6 +42,7 @@ import { SessionPromptStore } from './host/prompts/session-prompt.ts'
 import { routerPrompt } from './host/prompts/router.ts'
 import { BUILTIN_GENERAL_ID, BUILTIN_TEMPLATES, RouterDefaultsStore, WorkerTypeStore } from './host/templates.ts'
 import { resolveDispatchPreset } from './host/presets/dynamic.ts'
+import { makeHostLoader } from './host/presets/validate-row.ts'
 import { DynamicPresetEngine, type AgentPresetsFace } from './host/presets/lifecycle.ts'
 import { MemoryDocStore } from './host/memory/store.ts'
 import { ClosureIntentStore, OutcomeAdjudicator } from './host/guard/adjudicator.ts'
@@ -482,8 +483,11 @@ export function apply(ctx: RootContext, rawConfig: unknown): void {
   const loadForkSeed = async (): Promise<typeof forkSeedFn> => {
     if (forkSeedFn !== undefined) return forkSeedFn
     try {
-      const specifier = '@deepseek-ai/dsh-session/fork'
-      const mod = (await import(specifier)) as { buildForkSeed?: unknown }
+      // 官方子路径装载必须经宿主基座解析（makeHostLoader 同款语义）：裸动态
+      // import 在桌面宿主 Electron asar 下解析不到（2026-11-12 compaction 现场
+      // 同病；看守见 tests/bundle.spec.ts）。CLI 上「碰巧能解析」是目录上溯
+      // 撞进 CLI 安装树，不是可依赖的行为。
+      const mod = (await makeHostLoader()('@deepseek-ai/dsh-session/fork')) as { buildForkSeed?: unknown }
       forkSeedFn = mod.buildForkSeed as typeof forkSeedFn
     } catch (error) {
       log.warn(`@deepseek-ai/dsh-session/fork 不可用，minimal-face 分叉降级为普通创建: ${error instanceof Error ? error.message : String(error)}`)
