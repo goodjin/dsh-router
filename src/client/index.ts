@@ -161,7 +161,13 @@ export function apply(ctx?: PluginContext): void {
 
   // 轮询 2.5s（仅当本 workspace 有 router 会话、页面隐藏即暂停）；
   // 生命周期挂在插件上：卸载即停。
-  if (typeof safeCtx.effect === 'function') {
-    safeCtx.effect(() => startWorkbenchPolling(store, prefs))
+  // guarded facade 上读未声明的 effect 会抛（不是 undefined）——包住，
+  // 轮询挂不上生命周期就常驻（页面级插件可容忍，见上注释），但绝不穿透。
+  try {
+    if (typeof safeCtx.effect === 'function') {
+      safeCtx.effect(() => startWorkbenchPolling(store, prefs))
+    }
+  } catch (error) {
+    log.warn(`workbench polling lifetime failed: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
