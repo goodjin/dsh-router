@@ -1487,7 +1487,7 @@ var SessionBridge = class {
 			};
 		}
 		return {
-			name: templateId === "" ? "执行者" : templateId,
+			name: templateId === "" ? "Router-执行者" : templateId,
 			systemPrompt: ""
 		};
 	}
@@ -8056,8 +8056,8 @@ function legacyAliasDefinition(legacyId) {
 	if (!LEGACY_EXECUTOR_PRESET_IDS.includes(legacyId)) throw new Error(`未知旧执行预设 id: ${legacyId}`);
 	return {
 		id: legacyId,
-		name: `执行者（旧会话兼容·${legacyId === "dsh-router-supervisor" ? "supervisor" : "worker"}）`,
-		description: "旧会话重开兼容别名：组合与「执行者」完全一致，请勿手动选用",
+		name: `Router-执行者（旧会话兼容·${legacyId === "dsh-router-supervisor" ? "supervisor" : "worker"}）`,
+		description: "旧会话重开兼容别名：组合与「Router-执行者」完全一致，请勿手动选用",
 		order: LEGACY_ALIAS_ORDER,
 		plugins: buildSupersetPlugins()
 	};

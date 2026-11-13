@@ -301,7 +301,7 @@ export class SessionBridge {
       const record = await this.types.get(templateId)
       if (record !== undefined) return { name: record.name, systemPrompt: record.systemPrompt }
     }
-    return { name: templateId === '' ? '执行者' : templateId, systemPrompt: '' }
+    return { name: templateId === '' ? 'Router-执行者' : templateId, systemPrompt: '' }
   }
 
   /** 会话标题（v1.3 规格 §3.1：`类型名 · T-xxx 任务名`）。 */
