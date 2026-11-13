@@ -182,8 +182,8 @@ export function legacyAliasDefinition(legacyId: string): PresetDefinition {
   const label = legacyId === 'dsh-router-supervisor' ? 'supervisor' : 'worker'
   return {
     id: legacyId,
-    name: `执行者（旧会话兼容·${label}）`,
-    description: '旧会话重开兼容别名：组合与「执行者」完全一致，请勿手动选用',
+    name: `Router-执行者（旧会话兼容·${label}）`,
+    description: '旧会话重开兼容别名：组合与「Router-执行者」完全一致，请勿手动选用',
     order: LEGACY_ALIAS_ORDER,
     plugins: buildSupersetPlugins(),
   }

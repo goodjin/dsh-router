@@ -58,7 +58,7 @@ const yml = `# @goodjin2/dsh-router 的挂载配置。
       name: '@deepseek-ai/dsh-agent-preset'
       config:
         id: dsh-router-executor
-        name: 执行者
+        name: router-执行者
         description: 统一执行者（组合与动态超集逐字节一致；身份由身份卡声明）
         order: 20
         plugins:
