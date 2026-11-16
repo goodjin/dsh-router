@@ -68,7 +68,8 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
   // 服务必须发布到根作用域：预设内部插件（tools/context 行）经 isolate 符号解析服务，
   // 只有根级 provide 才能让所有子上下文（含预设 realm）看见。ctx.provide 只发布到
   // 当前 fiber 的隔离作用域，预设内部 inject 永远等不到。
-  const provideRoot = ctx.root?.provide?.bind(ctx.root) ?? ctx.provide.bind(ctx)
+  const useRoot = !!(ctx.root?.provide)
+  const provideRoot = useRoot ? ctx.root!.provide.bind(ctx.root) : ctx.provide.bind(ctx)
   provideRoot('routerCollaboration', face)
 
   // 机会式注入 webServer+connection：缺席（CLI）则跳过，工作台路由不挂、记录/工具照常。

@@ -146,10 +146,10 @@ describe('cordis.patch.yml 的装载行', () => {
     expect(after).not.toMatch(/role:/)
   })
 
-  it('delegation 组挂 r6 双绿子代理行：control 裸行 + spawn 行；禁 ./list-agents、禁死键', () => {
+  it('delegation 组挂子代理行：control 裸行 + list-agents + spawn 行；禁死键', () => {
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
+    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-list-agents\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'\n/)
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s*config:\n\s*provider:\s*spawn\n\s*toolName:\s*subagent\n\s*maxDepth:\s*2\n/)
-    expect(PATCH_TEXT).not.toMatch(/name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'/)
     for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
       expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
     }

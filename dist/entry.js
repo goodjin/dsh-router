@@ -805,7 +805,7 @@ function apply(ctx, rawConfig) {
 		roles: runtime.roles,
 		dataDir: runtime.dataDir
 	};
-	(ctx.root?.provide?.bind(ctx.root) ?? ctx.provide.bind(ctx))("routerCollaboration", face);
+	(!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
 	ctx.inject?.(["webServer", "connection"], (child) => {
 		registerCollaborationRoutes(child, {
 			records: runtime.records,
