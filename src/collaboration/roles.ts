@@ -17,6 +17,7 @@ import {
   type RoleStoreDeps,
   type RoleTemplate,
 } from './types.ts'
+import { PathGuard } from './path-guard.ts'
 
 const RECORD_EXT = '.json'
 const NAMESPACE = 'collaboration'
@@ -87,11 +88,11 @@ function parseRole(text: string, path: string): RoleTemplate {
   return raw
 }
 
-/** 原子写：同目录临时文件 → rename 覆盖；失败清理临时文件并保旧文件，抛 IO_ERROR。 */
+/** 原子写：同目录临时文件 → rename 覆盖；目录准备也纳入 IO_ERROR 包装。 */
 async function atomicWrite(fs: CollaborationFs, target: string, content: string): Promise<void> {
-  await fs.mkdirp(dirname(target))
   const tmp = `${target}.tmp-${process.pid}-${++tmpSeq}`
   try {
+    await fs.mkdirp(dirname(target))
     await fs.writeFile(tmp, content)
     await fs.rename(tmp, target)
   } catch (error) {
@@ -107,9 +108,10 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
   const now = deps.now ?? (() => Date.now())
   const uuid = deps.uuid ?? randomUUID
   const fs = deps.fs ?? nodeFs()
+  const guard = new PathGuard(fs, base)
   const rolePath = (id: string): string => join(rolesDir, `${id}${RECORD_EXT}`)
 
-  /** 进程内写队列：串行化写入，单次失败不毒化后续写入。 */
+  /** 进程内写队列：完整写操作（读/检查/写）从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
   let writeChain: Promise<unknown> = Promise.resolve()
   const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const run = writeChain.then(task, task)
@@ -117,23 +119,10 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
     return run
   }
 
-  /** lstat 模板文件：拒绝符号链接；缺失抛 NOT_FOUND；其他错误抛 IO_ERROR。 */
-  const statRole = async (path: string): Promise<void> => {
-    try {
-      const stat = await fs.lstat(path)
-      if (stat.isSymbolicLink()) {
-        throw new CollaborationError('INVALID_INPUT', `角色模板不接受符号链接: ${path}`)
-      }
-    } catch (error) {
-      if (error instanceof CollaborationError) throw error
-      if (isEnoent(error)) throw new CollaborationError('NOT_FOUND', `角色模板不存在`)
-      throw new CollaborationError('IO_ERROR', `角色模板读取失败`, { cause: error })
-    }
-  }
-
   const readRoleFile = async (id: string): Promise<RoleTemplate> => {
     const path = rolePath(id)
-    await statRole(path)
+    await guard.assertDirChain(path)
+    await guard.assertRegularFile(path, '角色模板')
     let text: string
     try {
       text = await fs.readFile(path)
@@ -170,32 +159,40 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
     },
 
     async save(input: { id?: string; name: string; description: string }): Promise<RoleTemplate> {
-      requireNonEmptyString(input.name, 'name')
-      if (typeof input.description !== 'string') {
+      // 同步快照实际使用字段（name/description 为字符串原值），调用方在 await 后改入参不改变已提交内容。
+      const name = input.name
+      const description = input.description
+      requireNonEmptyString(name, 'name')
+      if (typeof description !== 'string') {
         throw new CollaborationError('INVALID_INPUT', 'description 必须是字符串')
       }
-      const nowMs = now()
-      let id: string
-      let createdAt: number
-      if (input.id !== undefined) {
-        requireUuid(input.id, 'roleId')
-        const existing = await readRoleFile(input.id)
-        id = existing.id
-        createdAt = existing.createdAt
-      } else {
-        id = uuid()
-        createdAt = nowMs
-      }
-      const template: RoleTemplate = {
-        id,
-        name: input.name,
-        description: input.description,
-        createdAt,
-        updatedAt: nowMs,
-      }
-      const path = rolePath(id)
-      await enqueue(() => atomicWrite(fs, path, JSON.stringify(template, null, 2)))
-      return template
+      const requestId = input.id
+      if (requestId !== undefined) requireUuid(requestId, 'roleId')
+      return enqueue(async () => {
+        const nowMs = now()
+        let id: string
+        let createdAt: number
+        if (requestId !== undefined) {
+          // 已有记录读取在队列内；落盘路径坚持已校验的请求 id，不用盘内可能被改写的 id。
+          const existing = await readRoleFile(requestId)
+          id = requestId
+          createdAt = existing.createdAt
+        } else {
+          id = uuid()
+          createdAt = nowMs
+        }
+        const template: RoleTemplate = {
+          id,
+          name,
+          description,
+          createdAt,
+          updatedAt: nowMs,
+        }
+        const path = rolePath(id)
+        await guard.assertDirChain(path)
+        await atomicWrite(fs, path, JSON.stringify(template, null, 2))
+        return template
+      })
     },
   }
 }

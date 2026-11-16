@@ -6,9 +6,9 @@
  * CORRUPT_RECORD、空 name 拒绝、list 排序。真实临时目录 + 注入 fs/时间/UUID。
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { createRoleStore } from '../../src/collaboration/roles.ts'
@@ -104,5 +104,54 @@ describe('边角与约束', () => {
     const b = await h.store.save({ name: 'B', description: '' })
     const list = await h.store.list()
     expect(list.map((r) => r.id)).toEqual([a.id, b.id])
+  })
+})
+
+describe('修复1 路径边界与磁盘角色身份', () => {
+  it('角色文件内 id 被改成越界值时 save 仍按已校验请求 id 落盘', async () => {
+    const h = await makeStore()
+    const role = await h.store.save({ name: 'A', description: 'd' })
+    const path = join(h.dir, 'collaboration', 'roles', `${role.id}.json`)
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    onDisk.id = '../../escaped'
+    await writeFile(path, JSON.stringify(onDisk), 'utf8')
+    const updated = await h.store.save({ id: role.id, name: 'B', description: 'd' })
+    expect(updated.id).toBe(role.id)
+    // 越界路径不应被创建
+    await expect(readFile(join(h.dir, 'escaped.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('collaboration/roles 是符号链接时 save 拒绝，不写到链接外', async () => {
+    const h = await makeStore()
+    await h.store.save({ name: 'seed', description: 'd' }) // 先建出 collaboration/roles
+    await rm(join(h.dir, 'collaboration', 'roles'), { recursive: true, force: true })
+    const outside = join(h.dir, 'outside-roles')
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, join(h.dir, 'collaboration', 'roles'))
+    await expect(h.store.save({ name: 'A', description: 'd' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+
+  it('collaboration 是普通文件时 save 抛 IO_ERROR（不泄露原生 ENOTDIR）', async () => {
+    const h = await makeStore()
+    await writeFile(join(h.dir, 'collaboration'), 'i am a file', 'utf8')
+    await expect(h.store.save({ name: 'A', description: 'd' })).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
+})
+
+describe('修复2 提交快照与队列入口（角色）', () => {
+  it('first 读被闸住时 second 仍按提交顺序最后落定（读在队列内）', async () => {
+    const h = await makeStore()
+    const role = await h.store.save({ name: '原始', description: 'd' })
+    const gated = h.collab.armReadGate(role.id) // 一次性闸住此角色的首次 readFile
+    const firstP = h.store.save({ id: role.id, name: 'first', description: 'd' })
+    const secondP = h.store.save({ id: role.id, name: 'second', description: 'd' })
+    await gated // 等 first 的读被实际闸住
+    // 留出窗口：若"已有记录读"在队列外（bug），second 会独立读完并落盘；
+    // 修复后 second 排在 first 之后，此窗口内不会落盘。
+    await new Promise((r) => setTimeout(r, 100))
+    h.collab.releaseReadGate() // 释放 first 的读
+    await Promise.all([firstP, secondP])
+    const final = await h.store.read(role.id)
+    expect(final.name).toBe('second') // 最后提交者胜
   })
 })

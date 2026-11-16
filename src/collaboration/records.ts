@@ -23,6 +23,7 @@ import {
   type SavedRecord,
   type WorkRecord,
 } from './types.ts'
+import { PathGuard } from './path-guard.ts'
 
 const RECORD_KINDS = new Set<string>(['task', 'assignment', 'report', 'summary'])
 const WORK_LABELS = new Set<string>(['待处理', '进行中', '受阻', '已报告'])
@@ -154,11 +155,36 @@ function parseRecord(text: string, path: string): WorkRecord {
   return raw
 }
 
-/** 原子写：同目录临时文件 → rename 覆盖；失败清理临时文件并保旧文件，抛 IO_ERROR。 */
+/**
+ * 核验磁盘记录与实际路径身份一致：编号对文件名、归属对所在目录、会话对路径；
+ * 任务记录编号必须等于任务号。不符视为坏盘数据（CORRUPT_RECORD），不可用盘 id 选写路径。
+ */
+function assertRecordIdentity(
+  record: WorkRecord,
+  rootSessionId: string,
+  taskId: string,
+  recordId: string,
+  path: string,
+): void {
+  if (record.id !== recordId) {
+    throw new CollaborationError('CORRUPT_RECORD', `记录编号与路径不符: ${path}`)
+  }
+  if (record.taskId !== taskId) {
+    throw new CollaborationError('CORRUPT_RECORD', `记录归属与路径不符: ${path}`)
+  }
+  if (record.rootSessionId !== rootSessionId) {
+    throw new CollaborationError('CORRUPT_RECORD', `记录会话与路径不符: ${path}`)
+  }
+  if (record.kind === 'task' && record.id !== record.taskId) {
+    throw new CollaborationError('CORRUPT_RECORD', `任务记录编号不等于任务号: ${path}`)
+  }
+}
+
+/** 原子写：同目录临时文件 → rename 覆盖；目录准备也纳入 IO_ERROR 包装。 */
 async function atomicWrite(fs: CollaborationFs, target: string, content: string): Promise<void> {
-  await fs.mkdirp(dirname(target))
   const tmp = `${target}.tmp-${process.pid}-${++tmpSeq}`
   try {
+    await fs.mkdirp(dirname(target))
     await fs.writeFile(tmp, content)
     await fs.rename(tmp, target)
   } catch (error) {
@@ -173,13 +199,14 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
   const now = deps.now ?? (() => Date.now())
   const uuid = deps.uuid ?? randomUUID
   const fs = deps.fs ?? nodeFs()
+  const guard = new PathGuard(fs, base)
 
   const tasksDir = (rootSessionId: string): string =>
     join(base, 'roots', createHash('sha256').update(rootSessionId).digest('hex'), 'tasks')
   const recordPath = (rootSessionId: string, taskId: string, recordId: string): string =>
     join(tasksDir(rootSessionId), taskId, `${recordId}${RECORD_EXT}`)
 
-  /** 进程内写队列：串行化写入，单次失败不毒化后续写入。 */
+  /** 进程内写队列：完整写操作（读/检查/写）从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
   let writeChain: Promise<unknown> = Promise.resolve()
   const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const run = writeChain.then(task, task)
@@ -187,22 +214,9 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
     return run
   }
 
-  /** lstat 记录文件：拒绝符号链接；缺失抛 NOT_FOUND；其他错误抛 IO_ERROR。 */
-  const statRecord = async (path: string, what: string): Promise<void> => {
-    try {
-      const stat = await fs.lstat(path)
-      if (stat.isSymbolicLink()) {
-        throw new CollaborationError('INVALID_INPUT', `${what}不接受符号链接: ${path}`)
-      }
-    } catch (error) {
-      if (error instanceof CollaborationError) throw error
-      if (isEnoent(error)) throw new CollaborationError('NOT_FOUND', `${what}不存在`)
-      throw new CollaborationError('IO_ERROR', `${what}读取失败`, { cause: error })
-    }
-  }
-
   const readRecordFile = async (path: string): Promise<WorkRecord> => {
-    await statRecord(path, '记录')
+    await guard.assertDirChain(path)
+    await guard.assertRegularFile(path, '记录')
     let text: string
     try {
       text = await fs.readFile(path)
@@ -213,24 +227,44 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
     return parseRecord(text, path)
   }
 
-  /** 校验某任务记录存在（非任务记录须引用已存在任务）。 */
+  /** 校验某任务记录存在且确为任务（非任务记录须引用已存在任务）。走同一读取器并核路径身份。 */
   const requireTask = async (rootSessionId: string, taskId: string): Promise<void> => {
-    await statRecord(recordPath(rootSessionId, taskId, taskId), '任务')
+    const path = recordPath(rootSessionId, taskId, taskId)
+    const record = await readRecordFile(path)
+    assertRecordIdentity(record, rootSessionId, taskId, taskId, path)
+    if (record.kind !== 'task') {
+      throw new CollaborationError('CORRUPT_RECORD', `任务记录种类不符: ${path}`)
+    }
   }
 
   /** 校验父记录存在且同任务（parentRecordId 只核同任务记录存在，不校验权限/任务图）。 */
   const requireParent = async (rootSessionId: string, taskId: string, parentRecordId: string): Promise<void> => {
-    await statRecord(recordPath(rootSessionId, taskId, parentRecordId), '父记录')
+    const path = recordPath(rootSessionId, taskId, parentRecordId)
+    const record = await readRecordFile(path)
+    assertRecordIdentity(record, rootSessionId, taskId, parentRecordId, path)
   }
 
   return {
     async create(rootSessionId: string, input: RecordDraft): Promise<SavedRecord> {
       requireNonEmptyString(rootSessionId, 'rootSessionId')
       validateDraft(input)
-      const nowMs = now()
+      // 同步快照实际使用字段（含 sessions/artifacts 元素深拷贝）：调用方在 await 后
+      // 复用/修改入参对象不能改变已提交内容。validateDraft 已先跑，快照只搬运已校验值。
+      const kind = input.kind
+      const title = input.title
+      const body = input.body
+      const workLabel = input.workLabel
+      const sessions =
+        input.sessions === undefined ? undefined : input.sessions.map((s) => ({ sessionId: s.sessionId, label: s.label }))
+      const artifacts =
+        input.artifacts === undefined
+          ? undefined
+          : input.artifacts.map((a) => ({ location: a.location, label: a.label }))
+      const parentRecordId = input.parentRecordId
       const recordId = uuid()
+      const nowMs = now()
       let taskId: string
-      if (input.kind === 'task') {
+      if (kind === 'task') {
         taskId = recordId
       } else {
         if (input.taskId === undefined) {
@@ -238,28 +272,30 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
         }
         requireUuid(input.taskId, 'taskId')
         taskId = input.taskId
-        await requireTask(rootSessionId, taskId)
-      }
-      if (input.parentRecordId !== undefined) {
-        await requireParent(rootSessionId, taskId, input.parentRecordId)
-      }
-      const record: WorkRecord = {
-        kind: input.kind,
-        taskId,
-        rootSessionId,
-        id: recordId,
-        title: input.title,
-        body: input.body,
-        createdAt: nowMs,
-        updatedAt: nowMs,
-        ...(input.workLabel === undefined ? {} : { workLabel: input.workLabel }),
-        ...(input.sessions === undefined ? {} : { sessions: input.sessions }),
-        ...(input.artifacts === undefined ? {} : { artifacts: input.artifacts }),
-        ...(input.parentRecordId === undefined ? {} : { parentRecordId: input.parentRecordId }),
       }
       const path = recordPath(rootSessionId, taskId, recordId)
-      await enqueue(() => atomicWrite(fs, path, JSON.stringify(record, null, 2)))
-      return { record, path }
+      return enqueue(async () => {
+        // 读/检查/写全部从调用入口排队，按提交顺序执行。
+        if (kind !== 'task') await requireTask(rootSessionId, taskId)
+        if (parentRecordId !== undefined) await requireParent(rootSessionId, taskId, parentRecordId)
+        const record: WorkRecord = {
+          kind,
+          taskId,
+          rootSessionId,
+          id: recordId,
+          title,
+          body,
+          createdAt: nowMs,
+          updatedAt: nowMs,
+          ...(workLabel === undefined ? {} : { workLabel }),
+          ...(sessions === undefined ? {} : { sessions }),
+          ...(artifacts === undefined ? {} : { artifacts }),
+          ...(parentRecordId === undefined ? {} : { parentRecordId }),
+        }
+        await guard.assertDirChain(path)
+        await atomicWrite(fs, path, JSON.stringify(record, null, 2))
+        return { record, path }
+      })
     },
 
     async read(rootSessionId: string, taskId: string, recordId: string): Promise<SavedRecord> {
@@ -268,6 +304,7 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
       requireUuid(recordId, 'recordId')
       const path = recordPath(rootSessionId, taskId, recordId)
       const record = await readRecordFile(path)
+      assertRecordIdentity(record, rootSessionId, taskId, recordId, path)
       return { record, path }
     },
 
@@ -300,7 +337,9 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
           if (!fileName.endsWith(RECORD_EXT)) continue
           const recordId = fileName.slice(0, -RECORD_EXT.length)
           if (!isUuid(recordId)) continue
-          const record = await readRecordFile(join(dir, taskName, fileName))
+          const filePath = join(dir, taskName, fileName)
+          const record = await readRecordFile(filePath)
+          assertRecordIdentity(record, rootSessionId, taskName, recordId, filePath)
           if (query?.kind !== undefined && record.kind !== query.kind) continue
           records.push(record)
         }
@@ -321,12 +360,26 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
       requireUuid(taskId, 'taskId')
       requireUuid(recordId, 'recordId')
       validatePatch(patch)
+      // 同步快照实际使用字段（含 sessions/artifacts 元素深拷贝），再入队；
+      // 队列内在快照上读改写，不能 await 后读调用方原对象。
+      const snapshot: RecordPatch = {
+        ...(patch.title !== undefined ? { title: patch.title } : {}),
+        ...(patch.body !== undefined ? { body: patch.body } : {}),
+        ...(patch.workLabel !== undefined ? { workLabel: patch.workLabel } : {}),
+        ...(patch.sessions !== undefined
+          ? { sessions: patch.sessions.map((s) => ({ sessionId: s.sessionId, label: s.label })) }
+          : {}),
+        ...(patch.artifacts !== undefined
+          ? { artifacts: patch.artifacts.map((a) => ({ location: a.location, label: a.label })) }
+          : {}),
+      }
+      const path = recordPath(rootSessionId, taskId, recordId)
       return enqueue(async () => {
-        const path = recordPath(rootSessionId, taskId, recordId)
         const current = await readRecordFile(path)
+        assertRecordIdentity(current, rootSessionId, taskId, recordId, path)
         const applied: Record<string, unknown> = {}
         for (const key of ['title', 'body', 'workLabel', 'sessions', 'artifacts'] as const) {
-          if (patch[key] !== undefined) applied[key] = patch[key]
+          if (snapshot[key] !== undefined) applied[key] = snapshot[key]
         }
         // 种类、归属与创建时间不可更新：显式保持原值。
         const record: WorkRecord = {
@@ -338,6 +391,7 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
           createdAt: current.createdAt,
           updatedAt: now(),
         }
+        await guard.assertDirChain(path)
         await atomicWrite(fs, path, JSON.stringify(record, null, 2))
         return { record, path }
       })

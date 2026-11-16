@@ -8,14 +8,20 @@
  * 全部用真实临时目录 + 注入 fs/时间/UUID 驱动。
  */
 
-import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
 import { createRecordStore } from '../../src/collaboration/records.ts'
-import type { RecordStore } from '../../src/collaboration/types.ts'
+import type { RecordDraft, RecordStore } from '../../src/collaboration/types.ts'
 import { makeCollabFs } from './collab-test-fs.ts'
+
+/** root-1 的任务目录根：collaboration/roots/<sha256(rootSessionId)>/tasks。 */
+function tasksRoot(dir: string, rootSessionId: string): string {
+  return join(dir, 'collaboration', 'roots', createHash('sha256').update(rootSessionId).digest('hex'), 'tasks')
+}
 
 const roots: string[] = []
 afterAll(async () => {
@@ -217,5 +223,115 @@ describe('边角与约束', () => {
     await expect(
       h.store.read('root-1', created.record.taskId, created.record.id),
     ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+})
+
+describe('修复1 路径边界与磁盘记录身份', () => {
+  it('tasks/<taskId> 被换成符号链接时 create(report) 拒绝，不写到链接外', async () => {
+    const h = await makeStore()
+    const task = await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const taskDir = join(tasksRoot(h.dir, 'root-1'), task.record.taskId)
+    const movedDir = join(h.dir, 'moved-task', task.record.taskId)
+    await mkdir(dirname(movedDir), { recursive: true })
+    await rename(taskDir, movedDir) // 把任务目录移出
+    await symlink(movedDir, taskDir) // 原位置放 symlink
+    await expect(
+      h.store.create('root-1', { kind: 'report', taskId: task.record.taskId, title: 'R', body: '' }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+
+  it('磁盘记录 id 与文件名不符时 read 抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const created = await h.store.create('root-1', { kind: 'task', title: 'T', body: 'ok' })
+    const onDisk = JSON.parse(await readFile(created.path, 'utf8'))
+    onDisk.id = '99999999-9999-4999-8999-999999999999'
+    await writeFile(created.path, JSON.stringify(onDisk), 'utf8')
+    await expect(
+      h.store.read('root-1', created.record.taskId, created.record.id),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+
+  it('磁盘记录 taskId 与所在目录不符时 read 抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const created = await h.store.create('root-1', { kind: 'task', title: 'T', body: 'ok' })
+    const onDisk = JSON.parse(await readFile(created.path, 'utf8'))
+    onDisk.taskId = '88888888-8888-4888-8888-888888888888'
+    await writeFile(created.path, JSON.stringify(onDisk), 'utf8')
+    await expect(
+      h.store.read('root-1', created.record.taskId, created.record.id),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+
+  it('磁盘记录 rootSessionId 与路径不符时 read 抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const created = await h.store.create('root-1', { kind: 'task', title: 'T', body: 'ok' })
+    const onDisk = JSON.parse(await readFile(created.path, 'utf8'))
+    onDisk.rootSessionId = 'other-root'
+    await writeFile(created.path, JSON.stringify(onDisk), 'utf8')
+    await expect(
+      h.store.read('root-1', created.record.taskId, created.record.id),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+
+  it('非任务记录引用了 id 与路径不符的"任务"时 create 抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const fakeTaskId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const taskPath = join(tasksRoot(h.dir, 'root-1'), fakeTaskId, `${fakeTaskId}.json`)
+    await mkdir(dirname(taskPath), { recursive: true })
+    await writeFile(
+      taskPath,
+      JSON.stringify({
+        kind: 'task',
+        id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        taskId: fakeTaskId,
+        rootSessionId: 'root-1',
+        title: 'T',
+        body: '',
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+      'utf8',
+    )
+    await expect(
+      h.store.create('root-1', { kind: 'report', taskId: fakeTaskId, title: 'R', body: '' }),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+
+  it('collaboration 是普通文件时 create 抛 IO_ERROR（不泄露原生 ENOTDIR）', async () => {
+    const h = await makeStore()
+    await writeFile(join(h.dir, 'collaboration'), 'i am a file', 'utf8')
+    await expect(
+      h.store.create('root-1', { kind: 'task', title: 'T', body: '' }),
+    ).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
+})
+
+describe('修复2 提交快照与队列入口', () => {
+  it('update 提交后调用方改 patch.body 不影响落盘（入口快照）', async () => {
+    const h = await makeStore()
+    const created = await h.store.create('root-1', { kind: 'task', title: 'T', body: 'orig' })
+    const patch = { body: 'new' }
+    const p = h.store.update('root-1', created.record.taskId, created.record.id, patch)
+    patch.body = 42 as unknown as string // 调用方提交后立刻改
+    await p
+    const read = await h.store.read('root-1', created.record.taskId, created.record.id)
+    expect(read.record.body).toBe('new')
+  })
+
+  it('create 提交后调用方改 sessions 嵌套不影响落盘（深拷贝快照）', async () => {
+    const h = await makeStore()
+    const task = await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const draft: RecordDraft = {
+      kind: 'report',
+      taskId: task.record.taskId,
+      title: 'R',
+      body: '',
+      sessions: [{ sessionId: 's1', label: 'L' }],
+    }
+    const p = h.store.create('root-1', draft)
+    draft.sessions![0]!.sessionId = '' // 调用方提交后立刻改嵌套
+    const saved = await p
+    const read = await h.store.read('root-1', task.record.taskId, saved.record.id)
+    expect(read.record.sessions?.[0]!.sessionId).toBe('s1')
   })
 })
