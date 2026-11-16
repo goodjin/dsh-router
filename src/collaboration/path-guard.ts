@@ -26,12 +26,12 @@ export class PathGuard {
   ) {}
 
   /**
-   * 校验 target 父目录链上、从 base 起（含 base）每个已存在组件都不得是符号链接。
-   * 尚不存在的目录（写入前由 mkdirp 创建）跳过；其他 stat 错误归 IO_ERROR。
+   * 从 start 起（含 start）、沿已存在组件到 base（含 base）逐个校验不得为符号链接。
+   * 尚不存在的组件跳过；其他 stat 错误归 IO_ERROR。assertDirChain/assertDirectory 共用。
    */
-  async assertDirChain(target: string): Promise<void> {
+  private async assertChainFrom(start: string): Promise<void> {
     const chain: string[] = []
-    let cur = dirname(target)
+    let cur = start
     for (;;) {
       if (cur === this.base || cur.startsWith(this.base + sep)) {
         chain.push(cur)
@@ -53,6 +53,23 @@ export class PathGuard {
         throw new CollaborationError('INVALID_INPUT', `命名空间不接受符号链接目录: ${dir}`)
       }
     }
+  }
+
+  /**
+   * 校验 target 父目录链上、从 base 起（含 base）每个已存在组件都不得是符号链接。
+   * 尚不存在的目录（写入前由 mkdirp 创建）跳过；其他 stat 错误归 IO_ERROR。
+   */
+  async assertDirChain(target: string): Promise<void> {
+    await this.assertChainFrom(dirname(target))
+  }
+
+  /**
+   * 校验目录自身及其到 base 的已存在组件不得为符号链接（含目录本身）。
+   * list 在 readdir 某目录前调用，避免符号链接目录被当普通空目录返回 []。
+   * 目录尚不存在时跳过（交由 readdir 的 ENOENT 处理），不创建目录。
+   */
+  async assertDirectory(dir: string): Promise<void> {
+    await this.assertChainFrom(dir)
   }
 
   /**

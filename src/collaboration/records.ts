@@ -59,12 +59,17 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value)
 }
 
+/** 非空字符串判定（可选字段与必需字段共用同一规则，不 as 虚假类型掩盖检查）。 */
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0
+}
+
 /** 非空字符串校验（title/name 等非空必需字段）。 */
 function requireNonEmptyString(value: unknown, what: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (!isNonEmptyString(value)) {
     throw new CollaborationError('INVALID_INPUT', `${what} 必须是非空字符串`)
   }
-  return value
+  return value as string
 }
 
 /** UUID 校验（taskId/recordId/parentRecordId/roleId）。 */
@@ -75,21 +80,39 @@ function requireUuid(value: unknown, what: string): string {
   return value
 }
 
-function validateSessionLinks(links: RecordDraft['sessions']): void {
-  if (links === undefined) return
-  if (!Array.isArray(links)) throw new CollaborationError('INVALID_INPUT', 'sessions 必须是数组')
+/** sessions 形状：省略合法；存在须为数组，每项含非空 sessionId/label。 */
+function areSessionLinksValid(links: unknown): boolean {
+  if (links === undefined) return true
+  if (!Array.isArray(links)) return false
   for (const link of links) {
-    requireNonEmptyString(link?.sessionId, 'sessions[].sessionId')
-    requireNonEmptyString(link?.label, 'sessions[].label')
+    if (typeof link !== 'object' || link === null) return false
+    const l = link as Record<string, unknown>
+    if (!isNonEmptyString(l.sessionId) || !isNonEmptyString(l.label)) return false
+  }
+  return true
+}
+
+/** artifacts 形状：省略合法；存在须为数组，每项含非空 location/label。 */
+function areArtifactRefsValid(refs: unknown): boolean {
+  if (refs === undefined) return true
+  if (!Array.isArray(refs)) return false
+  for (const ref of refs) {
+    if (typeof ref !== 'object' || ref === null) return false
+    const r = ref as Record<string, unknown>
+    if (!isNonEmptyString(r.location) || !isNonEmptyString(r.label)) return false
+  }
+  return true
+}
+
+function validateSessionLinks(links: RecordDraft['sessions']): void {
+  if (!areSessionLinksValid(links)) {
+    throw new CollaborationError('INVALID_INPUT', 'sessions 必须是数组且每项含非空 sessionId 与 label')
   }
 }
 
 function validateArtifactRefs(refs: RecordDraft['artifacts']): void {
-  if (refs === undefined) return
-  if (!Array.isArray(refs)) throw new CollaborationError('INVALID_INPUT', 'artifacts 必须是数组')
-  for (const ref of refs) {
-    requireNonEmptyString(ref?.location, 'artifacts[].location')
-    requireNonEmptyString(ref?.label, 'artifacts[].label')
+  if (!areArtifactRefsValid(refs)) {
+    throw new CollaborationError('INVALID_INPUT', 'artifacts 必须是数组且每项含非空 location 与 label')
   }
 }
 
@@ -126,7 +149,7 @@ function validatePatch(patch: RecordPatch): void {
   if (patch.artifacts !== undefined) validateArtifactRefs(patch.artifacts)
 }
 
-/** 落库记录的形状校验：JSON 合法但结构不符也算损坏。 */
+/** 落库记录的形状校验：JSON 合法但结构不符也算损坏。复用与入参同一套字段规则。 */
 function isWorkRecordShape(value: unknown): value is WorkRecord {
   if (typeof value !== 'object' || value === null) return false
   const r = value as Record<string, unknown>
@@ -134,11 +157,15 @@ function isWorkRecordShape(value: unknown): value is WorkRecord {
     typeof r.id === 'string' &&
     typeof r.taskId === 'string' &&
     typeof r.rootSessionId === 'string' &&
-    typeof r.title === 'string' &&
+    isNonEmptyString(r.title) &&
     typeof r.body === 'string' &&
     typeof r.createdAt === 'number' &&
     typeof r.updatedAt === 'number' &&
-    RECORD_KINDS.has(r.kind as RecordKind)
+    RECORD_KINDS.has(r.kind as RecordKind) &&
+    (r.workLabel === undefined || WORK_LABELS.has(r.workLabel as string)) &&
+    areSessionLinksValid(r.sessions) &&
+    areArtifactRefsValid(r.artifacts) &&
+    (r.parentRecordId === undefined || (typeof r.parentRecordId === 'string' && isUuid(r.parentRecordId)))
   )
 }
 
@@ -317,9 +344,11 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
       const dir = tasksDir(rootSessionId)
       let taskNames: string[]
       try {
+        await guard.assertDirectory(dir) // readdir 前校验目录自身链，符号链接目录不当空目录
         taskNames = await fs.readdir(dir)
       } catch (error) {
         if (isEnoent(error)) return []
+        if (error instanceof CollaborationError) throw error
         throw new CollaborationError('IO_ERROR', `列举任务失败: ${rootSessionId}`, { cause: error })
       }
       const records: WorkRecord[] = []
@@ -328,9 +357,11 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
         if (query?.taskId !== undefined && taskName !== query.taskId) continue
         let fileNames: string[]
         try {
+          await guard.assertDirectory(join(dir, taskName))
           fileNames = await fs.readdir(join(dir, taskName))
         } catch (error) {
           if (isEnoent(error)) continue
+          if (error instanceof CollaborationError) throw error
           throw new CollaborationError('IO_ERROR', `列举记录失败: ${taskName}`, { cause: error })
         }
         for (const fileName of fileNames) {

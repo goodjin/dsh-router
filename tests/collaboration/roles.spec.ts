@@ -108,15 +108,17 @@ describe('边角与约束', () => {
 })
 
 describe('修复1 路径边界与磁盘角色身份', () => {
-  it('角色文件内 id 被改成越界值时 save 仍按已校验请求 id 落盘', async () => {
+  it('角色文件内 id 被改成越界值时 save 抛 CORRUPT_RECORD，不越界写', async () => {
     const h = await makeStore()
     const role = await h.store.save({ name: 'A', description: 'd' })
     const path = join(h.dir, 'collaboration', 'roles', `${role.id}.json`)
     const onDisk = JSON.parse(await readFile(path, 'utf8'))
     onDisk.id = '../../escaped'
     await writeFile(path, JSON.stringify(onDisk), 'utf8')
-    const updated = await h.store.save({ id: role.id, name: 'B', description: 'd' })
-    expect(updated.id).toBe(role.id)
+    // 盘内 id 与请求/文件名不符即坏盘数据：save 拒绝，不按盘 id 选写路径。
+    await expect(
+      h.store.save({ id: role.id, name: 'B', description: 'd' }),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
     // 越界路径不应被创建
     await expect(readFile(join(h.dir, 'escaped.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -135,6 +137,59 @@ describe('修复1 路径边界与磁盘角色身份', () => {
     const h = await makeStore()
     await writeFile(join(h.dir, 'collaboration'), 'i am a file', 'utf8')
     await expect(h.store.save({ name: 'A', description: 'd' })).rejects.toMatchObject({ code: 'IO_ERROR' })
+  })
+})
+
+describe('修复3 磁盘角色 id 与文件名不符被拒', () => {
+  const cases: Array<{ name: string; badId: string }> = [
+    { name: '另一个合法 UUID', badId: '99999999-9999-4999-8999-999999999999' },
+    { name: '../../escaped', badId: '../../escaped' },
+  ]
+  for (const c of cases) {
+    it(`盘内 id 为 ${c.name} 时 read/list/save 均 CORRUPT_RECORD 且无越界`, async () => {
+      const h = await makeStore()
+      const role = await h.store.save({ name: 'A', description: 'd' })
+      const path = join(h.dir, 'collaboration', 'roles', `${role.id}.json`)
+      const onDisk = JSON.parse(await readFile(path, 'utf8'))
+      onDisk.id = c.badId
+      await writeFile(path, JSON.stringify(onDisk), 'utf8')
+      await expect(h.store.read(role.id)).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      await expect(h.store.list()).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      await expect(
+        h.store.save({ id: role.id, name: 'B', description: 'd' }),
+      ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      // 无越界：escaped.json 不应被创建
+      await expect(readFile(join(h.dir, 'escaped.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    })
+  }
+
+  it('新实例读同一损坏文件也拒（CORRUPT_RECORD）', async () => {
+    const h = await makeStore()
+    const role = await h.store.save({ name: 'A', description: 'd' })
+    const path = join(h.dir, 'collaboration', 'roles', `${role.id}.json`)
+    const onDisk = JSON.parse(await readFile(path, 'utf8'))
+    onDisk.id = '99999999-9999-4999-8999-999999999999'
+    await writeFile(path, JSON.stringify(onDisk), 'utf8')
+    const h2 = createRoleStore(h.dir, { fs: makeCollabFs().fs, now: tick, uuid: seqUuid })
+    await expect(h2.read(role.id)).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+})
+
+describe('修复3 list 的 readdir 前目录链守卫（空 symlink 目录不再当 []）', () => {
+  it('roles 目录被换成 symlink 时 list 抛 INVALID_INPUT', async () => {
+    const h = await makeStore()
+    await h.store.save({ name: 'seed', description: 'd' }) // 建出 collaboration/roles
+    await rm(join(h.dir, 'collaboration', 'roles'), { recursive: true, force: true })
+    const outside = join(h.dir, 'outside-roles')
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, join(h.dir, 'collaboration', 'roles'))
+    await expect(h.store.list()).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+
+  it('全新目录（无 collaboration）list 返回 [] 且不创建目录', async () => {
+    const h = await makeStore()
+    expect(await h.store.list()).toEqual([])
+    await expect(readFile(join(h.dir, 'collaboration'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 

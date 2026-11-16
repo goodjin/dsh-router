@@ -335,3 +335,103 @@ describe('修复2 提交快照与队列入口', () => {
     expect(read.record.sessions?.[0]!.sessionId).toBe('s1')
   })
 })
+
+describe('修复3 磁盘可选字段损坏被拒（read/list/update 同一 reader）', () => {
+  // 表驱动：只改一个字段，read/list/update 全 CORRUPT_RECORD，update 不改坏文件字节。
+  const cases: Array<{ name: string; mutate: (rec: Record<string, unknown>) => void }> = [
+    { name: 'workLabel 非法枚举', mutate: (r) => { r.workLabel = '系统验收成功' } },
+    { name: 'sessions 元素 sessionId 为数字', mutate: (r) => { r.sessions = [{ sessionId: 42, label: 'L' }] } },
+    { name: 'artifacts 为字符串', mutate: (r) => { r.artifacts = 'bad' } },
+    { name: 'parentRecordId 非 UUID', mutate: (r) => { r.parentRecordId = '../bad' } },
+    { name: 'title 空白', mutate: (r) => { r.title = '' } },
+    { name: 'createdAt 为 null（NaN 序列化）', mutate: (r) => { r.createdAt = null } },
+  ]
+
+  for (const c of cases) {
+    it(`${c.name} → read/list/update 全 CORRUPT_RECORD 且 update 不改文件字节`, async () => {
+      const h = await makeStore()
+      const created = await h.store.create('root-1', { kind: 'task', title: 'T', body: 'ok' })
+      const onDisk = JSON.parse(await readFile(created.path, 'utf8'))
+      c.mutate(onDisk)
+      await writeFile(created.path, JSON.stringify(onDisk), 'utf8')
+      const before = await readFile(created.path, 'utf8')
+      await expect(
+        h.store.read('root-1', created.record.taskId, created.record.id),
+      ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      await expect(h.store.list('root-1')).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      await expect(
+        h.store.update('root-1', created.record.taskId, created.record.id, { body: 'edited' }),
+      ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+      expect(await readFile(created.path, 'utf8')).toBe(before) // update 失败不改坏文件
+    })
+  }
+
+  it('合法空 body / 空 sessions / 空 artifacts 仍读回成功', async () => {
+    const h = await makeStore()
+    const created = await h.store.create('root-1', {
+      kind: 'task', title: 'T', body: '', sessions: [], artifacts: [],
+    })
+    const read = await h.store.read('root-1', created.record.taskId, created.record.id)
+    expect(read.record.body).toBe('')
+    expect(read.record.sessions).toEqual([])
+    expect(read.record.artifacts).toEqual([])
+  })
+})
+
+describe('修复3 requireTask/requireParent 复用同 reader 拒损坏（单 case）', () => {
+  it('任务记录 workLabel 损坏时为其创建子报告（requireTask）抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const task = await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const onDisk = JSON.parse(await readFile(task.path, 'utf8'))
+    onDisk.workLabel = '系统验收成功'
+    await writeFile(task.path, JSON.stringify(onDisk), 'utf8')
+    await expect(
+      h.store.create('root-1', { kind: 'report', taskId: task.record.taskId, title: 'R', body: '' }),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+
+  it('父报告 artifacts 损坏时创建引用它的子报告（requireParent）抛 CORRUPT_RECORD', async () => {
+    const h = await makeStore()
+    const task = await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const parent = await h.store.create('root-1', { kind: 'report', taskId: task.record.taskId, title: 'P', body: '' })
+    const onDisk = JSON.parse(await readFile(parent.path, 'utf8'))
+    onDisk.artifacts = 'bad'
+    await writeFile(parent.path, JSON.stringify(onDisk), 'utf8')
+    await expect(
+      h.store.create('root-1', {
+        kind: 'report', taskId: task.record.taskId,
+        parentRecordId: parent.record.id, title: 'C', body: '',
+      }),
+    ).rejects.toMatchObject({ code: 'CORRUPT_RECORD' })
+  })
+})
+
+describe('修复3 list 的 readdir 前目录链守卫（空 symlink 目录不再当 []）', () => {
+  it('tasks 根被换成指向空目录的 symlink 时 list 抛 INVALID_INPUT（不再返回 []）', async () => {
+    const h = await makeStore()
+    await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const root = tasksRoot(h.dir, 'root-1')
+    const outside = join(h.dir, 'empty-tasks-root')
+    await rm(root, { recursive: true, force: true })
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, root)
+    await expect(h.store.list('root-1')).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+
+  it('某任务目录被换成指向空目录的 symlink 时 list 抛 INVALID_INPUT', async () => {
+    const h = await makeStore()
+    const task = await h.store.create('root-1', { kind: 'task', title: 'T', body: '' })
+    const taskDir = join(tasksRoot(h.dir, 'root-1'), task.record.taskId)
+    const outside = join(h.dir, 'empty-task-dir')
+    await rm(taskDir, { recursive: true, force: true })
+    await mkdir(outside, { recursive: true })
+    await symlink(outside, taskDir)
+    await expect(h.store.list('root-1')).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+  })
+
+  it('全新目录（无 collaboration）list 返回 [] 且不创建目录', async () => {
+    const h = await makeStore()
+    expect(await h.store.list('root-1')).toEqual([])
+    await expect(readFile(join(h.dir, 'collaboration'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})

@@ -48,11 +48,15 @@ function isUuid(value: string): boolean {
   return UUID_RE.test(value)
 }
 
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === 'string' && value.length > 0
+}
+
 function requireNonEmptyString(value: unknown, what: string): string {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (!isNonEmptyString(value)) {
     throw new CollaborationError('INVALID_INPUT', `${what} 必须是非空字符串`)
   }
-  return value
+  return value as string
 }
 
 function requireUuid(value: unknown, what: string): string {
@@ -62,13 +66,14 @@ function requireUuid(value: unknown, what: string): string {
   return value
 }
 
-/** 落库模板的形状校验。 */
+/** 落库模板的形状校验：id 须 v4、name 非空、description 可空字符串。 */
 function isRoleTemplateShape(value: unknown): value is RoleTemplate {
   if (typeof value !== 'object' || value === null) return false
   const r = value as Record<string, unknown>
   return (
     typeof r.id === 'string' &&
-    typeof r.name === 'string' &&
+    isUuid(r.id) &&
+    isNonEmptyString(r.name) &&
     typeof r.description === 'string' &&
     typeof r.createdAt === 'number' &&
     typeof r.updatedAt === 'number'
@@ -130,16 +135,23 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       if (isEnoent(error)) throw new CollaborationError('NOT_FOUND', `角色模板不存在: ${path}`)
       throw new CollaborationError('IO_ERROR', `角色模板读取失败: ${path}`, { cause: error })
     }
-    return parseRole(text, path)
+    const template = parseRole(text, path)
+    // 盘内 id 必须与请求/文件名一致，否则不可用盘 id 选路径（视为坏盘数据）。
+    if (template.id !== id) {
+      throw new CollaborationError('CORRUPT_RECORD', `角色模板编号与路径不符: ${path}`)
+    }
+    return template
   }
 
   return {
     async list(): Promise<RoleTemplate[]> {
       let names: string[]
       try {
+        await guard.assertDirectory(rolesDir) // readdir 前校验目录自身链，符号链接目录不当空目录
         names = await fs.readdir(rolesDir)
       } catch (error) {
         if (isEnoent(error)) return []
+        if (error instanceof CollaborationError) throw error
         throw new CollaborationError('IO_ERROR', `列举角色模板失败`, { cause: error })
       }
       const roles: RoleTemplate[] = []
