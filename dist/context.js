@@ -1,17 +1,212 @@
 import Schema from "@deepseek-ai/schemastery";
+import { join } from "node:path";
 
+//#region src/collaboration/types.ts
+/** 协作域统一错误。 */
+var CollaborationError = class extends Error {
+	/** 错误码，调用方以此分流。 */
+	code;
+	constructor(code, message, options) {
+		super(message, options);
+		this.name = "CollaborationError";
+		this.code = code;
+	}
+};
+
+//#endregion
+//#region src/collaboration/tools.ts
+const RECORD_KINDS = [
+	"task",
+	"assignment",
+	"report",
+	"summary"
+];
+const WORK_LABELS = [
+	"待处理",
+	"进行中",
+	"受阻",
+	"已报告"
+];
+/** 关联会话条目（sessions 元素）。 */
+const SESSION_LINK_SCHEMA = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		sessionId: {
+			type: "string",
+			description: "关联会话 ID"
+		},
+		label: {
+			type: "string",
+			description: "展示标签"
+		}
+	},
+	required: ["sessionId", "label"]
+};
+/** 成果引用条目（artifacts 元素）。 */
+const ARTIFACT_REF_SCHEMA = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		location: {
+			type: "string",
+			description: "成果位置"
+		},
+		label: {
+			type: "string",
+			description: "展示标签"
+		}
+	},
+	required: ["location", "label"]
+};
+/** 工作记录本体的 schema（存储返回值里 record 的形状）。 */
+const RECORD_SCHEMA = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		id: {
+			type: "string",
+			description: "记录编号"
+		},
+		taskId: {
+			type: "string",
+			description: "归属任务 ID"
+		},
+		rootSessionId: {
+			type: "string",
+			description: "根会话 ID"
+		},
+		kind: {
+			type: "string",
+			enum: [...RECORD_KINDS],
+			description: "记录种类"
+		},
+		title: {
+			type: "string",
+			description: "标题"
+		},
+		body: {
+			type: "string",
+			description: "正文"
+		},
+		workLabel: {
+			type: "string",
+			enum: [...WORK_LABELS],
+			description: "工作标签"
+		},
+		parentRecordId: {
+			type: "string",
+			description: "父记录编号"
+		},
+		sessions: {
+			type: "array",
+			description: "关联会话",
+			items: SESSION_LINK_SCHEMA
+		},
+		artifacts: {
+			type: "array",
+			description: "成果引用",
+			items: ARTIFACT_REF_SCHEMA
+		},
+		createdAt: {
+			type: "number",
+			description: "创建时间戳"
+		},
+		updatedAt: {
+			type: "number",
+			description: "更新时间戳"
+		}
+	},
+	required: [
+		"id",
+		"taskId",
+		"rootSessionId",
+		"kind",
+		"title",
+		"body",
+		"createdAt",
+		"updatedAt"
+	]
+};
+/** 固定七个工具名（注册与上下文共用的基准顺序）。 */
+const COLLABORATION_TOOL_NAMES = [
+	"router_record_create",
+	"router_record_read",
+	"router_record_list",
+	"router_record_update",
+	"router_role_list",
+	"router_role_read",
+	"router_role_save"
+];
+
+//#endregion
+//#region src/collaboration/context.ts
+/** 协作目录名（与 RecordStore/RoleStore 的命名空间一致；只拼一次）。 */
+const COLLABORATION_DIR = "collaboration";
+/** 非空字符串校验（坏入参直接拒绝，不产出误导文本）。 */
+function requireNonEmptyString(value, what) {
+	if (typeof value !== "string" || value.length === 0) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
+	return value;
+}
+/**
+* 构建协作上下文文本。纯函数：相同入参恒等输出，可安全在渲染期重复调用。
+*/
+function buildCollaborationContext(input) {
+	if (typeof input !== "object" || input === null || Array.isArray(input)) throw new CollaborationError("INVALID_INPUT", "input 必须是对象");
+	const sessionId = requireNonEmptyString(input.sessionId, "sessionId");
+	const collaborationDir = join(requireNonEmptyString(input.dataDir, "dataDir"), COLLABORATION_DIR);
+	const toolList = COLLABORATION_TOOL_NAMES.join(", ");
+	return [
+		"当前会话 ID：" + sessionId,
+		"注意：这是当前会话的 ID，不是根会话（root）ID，不要把它当作 rootSessionId 使用。",
+		"",
+		"协作记录目录：" + collaborationDir,
+		"所有工作记录与角色模板都存在该目录下的 JSON 文件里，文件是唯一事实源。",
+		"",
+		"根会话（rootSessionId）必须由父级会话随每次操作显式传入；",
+		"如果你拿不到 rootSessionId，请向上级会话询问，不要自行推断或猜测。",
+		"",
+		"可用的协作工具（共 " + String(COLLABORATION_TOOL_NAMES.length) + " 个）：" + toolList,
+		"记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。"
+	].join("\n");
+}
+
+//#endregion
 //#region src/context.ts
 /** 本入口的插件名（诊断显示用）。 */
 const name = "router-context";
-const inject = ["systemPrompt", "routerCore"];
+const inject = ["systemPrompt", "routerCollaboration"];
 const Config = Schema.object({ order: Schema.number().default(100).volatile() });
-/** 注册快照上下文；返回注销器交给宿主 effect 生命周期。 */
+/** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
+function currentSessionId(assembly) {
+	if (typeof assembly !== "object" || assembly === null) return void 0;
+	const agent = assembly.agent;
+	if (typeof agent !== "object" || agent === void 0) return void 0;
+	const id = agent.id;
+	return typeof id === "string" && id !== "" ? id : void 0;
+}
+/** 缺 agent 面时的诊断文本：不臆造会话身份，仍给出工具与协作目录。 */
+function diagnosticText(dataDir) {
+	return buildCollaborationContext({
+		sessionId: "unknown",
+		dataDir
+	}).replace("当前会话 ID：unknown", "当前会话 ID：不可用（宿主未在本次组装中提供 agent 面；不要臆造 rootSessionId，向上级会话询问）");
+}
+/** 注册协作上下文；返回注销器交给宿主 effect 生命周期。 */
 function apply(ctx, config) {
 	const order = typeof config.order === "number" && Number.isFinite(config.order) ? config.order : 100;
+	const dataDir = ctx.routerCollaboration.dataDir;
 	const dispose = ctx.systemPrompt.context({
-		name: "router-task-ledger",
+		name: "router-collaboration",
 		order,
-		text: () => ctx.routerCore.snapshotText()
+		text: (assembly) => {
+			const sessionId = currentSessionId(assembly);
+			if (sessionId === void 0) return diagnosticText(dataDir);
+			return buildCollaborationContext({
+				sessionId,
+				dataDir
+			});
+		}
 	});
 	return () => {
 		dispose?.();

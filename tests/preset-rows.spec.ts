@@ -57,47 +57,46 @@ function patchRows(): Record<string, unknown>[] {
 /**
  * 以宿主双版本 standard/minimal/ptc 预设为基准逐行核对（2026-11-07）：
  *
- * - worker-tool-fs-search：宿主必填 `sampleOverCapGlobResults`（无默认），双版本
+ * - tool-fs-search：宿主必填 `sampleOverCapGlobResults`（无默认），双版本
  *   standard/ptc 均传 `false` —— v1 缺它导致整树回滚（本 fixture 的锚点行）。
- * - tools：本包自己的行 Config 要求 `role`（缺了注册不出任何编排工具，行会
- *   静默空转）；2026-11-12 合并裁定后静态行与动态超集同为 `superset`。
- * - supervisor-tool-subagent：宿主 schema 唯一必填键 `provider`（r6 §0.4 实测
- *   缺它 FAIL）；maxDepth: 2 允许二级派发（spawn 有 depthLimit 能力）。
- * - worker-tool-fs：`applyPatch: false` 与桌面 standard/ptc 同款；CLI 0.2.1-rc.2
- *   standard 不带 config（该键可选）——按双宿主要求的并集保留，非必填不进 fixture。
- * - 其余行（persona/ask-user/delegation 组及其 control 子行/compaction 组及其
- *   子行/bash）：双版本宿主 standard 预设均无必填 config（control 包两版本都不
- *   导出 Config；bash 只有 disabled 表达式，与宿主同款），以空登记纳入完整性守卫。
- * - v1.1 C1 起 Router 预设动态注册；2026-11-12 合并裁定起静态 yml 只剩执行者
- *   一条预设行（组合与动态超集同构；动态行的审计在 presets-dynamic.spec.ts，
- *   同一套 validateRowSpec）。
+ * - tool-web / tool-todo / tool-fs / tool-result-pruner：执行支撑/压缩工具的必填
+ *   config 键（与宿主 standard 预设同款）。
+ * - tool-subagent：宿主 schema 唯一硬性必填键 `provider`（r6 §0.4 实测缺它 FAIL）；
+ *   spawn + toolName subagent + maxDepth 2（maxDepth 允许二级派发）。
+ * - tools：本包自己的行 Task 2B 起无 config（不再要求 role，角色闸退役）。
+ * - 其余行（persona/agent-instructions/ask-user/tool-bash/delegation 组及其
+ *   control 子行/compaction 组及其子行/dsh-router-client/dsh-router-preset）：
+ *   双版本宿主 standard 预设均无必填 config（control 包两版本都不导出 Config；
+ *   bash 只有 disabled 表达式，与宿主同款），以空登记纳入完整性守卫。
+ * - Task 2B 起静态 yml 只有一条 dsh-router/Router 预设（无旧 executor 行、无
+ *   perrole 插件、无动态预设引擎）；预设整体断言在 tests/collaboration/preset.spec.ts。
  */
 export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 宿主工具行：双宿主必填 */
   'tool-fs-search': { sampleOverCapGlobResults: false },
-  /* 执行支撑三件（2026-11-10 工具面补齐；web/todo 带配置、jobs 裸行） */
+  /* 执行支撑/压缩工具 */
   'tool-web': { fetch: true, searchTimeoutMs: 60000 },
   'tool-todo': { allowParallelInProgress: true },
-  'tool-jobs': {},
   'tool-fs': { applyPatch: false },
-  /* 本包自己的行 Config 必填（superset：全编排工具注册，角色闸在执行层） */
-  'tools': { role: 'superset' },
-  /* 宿主 schema 必填（r6 实测） */
+  'tool-result-pruner': { thresholdChars: 8192, headChars: 4096, tailChars: 1024 },
+  /* 宿主 schema 必填（r6 实测）；spawn + toolName subagent + maxDepth 2 */
   'tool-subagent': { provider: 'spawn' },
-  /* 无必填 config 的行：空登记（完整性守卫；组合与 buildSupersetPlugins 同构，
-   * 2026-11-12 合并裁定后静态 yml 只剩执行者一条预设） */
+  /* 本包自己的行：Task 2B 起 tools 行无 config（角色闸退役） */
+  'tools': {},
+  'router-context': { order: 100 },
+  /* 无必填 config 的行：空登记（完整性守卫） */
   'dsh-router-client': {},
-  'dsh-router-executor-preset': {},
+  'dsh-router-preset': {},
   'persona': {},
+  'agent-instructions': {},
   'ask-user': {},
   'tool-bash': {},
+  'tool-jobs': {},
   'delegation': {},
   'tool-subagent-control': {},
-  'router-context': {},
   'compaction': {},
   'compaction-basic': {},
   'command-compact': {},
-  'tool-result-pruner': {},
 }
 
 /* ────────────────────────── 断言 ────────────────────────── */

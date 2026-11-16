@@ -1,24 +1,19 @@
 /**
- * 装载接线测试：这个包「装上了能不能真的跑起来」。
+ * 装载接线测试：这个包「装上了能不能真的跑起来」（轻量协作版，计划 Task 2B）。
  *
  * 这是**唯一**能提前发现致命错误的地方。DSH 浏览器半边有三条死规矩，少一条
- * 就是「装上也不生效、宿主日志一个字都没有」（2026-11 在 dsh-rightbar-overlay
- * 上踩过整组坑）；另有两条形状规矩与入口规矩：
+ * 就是「装上也不生效、宿主日志一个字都没有」；另有形状规矩与入口规矩：
  *
- *  1. package.json 声明 `dsh.bundle.patch` 指向 cordis.patch.yml——没有这段，
- *     宿主读 profile 时整层跳过（启动日志里只有一句 "skipping profile bundle"）；
- *  2. package.json 声明 `dsh.client.platform = "web"`——客户端模块注册表
- *     （ClientModuleRegistry.resolveMeta）靠它把行认成浏览器行；
- *  3. patch 里装载行的 name 是**裸包名**——浏览器行只在 name 恰好等于包名时被认；
- *  4. exports["./client"] 只能是字符串或 { default: 字符串 }——宿主
- *     clientExportOf 只认这两种；
+ *  1. package.json 声明 `dsh.bundle.patch` 指向 cordis.patch.yml；
+ *  2. package.json 声明 `dsh.client.platform = "web"`；
+ *  3. patch 里装载行的 name 是**裸包名**；
+ *  4. exports["./client"] 只能是字符串或 { default: 字符串 }；
  *  5. lib/client.js 必须是「单文件 CJS 工厂」，顶层不得有 import/export；
- *  6. exports["."] 指向宿主侧入口 dist/entry.js——浏览器代码不许混进宿主进程。
+ *  6. exports["."] 指向宿主侧入口 dist/entry.js。
  *
- * Part B 起 patch 还带预设行（工具/上下文子路径导出、persona 文本与 TS 模板逐字
- * 同步）。2026-11-12 合并裁定后静态预设只剩一条「执行者」行：persona 与
- * prompts/unified.ts 逐字同步、组合与 buildSupersetPlugins() 逐行逐字节等价
- * （前缀缓存一致性前提），一并在这里断言。
+ * Task 2B 起 patch 只有一条静态预设 dsh-router/Router（persona complete 提示词 =
+ * collaborationPrompt 单一来源；七条协作工具 + DSH 原生执行/用户提问/项目指令/
+ * 默认压缩/子代理控制）。旧 ./prompt-section 与 ./compaction 子路径导出已退役。
  */
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -26,9 +21,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
-import { routerPrompt } from '../src/host/prompts/router.ts'
-import { unifiedPrompt } from '../src/host/prompts/unified.ts'
-import { buildRouterPresetDefinition, buildSupersetPlugins, staticRouterDefinition, type RowSpec } from '../src/host/presets/dynamic.ts'
+import { collaborationPrompt } from '../src/collaboration/prompt.ts'
 
 const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
   name: string
@@ -40,11 +33,9 @@ const PKG = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', imp
 const PATCH_TEXT = readFileSync(fileURLToPath(new URL('../cordis.patch.yml', import.meta.url)), 'utf8')
 
 const BUNDLE_PATH = fileURLToPath(new URL('../lib/client.js', import.meta.url))
-const COMPACTION_PATH = fileURLToPath(new URL('../dist/compaction.js', import.meta.url))
 const ENTRY_PATH = fileURLToPath(new URL('../dist/entry.js', import.meta.url))
 const TOOLS_PATH = fileURLToPath(new URL('../dist/tools.js', import.meta.url))
 const CONTEXT_PATH = fileURLToPath(new URL('../dist/context.js', import.meta.url))
-const PROMPT_SECTION_PATH = fileURLToPath(new URL('../dist/prompt-section.js', import.meta.url))
 
 type Factory = (require: (specifier: string) => unknown) => Record<string, unknown>
 type Row = { id: string; factory: Factory }
@@ -54,8 +45,6 @@ function loadBundleRow(): Row {
   const src = readFileSync(BUNDLE_PATH, 'utf8')
   const rows: Row[] = []
   const sandboxWindow = { __ModuleLoader__: { load: (row: Row) => { rows.push(row) } } }
-  // 产物顶层只引用 window。Function 体是脚本模式：顶层 import/export 会在这里
-  // 直接 SyntaxError——所以「求值成功」本身就是「没有顶层 ESM」的证明。
   const evaluate = new Function('window', src)
   evaluate(sandboxWindow)
   expect(rows.length, '产物必须调用一次 window.__ModuleLoader__.load').toBe(1)
@@ -85,8 +74,6 @@ describe('package.json 满足浏览器半边的接线条件', () => {
     expect(PKG.main).toBe('./dist/entry.js')
     expect(dotExport.default).not.toContain('client')
     expect(PKG.main).not.toContain('client')
-    // 宿主入口已构建，且确实没有浏览器半边：剥掉注释后不得引用 window / document /
-    // lib/client（Part B 起入口有宿主侧 import，属于正常；这三样才是浏览器线）。
     expect(existsSync(ENTRY_PATH), 'dist/entry.js 不存在——先 npm run build').toBe(true)
     const entryCode = readFileSync(ENTRY_PATH, 'utf8')
       .replace(/\/\*[\s\S]*?\*\//g, '')
@@ -95,11 +82,10 @@ describe('package.json 满足浏览器半边的接线条件', () => {
     expect(entryCode).not.toContain('lib/client')
   })
 
-  it('子路径导出 ./tools、./context、./prompt-section 存在且指向构建产物，产物可加载', async () => {
+  it('子路径导出 ./tools、./context 存在且指向构建产物（./prompt-section、./compaction 已退役），产物可加载', async () => {
     for (const [key, file] of [
       ['./tools', TOOLS_PATH],
       ['./context', CONTEXT_PATH],
-      ['./prompt-section', PROMPT_SECTION_PATH],
     ] as const) {
       const exportEntry = PKG.exports[key] as { types?: string; default?: string } | undefined
       expect(exportEntry, `${key} 导出缺失：预设树里的行会 never started → 整预设回滚`).toBeDefined()
@@ -111,30 +97,20 @@ describe('package.json 满足浏览器半边的接线条件', () => {
       expect(typeof mod.Config, `${key} 产物缺 Config（check-host-rows 要校验）`).toBe('function')
       expect(typeof mod.apply, `${key} 产物缺 apply`).toBe('function')
     }
-    // Config 真能校验：role 必填；context/prompt-section 缺省可过
+    // 已退役的子路径导出不得再存在
+    expect(PKG.exports['./prompt-section'], './prompt-section 导出已退役').toBeUndefined()
+    expect(PKG.exports['./compaction'], './compaction 导出已退役').toBeUndefined()
     const toolsMod = (await import(pathToFileURL(TOOLS_PATH).href)) as { Config: (config: unknown) => unknown; name: string }
-    expect(() => toolsMod.Config({ role: 'router' })).not.toThrow()
-    expect(() => toolsMod.Config({})).toThrow()
+    expect(() => toolsMod.Config({})).not.toThrow()
     const contextMod = (await import(pathToFileURL(CONTEXT_PATH).href)) as { Config: (config: unknown) => unknown }
     expect(() => contextMod.Config({})).not.toThrow()
-    const promptSectionMod = (await import(pathToFileURL(PROMPT_SECTION_PATH).href)) as { Config: (config: unknown) => unknown }
-    expect(() => promptSectionMod.Config(undefined)).not.toThrow()
-    expect(() => promptSectionMod.Config({})).not.toThrow()
   })
 })
 
 describe('宿主产物的官方包装载必须经宿主基座解析', () => {
-  // 2026-11-12 现场教训：插件产物里的裸 import('@deepseek-ai/...') 按 Node 规则
-  // 从插件自己的 node_modules 解析——桌面宿主（Electron asar）下解析不到，
-  // 行内 catch 只告警，compaction 服务缺席 → command-compact 永远等不到注入
-  // → 整个 Router 预设被宿主判 broken（选择器里消失）。CLI 上「碰巧能解析」
-  // 是目录上溯撞进 CLI 安装树，不是可依赖的行为。装载官方包必须走
-  // validate-row.ts 的 makeHostLoader 同款语义（宿主基座 resolve + file URL）。
-  const builtHostDists = ['../dist/compaction.js', '../dist/entry.js'] as const
-
   it('dist 产物不得再出现裸 @deepseek-ai/ 动态导入（宿主基座解析语义看守）', () => {
     const violations: string[] = []
-    for (const rel of builtHostDists) {
+    for (const rel of ['../dist/entry.js'] as const) {
       const file = fileURLToPath(new URL(rel, import.meta.url))
       if (!existsSync(file)) continue
       const code = readFileSync(file, 'utf8')
@@ -147,128 +123,85 @@ describe('宿主产物的官方包装载必须经宿主基座解析', () => {
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context、./compaction', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
-    // 子路径行是宿主行（node 里 import 构建产物）；浏览器半边只有裸包名一条。
-    // 2026-11-12 合并裁定后静态 yml 只剩执行者一条预设：tools/context/compaction
-    // 各一行（与动态超集同款）。其它任何子路径（尤其指向浏览器产物的）都会
-    // 静默失效，直接禁止。
     const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
-    expect(subpathRows.sort()).toEqual(['compaction', 'context', 'tools'])
+    expect(subpathRows.sort()).toEqual(['context', 'tools'])
   })
 
-  it('静态预设行只有一条：执行者（2026-11-12 合并裁定，旧 supervisor/worker 行已删）', () => {
+  it('静态预设行只有一条：dsh-router/Router（完整=true；无旧 executor/supervisor/worker 别名）', () => {
     const presetRows = [...PATCH_TEXT.matchAll(/- id:\s*(dsh-router-[\w-]*)\n\s*name:\s*'@deepseek-ai\/dsh-agent-preset'\n\s*config:\n\s*id:\s*([\w-]+)/g)]
-    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router-executor'])
-    // 旧 id 不再以静态行存在（兼容别名走启动时动态注册，order 999）
+    expect(presetRows.map((m) => m[2])).toEqual(['dsh-router'])
+    expect(PATCH_TEXT).not.toMatch(/id:\s*dsh-router-executor\b/)
     expect(PATCH_TEXT).not.toMatch(/id:\s*dsh-router-supervisor\b/)
     expect(PATCH_TEXT).not.toMatch(/id:\s*dsh-router-worker\b/)
   })
 
-  it('tools 行 role=superset（角色闸在执行层，preset 层不再分置角色）', () => {
-    expect(PATCH_TEXT).toMatch(/name:\s*'@goodjin2\/dsh-router\/tools'\n\s+config:\n\s+role: superset/)
-    expect(PATCH_TEXT).not.toMatch(/role: supervisor\s*$/m)
-    expect(PATCH_TEXT).not.toMatch(/role: worker\s*$/m)
-  })
-
-  it('压缩组在场（isolate 的 cordis:group；动态 Router 定义同款由 presets-dynamic 看守）', () => {
-    // 压缩引擎在会话自身作用域缺席时，驱动的 compactNow 会永远抛错空转
-    //（B2 裁定 5 的缺口在此看守）。
-    expect(PATCH_TEXT).toMatch(/-\s+id:\s*compaction\n\s+name:\s*cordis:group\n\s+group:\s*true\n\s+isolate:\n\s+compaction:\s*true\n\s+toolResultPruner:\s*true/)
+  it('tools 行无 role 配置（角色闸已退役；注册七条协作工具）', () => {
+    // tools 行存在且 name 为裸包名子路径；其后 200 字符内不得出现 role 键。
+    const at = PATCH_TEXT.indexOf("name: '@goodjin2/dsh-router/tools'")
+    expect(at, 'Router 预设必须有 tools 行').toBeGreaterThan(-1)
+    const after = PATCH_TEXT.slice(at, at + 200)
+    expect(after).not.toMatch(/role:/)
   })
 
   it('delegation 组挂 r6 双绿子代理行：control 裸行 + spawn 行；禁 ./list-agents、禁死键', () => {
-    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
-    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s+name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s+config:\n\s+provider:\s*spawn\n\s+toolName:\s*subagent\n\s+maxDepth:\s*2\n/)
-    // 禁的是行（子路径导出 0.2.2 已删）；注释里的事故说明不算
+    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
+    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s*config:\n\s*provider:\s*spawn\n\s*toolName:\s*subagent\n\s*maxDepth:\s*2\n/)
     expect(PATCH_TEXT).not.toMatch(/name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'/)
     for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
       expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
     }
   })
 
-  it('yml 执行者组合 ≡ buildSupersetPlugins()（逐行逐字节；前缀缓存一致性）', () => {
-    const doc = parseYml(PATCH_TEXT) as unknown
-    const staticPlugins = executorPluginsFrom(doc)
-    const dynamicPlugins = buildSupersetPlugins()
-    // yml `|-` 块标量剥末尾换行（personaPrefix 的原文还原补回），比对前两侧归一；
-    // disabled：yml 是 !!js 表达式串、动态是求值布尔——单独断言（下一用例）。
-    const normalize = (rows: RowSpec[]): unknown =>
-      rows.map((row) => {
-        const clone: Record<string, unknown> = { ...row }
-        delete clone.disabled
-        if (Array.isArray(clone.config)) clone.config = normalize(clone.config as RowSpec[])
-        const config = clone.config
-        if (config !== null && typeof config === 'object' && !Array.isArray(config) && typeof (config as { prefix?: unknown }).prefix === 'string') {
-          const prefix = (config as { prefix: string }).prefix
-          clone.config = { ...(config as Record<string, unknown>), prefix: prefix.replace(/\n$/, '') }
-        }
-        return clone
-      })
-    expect(normalize(staticPlugins)).toEqual(normalize(dynamicPlugins))
-  })
-
-  it('bash 行禁用语义一致：yml !!js 表达式 ⇄ 动态布尔', () => {
-    const doc = parseYml(PATCH_TEXT) as unknown
-    const bash = executorPluginsFrom(doc).find((row) => row.id === 'tool-bash')
-    expect(String(bash?.disabled)).toContain('process.platform')
-    expect(buildSupersetPlugins().find((row) => row.id === 'tool-bash')?.disabled).toBe(process.platform === 'win32')
+  it('默认压缩用宿主原生 compaction 组（非旧 @goodjin2/dsh-router/compaction）', () => {
+    const names = new Set([...PATCH_TEXT.matchAll(/name:\s*'(@deepseek-ai\/[^']+)'/g)].map((m) => m[1]))
+    expect(names).toContain('@deepseek-ai/dsh-compaction-basic')
+    expect(names).toContain('@deepseek-ai/dsh-command-compact')
+    expect(names).toContain('@deepseek-ai/dsh-compaction-tool-result-pruner')
+    expect(names).not.toContain('@goodjin2/dsh-router/compaction')
   })
 })
 
 /** 用包内 yaml 解析 patch 文本（logLevel 静默——!!js 表达式只读得下来即可）。 */
 function parseYml(text: string): unknown {
-  const doc = parse(text, { logLevel: 'silent' }) as unknown
-  return doc
+  return parse(text, { logLevel: 'silent' }) as unknown
 }
 
-/** 取执行者预设行的 plugins（顶层是 [ { insert: [...] } ]）。 */
-function executorPluginsFrom(doc: unknown): RowSpec[] {
+/** 取 dsh-router/Router 预设行（顶层是 [ { insert: [...] } ]）。 */
+function routerPresetPlugins(doc: unknown): unknown[] {
   const documents = Array.isArray(doc) ? doc : [doc]
   for (const document of documents) {
     const inserts = (document as { insert?: unknown[] } | null)?.insert ?? []
     for (const row of inserts) {
-      const entry = row as { config?: { id?: string; plugins?: RowSpec[] } }
-      if (entry.config?.id === 'dsh-router-executor') return entry.config.plugins ?? []
+      const entry = row as { config?: { id?: string; plugins?: unknown[] } }
+      if (entry.config?.id === 'dsh-router') return entry.config.plugins ?? []
     }
   }
-  throw new Error('yml 里找不到执行者预设 dsh-router-executor')
+  throw new Error('yml 里找不到 Router 预设 dsh-router')
 }
 
-/** 从 yml 抽 persona 前缀块（prefix: |- 下的 16 空格缩进文本），还原成原文。 */
-function personaPrefix(yml: string, personaRowId: string): string {
-  const anchor = `- id: ${personaRowId}`
-  const at = yml.indexOf(anchor)
-  expect(at, `yml 里找不到 persona 行 ${personaRowId}`).toBeGreaterThan(-1)
-  const prefixAt = yml.indexOf('prefix: |-', at)
-  const lines = yml.slice(prefixAt).split('\n').slice(1)
-  const body: string[] = []
-  for (const line of lines) {
-    if (line.trim() === '') {
-      body.push('')
-      continue
-    }
-    if (!line.startsWith(' '.repeat(16))) break
-    body.push(line.slice(16))
-  }
-  while (body.length > 0 && body[body.length - 1] === '') body.pop()
-  return `${body.join('\n')}\n`
-}
-
-describe('persona 文本与 TS 模板逐字同步', () => {
-  it('router-persona：yml 无行（v1.1 动态注册）；动态定义无 persona 行（complete 唯一）；兜底定义有 persona 行', () => {
-    expect(PATCH_TEXT).not.toMatch(/id:\s*router-persona\b/)
-    expect(routerPrompt.length).toBeGreaterThan(0)
-    // C5 看守：complete 段唯一——动态定义走 prompt-section 行（运行时 complete），
-    // 决不残留 persona 行（宿主组装期 multiple complete 会炸整轮对话）；
-    // 静态兜底定义保留 persona 行 + routerPrompt 逐字（回退源）。
-    expect(buildRouterPresetDefinition().plugins.some((row) => row.name === '@deepseek-ai/dsh-persona')).toBe(false)
-    const fallbackPersona = staticRouterDefinition().plugins.find((row) => row.name === '@deepseek-ai/dsh-persona')
-    expect(fallbackPersona?.config).toMatchObject({ prefix: routerPrompt, complete: true })
+describe('persona 文本与 collaborationPrompt 单一来源逐字同步', () => {
+  it('Router persona complete:true，prefix 即 collaborationPrompt（生成脚本实际导入）', () => {
+    const doc = parseYml(PATCH_TEXT)
+    const plugins = routerPresetPlugins(doc)
+    const persona = plugins
+      .map((p) => p as { name?: string; config?: { prefix?: string; complete?: boolean } })
+      .find((p) => p.name === '@deepseek-ai/dsh-persona')
+    expect(persona, 'Router 预设必须有 persona 行').toBeTruthy()
+    expect(persona?.config?.complete).toBe(true)
+    const prefix = persona?.config?.prefix ?? ''
+    expect(prefix.trim()).toBe(collaborationPrompt.trim())
+    // C5 看守：complete 段唯一——不残留 persona 行之外的 complete 来源
+    expect(PATCH_TEXT).not.toMatch(/id:\s*router-prompt-section\b/)
   })
-  it('执行者 persona（yml 静态行）=== unifiedPrompt（2026-11-12 合并裁定后唯一 persona 源）', () => {
-    expect(personaPrefix(PATCH_TEXT, 'persona')).toBe(unifiedPrompt)
+
+  it('生成脚本实际导出 collaborationPrompt（Node TS stripping）', () => {
+    // 这一条在 vitest 里直接 import 即证；再断言非空、无宿主插值语法。
+    expect(collaborationPrompt.length).toBeGreaterThan(100)
+    expect(collaborationPrompt).not.toContain('{{')
+    expect(collaborationPrompt).not.toContain('${')
   })
 })
 
@@ -282,7 +215,6 @@ describe('lib/client.js 是页面能装的产物', () => {
       if (!allowed.has(specifier)) {
         throw new Error(`产物请求了模块表外的模块：${specifier}`)
       }
-      // 组件只在渲染时才调 hooks；工厂期只要对象存在即可。
       return specifier === 'react/jsx-runtime'
         ? { jsx: () => null, jsxs: () => null, Fragment: 'Fragment' }
         : {
@@ -309,7 +241,7 @@ describe('lib/client.js 是页面能装的产物', () => {
       infos: [] as string[],
     }
     const ctx = {
-      logger: (_name: string) => ({
+      logger: () => ({
         info: (message: string) => { captured.infos.push(message) },
         warn: () => {},
       }),
@@ -342,7 +274,6 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(existsSync(BUNDLE_PATH), 'lib/client.js 不存在——先 npm run build').toBe(true)
     const src = readFileSync(BUNDLE_PATH, 'utf8')
 
-    // 双保险：除了脚本模式求值会挡住顶层 ESM，再对「声明形状」做一次行级扫描。
     expect(src).toMatch(/window\.__ModuleLoader__\.load\(/)
     expect(src, '产物顶层不得有 import 声明').not.toMatch(/(^|\n)\s*import\s+["'{\w]/)
     expect(src, '产物顶层不得有 export 声明').not.toMatch(/(^|\n)\s*export\s+[\w{*]/)
@@ -350,22 +281,16 @@ describe('lib/client.js 是页面能装的产物', () => {
     const row = loadBundleRow()
     expect(row.id).toBe('@goodjin2/dsh-router')
 
-    // 页面模块表里拿得到 react 系（package.json 的 dsh.client.external 清单）；
-    // 其余模块必须是打进产物，工厂期请求即视为断链。
     const require = pageRequire()
     const loaded = row.factory(require)
     expect(loaded.name, '产物必须导出与包名一致的 name').toBe('@goodjin2/dsh-router')
     expect(Array.isArray(loaded.inject), '产物必须导出 inject（页面真实服务名）').toBe(true)
     expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
     expect(typeof loaded.apply, '产物必须导出 apply').toBe('function')
-    // 工厂期只允许 require 外置清单（react 系）；出现别的说明打包把页面模块打了进来。
     for (const specifier of require.required) {
       expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
     }
 
-    // 按页面物化的方式真跑一遍 apply：表面注册齐（shell.overlay 三个注册项：
-    // 统一待处理浮窗 + 返回按钮；提示词视图已移除不再注册）、
-    // 自报一行、生命周期经 effect。
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([

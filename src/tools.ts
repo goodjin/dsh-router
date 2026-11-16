@@ -1,45 +1,42 @@
 /**
- * 预设树工具行入口（`@goodjin2/dsh-router/tools`，计划 B2）。
+ * 预设树工具行入口（`@goodjin2/dsh-router/tools`，轻量协作版，计划 Task 2B）。
  *
- * 按行上的 role 注册对应的编排工具子集——**只 register 不 provide**：preset 树内
- * provide 服务必须裹 isolate，否则泄漏审计整树回滚（r1 §5.3）；工具行是纯副作用，
- * 无需 realm。核心服务经 inject ['routerCore'] 从根实例（根服务行 provide 的
- * 'routerCore'）经作用域链取用。
+ * inject ['tools', 'routerCollaboration']：从根实例（根服务行 provide 的
+ * 'routerCollaboration'）经作用域链取记录/模板存储单实例，注册恰好七条 Layer2 工具
+ * 定义（buildCollaborationTools）。只 register 不 provide：工具行是纯副作用，无需 realm。
+ * 无角色配置/角色闸（旧 role:'superset' 的 assertCallerRole 退役）；存储为字段校验与
+ * 执行的最终权威，工具执行失败原样成为 tool error。
  */
 
 import Schema from '@deepseek-ai/schemastery'
 
-import { buildToolDefinitions } from './host/tools/index.ts'
-import type { ToolRowRole } from './host/tools/index.ts'
+import { buildCollaborationTools, type ToolDefinition } from './collaboration/tools.ts'
 
-/** 本入口的插件名（诊断显示用；装载行的 name 是带子路径的说明符）。 */
+/** 本入口的插件名（诊断显示用；装载行的 name 是带子路径说明符）。 */
 export const name = 'router-tools'
 
-export const inject = ['tools', 'routerCore'] as const
+export const inject = ['tools', 'routerCollaboration'] as const
 
-/** 行配置：角色必填，决定注册哪个工具子集（'superset' = 全量+运行期角色闸，v1.3 A1）。 */
-export interface RouterToolsConfig {
-  role: ToolRowRole
-}
-
-export const Config = Schema.object({
-  role: Schema.union(['router', 'supervisor', 'worker', 'superset']).required(),
-})
+/**
+ * 行配置：无。保留 Config（空对象）以与宿主行校验一致（check-host-rows 对无 config 行
+ * 按「跳过校验」处理，但导出 Config 让形状显式、可测）。
+ */
+export const Config = Schema.object({})
 
 /** 本入口需要的宿主面（窄接口）。 */
 interface ToolsContext {
   tools: {
-    register(definition: unknown): unknown
+    register(definition: ToolDefinition): unknown
   }
-  routerCore: unknown
+  routerCollaboration: {
+    records: Parameters<typeof buildCollaborationTools>[0]
+    roles: Parameters<typeof buildCollaborationTools>[1]
+  }
 }
 
-/** 按角色注册编排工具子集；返回联合注销器。 */
-export function apply(ctx: ToolsContext, config: RouterToolsConfig): () => void {
-  const definitions = buildToolDefinitions(
-    ctx.routerCore as Parameters<typeof buildToolDefinitions>[0],
-    config.role,
-  )
+/** 注册七条协作工具；返回联合注销器交给宿主 effect 生命周期。disposal 干净。 */
+export function apply(ctx: ToolsContext): () => void {
+  const definitions = buildCollaborationTools(ctx.routerCollaboration.records, ctx.routerCollaboration.roles)
   const disposers = definitions.map((definition) => ctx.tools.register(definition))
   return () => {
     for (const dispose of disposers) {

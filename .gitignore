@@ -10,6 +10,10 @@ dist/client/
 dist/host/
 dist/shared/
 dist/collaboration/
+dist/compaction.js
+dist/compaction.js.map
+dist/prompt-section.js
+dist/prompt-section.js.map
 dist/*.d.ts
 dist/*.d.ts.map
 

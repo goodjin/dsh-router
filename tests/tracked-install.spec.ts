@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-const ENTRIES = ['dist/entry.js', 'dist/tools.js', 'dist/context.js', 'dist/prompt-section.js'] as const
+const ENTRIES = ['dist/entry.js', 'dist/tools.js', 'dist/context.js'] as const
 
 const stagingRoot = join(tmpdir(), `router-tracked-install-${process.pid}`)
 afterAll(() => {
@@ -51,6 +51,9 @@ describe('仅跟踪文件的干净安装可加载（I9）', () => {
     for (const entry of ENTRIES) {
       expect(tracked, `${entry} 必须是跟踪文件`).toContain(entry)
     }
+    // 已退役子路径的产物不得再被跟踪/分发
+    expect(tracked).not.toContain('dist/prompt-section.js')
+    expect(tracked).not.toContain('dist/compaction.js')
     // 干净目录不含任何被 ignore 的中间产物（dist/host、dist/client 等）。
     expect(tracked.some((file) => file.startsWith('dist/host/') || file.startsWith('dist/client/') || file.startsWith('dist/shared/'))).toBe(false)
 
@@ -71,7 +74,7 @@ describe('仅跟踪文件的干净安装可加载（I9）', () => {
     expect(typeof entryMod['apply']).toBe('function')
     expect(typeof entryMod['Config']).toBe('function')
 
-    for (const sub of ['tools', 'context', 'prompt-section']) {
+    for (const sub of ['tools', 'context']) {
       const mod = (await import(pathToFileURL(join(staging, `dist/${sub}.js`)).href)) as Record<string, unknown>
       expect(typeof mod['name'], `${sub} 缺 name`).toBe('string')
       expect(Array.isArray(mod['inject']), `${sub} 缺 inject`).toBe(true)

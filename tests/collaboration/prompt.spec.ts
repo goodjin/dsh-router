@@ -83,10 +83,16 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).not.toMatch(/记录是唯一事实源/)
   })
 
-  it('R1: spawn/notify are process descriptions via DSH tools, not a claimed bespoke notify tool', () => {
-    // 标明使用宿主 DSH 提供的创建子会话/发消息工具，具体名字后续层绑定
+  it('R1: spawn/notify are process descriptions via DSH tools with exact installed names', () => {
+    // 标明使用宿主 DSH 提供的创建子会话/发消息工具，名字以本预设实际挂载为准
     expect(collaborationPrompt).toMatch(/宿主 DSH/)
-    expect(collaborationPrompt).toMatch(/后续层绑定|由后续层/)
+    // Task 2B：实际挂载的工具名出现在提示词里（subagent/list_agents/send_message），
+    // 不再用「由后续层绑定」占位。
+    expect(collaborationPrompt).toContain('subagent')
+    expect(collaborationPrompt).toContain('list_agents')
+    expect(collaborationPrompt).toContain('send_message')
+    expect(collaborationPrompt).toContain('interrupt_agent')
+    expect(collaborationPrompt).not.toContain('后续层绑定')
     // 不声称存在名为 notify 的工具
     expect(collaborationPrompt).not.toMatch(/notify 工具|名为 notify/)
   })

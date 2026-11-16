@@ -1,20 +1,28 @@
 /**
- * 预设树上下文行入口（`@goodjin2/dsh-router/context`，计划 B5）。
+ * 预设树上下文行入口（`@goodjin2/dsh-router/context`，轻量协作版，计划 Task 2B）。
  *
- * 只挂 Router 预设：在预设作用域内注册 systemPrompt 动态上下文
- * 「router-task-ledger」，text 是同步回调读根服务缓存的快照（systemPrompt 组装
- * 是同步的，账本读是异步的，所以走缓存——根服务在启动与每次账本写后刷新）。
- * 注意宿主 SystemPrompt.context() 对非有限 order 直接 TypeError，order 必须给。
+ * inject ['systemPrompt', 'routerCollaboration']：经官方 systemPrompt.context 注册一段
+ * 动态上下文「router-collaboration」，text 回调在组装期收当次 AssembleContext（dsh-agent
+ * 注入当前 agent）。当前会话 ID 取自 `assembly.agent.id`（真实 Agent 公共上下文，不猜
+ * ctx.agent/根 id、不扫历史、不建可变全局 currentSession）；与共享 dataDir 一起交给纯
+ * 构建器 buildCollaborationContext 产出面向模型的文本。
+ *
+ * 缺少宿主 agent 面（assembly.agent 缺席）时不臆造会话身份：产出一段诊断说明（列出工具
+ * 与协作目录、提示当前会话 ID 不可用），绝不抛（组装路径抛错会炸整轮对话）。
+ *
+ * 注意宿主 SystemPrompt.context 对非有限 order 直接 TypeError，order 必须给。
  */
 
 import Schema from '@deepseek-ai/schemastery'
 
+import { buildCollaborationContext } from './collaboration/context.ts'
+
 /** 本入口的插件名（诊断显示用）。 */
 export const name = 'router-context'
 
-export const inject = ['systemPrompt', 'routerCore'] as const
+export const inject = ['systemPrompt', 'routerCollaboration'] as const
 
-/** 行配置：快照段在 runtime context 里的排序。 */
+/** 行配置：上下文段在 runtime context 里的排序。 */
 export interface RouterContextConfig {
   order?: number
 }
@@ -23,31 +31,60 @@ export const Config = Schema.object({
   order: Schema.number().default(100).volatile(),
 })
 
-/** 本入口需要的宿主面（窄接口）。 */
+/** 官方 AssembleContext 的最小面：dsh-agent 注入当前 agent（含公开只读 id）。 */
+interface AssembleContextLike {
+  agent?: { id?: unknown }
+}
+
 interface ContextEntry {
   name: string
   order: number
-  text(): string
+  text(assembly?: unknown): string
 }
 
 interface SystemPromptFace {
   context(entry: ContextEntry): unknown
 }
 
-interface ContextHost {
-  systemPrompt: SystemPromptFace
-  routerCore: { snapshotText(): string }
+interface RouterCollaborationFace {
+  dataDir: string
 }
 
-/** 注册快照上下文；返回注销器交给宿主 effect 生命周期。 */
+/** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
+function currentSessionId(assembly: unknown): string | undefined {
+  if (typeof assembly !== 'object' || assembly === null) return undefined
+  const agent = (assembly as AssembleContextLike).agent
+  if (typeof agent !== 'object' || agent === undefined) return undefined
+  const id = (agent as { id?: unknown }).id
+  return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+/** 缺 agent 面时的诊断文本：不臆造会话身份，仍给出工具与协作目录。 */
+function diagnosticText(dataDir: string): string {
+  // 复用纯构建器的目录/工具段：以占位 sessionId 调用，再把「当前会话 ID」改写成不可用。
+  const base = buildCollaborationContext({ sessionId: 'unknown', dataDir })
+  return base.replace('当前会话 ID：unknown', '当前会话 ID：不可用（宿主未在本次组装中提供 agent 面；不要臆造 rootSessionId，向上级会话询问）')
+}
+
+/** 注册协作上下文；返回注销器交给宿主 effect 生命周期。 */
 export function apply(ctx: ContextHost, config: RouterContextConfig): () => void {
   const order = typeof config.order === 'number' && Number.isFinite(config.order) ? config.order : 100
+  const dataDir = ctx.routerCollaboration.dataDir
   const dispose = ctx.systemPrompt.context({
-    name: 'router-task-ledger',
+    name: 'router-collaboration',
     order,
-    text: () => ctx.routerCore.snapshotText(),
+    text: (assembly: unknown) => {
+      const sessionId = currentSessionId(assembly)
+      if (sessionId === undefined) return diagnosticText(dataDir)
+      return buildCollaborationContext({ sessionId, dataDir })
+    },
   })
   return () => {
     (dispose as (() => void) | undefined)?.()
   }
+}
+
+interface ContextHost {
+  systemPrompt: SystemPromptFace
+  routerCollaboration: RouterCollaborationFace
 }

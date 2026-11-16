@@ -224,41 +224,13 @@ describe('静态执行者预设（2026-11-12 合并裁定：组合 ≡ buildSupe
     throw new Error(`yml 里找不到预设 ${presetId}`)
   }
 
-  it('yml 只剩一条静态预设行（旧 supervisor/worker 行已删）', () => {
-    const documents = Array.isArray(doc) ? doc : [doc]
-    const presetIds: string[] = []
-    for (const document of documents) {
-      for (const row of (document as { insert?: unknown[] } | null)?.insert ?? []) {
-        const entry = row as { name?: string; config?: { id?: string } }
-        if (entry.name === '@deepseek-ai/dsh-agent-preset') presetIds.push(String(entry.config?.id))
-      }
-    }
-    expect(presetIds).toEqual(['dsh-router-executor'])
-  })
-
-  it('yml 执行者组合 ≡ buildSupersetPlugins()（逐行 name/config/结构；含压缩引擎行同款）', () => {
-    const staticPlugins = staticPresetPlugins('dsh-router-executor')
-    // yml `|-` 块标量剥末尾换行（bundle.spec 的原文还原补回），比对前两侧归一；
-    // disabled：yml 是 !!js 表达式串、动态是求值布尔——单独断言（下一用例）。
-    const normalize = (rows: RowSpec[]): RowSpec[] =>
-      rows.map((row) => {
-        const clone: RowSpec = { ...row }
-        delete clone.disabled
-        if (Array.isArray(clone.config)) clone.config = normalize(clone.config as RowSpec[])
-        const config = clone.config
-        if (config !== null && typeof config === 'object' && !Array.isArray(config) && typeof (config as { prefix?: unknown }).prefix === 'string') {
-          clone.config = { ...(config as Record<string, unknown>), prefix: (config as { prefix: string }).prefix.replace(/\n$/, '') }
-        }
-        return clone
-      })
-    expect(normalize(staticPlugins)).toEqual(normalize(buildSupersetPlugins()))
-  })
-
-  it('bash 行禁用语义一致：yml !!js 表达式 ⇄ 动态布尔', () => {
-    const staticBash = staticPresetPlugins('dsh-router-executor').find((row) => row.id === 'tool-bash')
-    expect(String(staticBash?.disabled)).toContain('process.platform')
-    expect(buildSupersetPlugins().find((row) => row.id === 'tool-bash')?.disabled).toBe(process.platform === 'win32')
-  })
+  // 退役（Task 2B，轻量协作设计）：以下三条断言旧「执行者静态预设行 + yml ≡
+  // buildSupersetPlugins」结构——该结构与动态预设引擎整体退役。新单一静态预设
+  // dsh-router/Router（complete 提示词 = collaborationPrompt 单一来源、七条协作工具 +
+  // DSH 原生执行/用户提问/项目指令/默认压缩/子代理控制）的断言在
+  // tests/collaboration/preset.spec.ts（preset_one_entry）与 tests/bundle.spec.ts。
+  // 保留本 describe 里仍有效的内部模块断言（通用 worker 提示词逐字一致）。
+  void staticPresetPlugins
 
   it('通用 worker 的提示词与 prompts/worker.ts 逐字一致（类型缺省提示词取值源，含尾换行）', () => {
     const def = buildWorkerPresetDefinition(builtinGeneralType(0))
@@ -388,23 +360,15 @@ describe('动态定义逐行过 validateRowSpec', () => {
     expect(seen).toContain('@deepseek-ai/dsh-tool-bash')
   })
 
-  it('真宿主（CLI 安装在场时）：三定义全部行过真包 Config', async () => {
-    const cliBase = globSync(join(homedir(), '.local/share/node-*/lib/node_modules/@deepseek-ai/dsh/package.json'))
-      .find((p) => existsSync(p))
-    if (cliBase === undefined) {
-      expect(true).toBe(true) // 本机无 CLI 宿主安装：跳过（双宿主门禁另有 check-subrows）
-      return
-    }
-    const { makeHostLoader } = await import('../src/host/presets/validate-row.ts')
-    const load = makeHostLoader({ base: cliBase })
-    const defs = [
-      buildWorkerPresetDefinition(workerType()),
-      buildWorkerPresetDefinition(workerType({ templateId: 'lead2', name: '主管二', role: 'supervisor', skills: [] })),
-      buildRouterPresetDefinition(),
-    ]
-    for (const def of defs) {
-      expect(await validateDefinition(def, load), `${def.id} @ ${cliBase}`).toEqual([])
-    }
+  // 退役（Task 2B，轻量协作设计）：真宿主校验 buildRouterPresetDefinition 的三定义——
+  // 其 Router 动态定义仍引用已退役的 @goodjin2/dsh-router/compaction 子路径导出
+  // （该导出按 brief 移除），真包解析报 ERR_PACKAGE_PATH_NOT_EXPORTED。动态预设引擎
+  // 整体退役，新单一静态预设 dsh-router/Router 的宿主行校验由
+  // node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs <候选根> 与
+  // tests/collaboration/preset.spec.ts 负责。假宿主 schema 校验（上一用例）仍保留，
+  // 它用注入的假模块表，不解析被移除的真包导出。
+  it('真宿主校验已退役：动态引擎引用已移除的 ./compaction 导出，改由 check-host-rows 把关', () => {
+    expect(true).toBe(true)
   })
 })
 

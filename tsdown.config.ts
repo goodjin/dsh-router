@@ -9,7 +9,7 @@
  * 所以 src/entry.ts 平铺成 dist/entry.js、src/client/index.ts 成
  * dist/client/index.js）。
  *
- * 宿主半边（dist/entry.js 等 four entries，fix round 1 I9）：tsc 平铺产物带
+ * 宿主半边（dist/entry.js 等 three entries，fix round 1 I9）：tsc 平铺产物带
  * `./host/...` 相对导入，而 dist/host、dist/shared 都不入库——GitHub 安装只有
  * 跟踪文件，加载直接失败。改为从 TS 源直接把四个宿主入口各打成**自包含
  * bundle**（相对闭包全部内联；node:* 与 @deepseek-ai/* 保持外置，由宿主进程
@@ -36,13 +36,11 @@ const externals = new Set([
   '@deepseek-ai/dsh-client-ui-primitives',
 ])
 
-/** 宿主入口（package.json exports 的四个宿主子路径）。 */
+/** 宿主入口（package.json exports 的宿主子路径）。prompt-section/compaction 已退役（Task 2B）。 */
 const hostEntries = {
   entry: 'src/entry.ts',
   tools: 'src/tools.ts',
   context: 'src/context.ts',
-  'prompt-section': 'src/prompt-section.ts',
-  compaction: 'src/compaction.ts',
 } as const
 
 const clientConfig = defineConfig({

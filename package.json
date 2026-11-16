@@ -18,14 +18,6 @@
       "types": "./src/context.ts",
       "default": "./dist/context.js"
     },
-    "./prompt-section": {
-      "types": "./src/prompt-section.ts",
-      "default": "./dist/prompt-section.js"
-    },
-    "./compaction": {
-      "types": "./src/compaction.ts",
-      "default": "./dist/compaction.js"
-    },
     "./client": {
       "types": "./src/client/index.ts",
       "default": "./lib/client.js"
