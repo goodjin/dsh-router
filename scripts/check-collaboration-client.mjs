@@ -134,12 +134,16 @@ function activate(ctx, rec, { withStderr = true } = {}) {
 function baseServices(rec) {
   return {
     logger: () => ({ info: () => {}, warn: () => {} }),
-    effect: (cb) => { rec.effects += 1; return cb() },
+    // 真实宿主语义：effect 执行 setup 并保存其返回的 disposer（供卸载调用）。
+    effect: (cb) => { rec.effects += 1; rec.effectCleanup = cb(); return rec.effectCleanup },
     slots: {
       inject: (key, prepare) => { rec.injected.push(key); return prepare() },
       register: (options) => { rec.registered.push(options.id); return options },
     },
-    uiSession: { adapter: { current: { subscribe: () => () => {}, getSnapshot: () => ({ key: 's1' }) } } },
+    uiSession: { adapter: { current: {
+      subscribe: () => { rec.subLive += 1; return () => { rec.subLive -= 1; rec.subDisposed += 1 } },
+      getSnapshot: () => ({ key: 's1' }),
+    } } },
     uiWorkspace: { openSession: () => {} },
   }
 }
@@ -168,7 +172,7 @@ function withFault(base, fault) {
 }
 
 function newRec() {
-  return { registered: [], infos: [], warns: [], effects: 0, injected: [] }
+  return { registered: [], infos: [], warns: [], effects: 0, injected: [], subLive: 0, subDisposed: 0, effectCleanup: undefined }
 }
 
 const failures = []
@@ -194,11 +198,18 @@ console.log(`产物: ${clientPath}`)
   const registered = rec.registered.includes(EXPECTED_SLOT_ID)
   check('正常路径 apply 不穿透', threw === null, threw ? threw.message : '')
   check(`正常路径注册预期表面 ${EXPECTED_SLOT_ID}`, registered, `实际 ${JSON.stringify(rec.registered)}`)
+  // 订阅存活回归：effect setup 必须**返回** disposer（激活后订阅存活），而非 setup 里立即 dispose。
+  check('正常路径激活后订阅存活（live=1/disposed=0）', rec.subLive === 1 && rec.subDisposed === 0, `live=${rec.subLive} disposed=${rec.subDisposed}`)
+  check('正常路径 effect 返回 disposer（非 undefined）', typeof rec.effectCleanup === 'function', `effectCleanup=${typeof rec.effectCleanup}`)
+  if (typeof rec.effectCleanup === 'function') {
+    rec.effectCleanup()
+    check('正常路径卸载执行 disposer 后订阅释放（live=0/disposed=1）', rec.subLive === 0 && rec.subDisposed === 1, `live=${rec.subLive} disposed=${rec.subDisposed}`)
+  }
   if (threw !== null || !registered) {
     console.error(`✗ FAIL 正常路径（穿透=${threw !== null}，表面=${JSON.stringify(rec.registered)}）`)
     process.exit(1)
   }
-  console.log('✓ PASS 正常路径：apply 存活且注册预期表面')
+  console.log('✓ PASS 正常路径：apply 存活、注册预期表面、订阅存活且卸载释放')
 }
 
 // 2) 故障路径：三服务各 getter 抛 / 缺失 / 方法抛，外加 logger / effect 抛——一律不得穿透。

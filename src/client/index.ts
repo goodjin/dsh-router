@@ -133,12 +133,22 @@ function readCurrentSessionId(safeCtx: PluginContext): string | undefined {
   }
 }
 
-/** 把订阅清理绑到插件生命周期（ctx.effect）；守卫读取/调用，失败返回 false（调用方立即清理订阅）。 */
+/**
+ * 把订阅清理绑到插件生命周期（ctx.effect）。官方 cordis 契约：effect setup **返回 disposer**，
+ * 卸载时由 Cordis 调用——插件自身不在激活期调用它。setup 返回**受守卫的 disposer**（dispose 调用
+ * 失败 log.warn 不穿透）；effect 缺失/抛错 → 返回 false，调用方立即清理订阅（不留无限残留）。
+ */
 function bindLifecycle(safeCtx: PluginContext, dispose: () => void, log: ReturnType<typeof makeLogger>): boolean {
   const effect = safeGet(() => safeCtx.effect)
   if (typeof effect !== 'function') return false
   try {
-    effect(() => dispose())
+    effect(() => () => {
+      try {
+        dispose()
+      } catch (error) {
+        log.warn(`uiSession dispose failed: ${errorMessageOf(error)}`)
+      }
+    })
     return true
   } catch (error) {
     log.warn(`uiSession effect binding failed: ${errorMessageOf(error)}`)

@@ -11,6 +11,7 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
+import type { CollaborationStore } from '../src/client/collaboration-store.ts'
 import { hoverDarkenStyle, LightTooltip, LIGHT_TOOLTIP_STYLE, useHoverDarken } from '../src/client/ui-kit.tsx'
 
 describe('浏览器半边 src/client/index.ts：协作工作台单一表面', () => {
@@ -132,16 +133,44 @@ describe('I3 客户端激活守卫 — 服务 getter/method 抛错不穿透 appl
     expect(disposed).toEqual(['session'])
   })
 
-  it('effect 在位：订阅保留（绑定生命周期，不立即清理）', () => {
+  it('effect 在位：订阅保留（真实执行 setup、保存 disposer，激活后不立即清理）', () => {
     const disposed: string[] = []
     const ctx = {
       logger: () => ({ info: () => {}, warn: () => {} }),
-      effect: () => () => {},
+      // 真实宿主语义：effect 执行 setup 并保存其返回的 disposer（供卸载调用）。
+      effect: (cb: () => unknown) => cb(),
       slots: { inject: (_k: string, p: () => unknown) => p(), register: (_o: unknown, _c: unknown) => ({}) },
       uiSession: { adapter: { current: { subscribe: () => () => { disposed.push('session') }, getSnapshot: () => ({ key: 's1' }) } } },
     }
     expect(() => clientApply(ctx as never)).not.toThrow()
     expect(disposed).toEqual([])
+  })
+
+  it('激活后订阅存活、宿主切会话同步默认根、卸载清理、effect 抛错仍立即清理', () => {
+    const h = lifecycleHarness('ok')
+    expect(() => clientApply(h.ctx as never)).not.toThrow()
+    // 激活后订阅存活（回归：曾 setup 即 dispose → live=0）。
+    expect(h.live()).toBe(1)
+    expect(h.disposed()).toEqual([])
+    // 初始同步当前会话 A 为默认根。
+    expect(h.store().get().currentSessionId).toBe('A')
+    expect(h.store().effectiveRootId()).toBe('A')
+    // 宿主切会话 A→B：触发订阅回调，store 默认根随之更新。
+    h.switchTo('B')
+    expect(h.store().get().currentSessionId).toBe('B')
+    expect(h.store().effectiveRootId()).toBe('B')
+    // 卸载执行 disposer 后订阅释放。
+    expect(typeof h.getCleanup()).toBe('function')
+    expect(() => h.getCleanup()!()).not.toThrow()
+    expect(h.live()).toBe(0)
+    expect(h.disposed()).toEqual(['session'])
+  })
+
+  it('effect 抛错：绑定失败仍立即清理订阅（不留无限残留）', () => {
+    const h = lifecycleHarness('throw')
+    expect(() => clientApply(h.ctx as never)).not.toThrow()
+    expect(h.live()).toBe(0)
+    expect(h.disposed()).toEqual(['session'])
   })
 })
 
@@ -213,4 +242,53 @@ function recordingCtx() {
     workspaces: { list: { getSnapshot: () => ({ items: [] }) } },
   }
   return { ctx, captured }
+}
+
+/**
+ * 正常路径订阅生命周期 harness：effect **真实执行 setup 并保存返回的 disposer**（真宿主语义），
+ * uiSession.subscribe 记录 listener 并计 live/disposed，可模拟宿主切换会话（改 key + 触发回调）。
+ * effectMode 'throw' 模拟 effect 绑定抛错（走立即清理降级）。
+ */
+function lifecycleHarness(effectMode: 'ok' | 'throw' = 'ok') {
+  let listener: (() => void) | undefined
+  let liveCount = 0
+  const disposedList: string[] = []
+  let currentKey = 'A'
+  let cleanup: (() => void) | undefined
+  let faceRef: { store: CollaborationStore } | undefined
+  const ctx = {
+    logger: () => ({ info: () => {}, warn: () => {} }),
+    effect: effectMode === 'throw'
+      ? () => { throw new Error('effect boom') }
+      : (cb: () => unknown) => { cleanup = cb() as (() => void) | undefined; return cleanup },
+    slots: {
+      inject: (_key: string, prepare: () => unknown) => prepare(),
+      register: (options: { inject?: () => unknown }, _component: unknown) => {
+        const face = options.inject?.()
+        if (face && typeof face === 'object' && 'store' in face) faceRef = face as { store: CollaborationStore }
+        return {}
+      },
+    },
+    uiSession: {
+      adapter: {
+        current: {
+          subscribe: (l: () => void) => {
+            listener = l
+            liveCount += 1
+            return () => { liveCount -= 1; disposedList.push('session') }
+          },
+          getSnapshot: () => ({ key: currentKey }),
+        },
+      },
+    },
+    uiWorkspace: { openSession: () => {} },
+  }
+  return {
+    ctx,
+    store: () => faceRef!.store,
+    live: () => liveCount,
+    disposed: () => [...disposedList],
+    getCleanup: () => cleanup,
+    switchTo: (key: string) => { currentKey = key; listener?.() },
+  }
 }
