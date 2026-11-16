@@ -50,8 +50,8 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # �
 patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
 persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 七条协作工具行 + 协作上下文行 +
 DSH 原生执行/用户提问/项目指令/默认压缩/子会话控制（`tool-subagent` provider spawn、toolName subagent、
-maxDepth 2）。Router 预设运行时动态注册，不放 yml 以免同 id 相撞；旧 supervisor/worker/executor 预设
-与旧动态服务已退役，不恢复。改行先跑核查再提交；动态注册行另过插件内注册校验。
+maxDepth 2）。Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
+预设与旧动态服务已退役，不恢复。改行先跑核查再提交。
 
 ## 工作方式
 
