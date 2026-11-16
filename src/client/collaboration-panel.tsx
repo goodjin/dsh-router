@@ -211,6 +211,9 @@ function RootSection(props: { store: CollaborationStore }): ReactNode {
           刷新
         </button>
       </div>
+      <div data-router-collab-preset-hint style={{ fontSize: 11, color: '#6b7078', marginTop: 6 }}>
+        新建会话时，请在宿主正常 UI 选择「Router」预设（本工作台不自动创建会话）
+      </div>
     </section>
   )
 }

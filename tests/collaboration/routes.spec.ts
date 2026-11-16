@@ -34,8 +34,8 @@ async function freshDir(): Promise<string> {
   return dir
 }
 
-/** 把 POST 体拆成 data/end 事件喂给 handler 的假请求。 */
-function fakeReq(method: string, url: string, body?: string): {
+/** 把 POST 体拆成任意块序列喂给 handler 的假请求（可逐字节拆字、可末尾追加 end）。 */
+function fakeReqChunks(method: string, url: string, chunks: Buffer[]): {
   method: string | undefined
   url: string | undefined
   on(event: string, listener: (chunk?: Buffer) => void): unknown
@@ -50,9 +50,7 @@ function fakeReq(method: string, url: string, body?: string): {
     },
   }
   queueMicrotask(() => {
-    if (body !== undefined) {
-      for (const listener of listeners['data'] ?? []) listener(Buffer.from(body, 'utf8'))
-    }
+    for (const chunk of chunks) for (const listener of listeners['data'] ?? []) listener(chunk)
     for (const listener of listeners['end'] ?? []) listener()
   })
   return req
@@ -92,7 +90,7 @@ function harness(opts: {
 }): {
   ctx: CollaborationRouteContext
   routes: RegisteredRoute[]
-  invoke(method: string, pathAndQuery: string, body?: string): Promise<{ status: number; body: string; headers: Record<string, string> }>
+  invoke(method: string, pathAndQuery: string, body?: string | Buffer[]): Promise<{ status: number; body: string; headers: Record<string, string> }>
 } {
   const routes: RegisteredRoute[] = []
   const ctx: CollaborationRouteContext = {
@@ -108,11 +106,12 @@ function harness(opts: {
     },
   }
   registerCollaborationRoutes(ctx, { records: opts.records, roles: opts.roles })
-  const invoke = async (method: string, pathAndQuery: string, body?: string) => {
+  const invoke = async (method: string, pathAndQuery: string, body?: string | Buffer[]) => {
     const [path, query] = pathAndQuery.split('?')
     const route = routes.find((r) => r.path === path)
     if (route === undefined) return { status: 404, body: '', headers: {} }
-    const req = fakeReq(method, pathAndQuery, body)
+    const chunks = body === undefined ? [] : (typeof body === 'string' ? [Buffer.from(body, 'utf8')] : body)
+    const req = fakeReqChunks(method, pathAndQuery, chunks)
     const res = fakeRes()
     await route.handler(req, res)
     // 等待 handler 内的异步逻辑（readBody 用 queueMicrotask 喂数据）。
@@ -326,6 +325,69 @@ describe('error contract — 原始失败以 {error:{code,message}} 透出', () 
     const body = JSON.parse(res.body) as { error: { code: string; message: string } }
     expect(body.error.code).toBe('CORRUPT_RECORD')
     expect(typeof body.error.message).toBe('string')
+  })
+})
+
+describe('POST body transport — 跨块多字节解码 + 1MiB 累计字节上限 413', () => {
+  const LIMIT = 1024 * 1024
+
+  it('跨块拆字的多字节字符（中文）一次性解码：逐字落盘读回一致', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    const payload = Buffer.from(JSON.stringify({ name: '中文角色', description: '负责界面' }), 'utf8')
+    // 逐字节喂（最激进拆字）：每个字节一个 data 事件，把「中」的 UTF-8 字节拆到不同块。
+    const chunks = [...payload].map((byte) => Buffer.from([byte]))
+    const res = await invoke('POST', COLLABORATION_ROLES_PATH, chunks)
+    expect(res.status).toBe(200)
+    const saved = JSON.parse(res.body) as { name: string; description: string }
+    expect(saved.name).toBe('中文角色')
+    expect(saved.description).toBe('负责界面')
+    // 同一 store 读回逐字一致（持久化无替换符乱码）。
+    const listed = await roles.list()
+    expect(listed.map((r) => r.name)).toEqual(['中文角色'])
+    expect(listed.map((r) => r.description)).toEqual(['负责界面'])
+  })
+
+  it('恰好 1MiB 的合法 JSON 允许；多 1 字节返回 413 BODY_TOO_LARGE', async () => {
+    const dataDir = await freshDir()
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles: createRoleStore(dataDir) })
+    const overhead = Buffer.byteLength(JSON.stringify({ name: '', description: '' }), 'utf8')
+    const exactBody = JSON.stringify({ name: 'x'.repeat(LIMIT - overhead), description: '' })
+    expect(Buffer.byteLength(exactBody, 'utf8')).toBe(LIMIT)
+    const ok = await invoke('POST', COLLABORATION_ROLES_PATH, exactBody)
+    expect(ok.status).toBe(200)
+    // 多 1 字节：超限 413（不是 400 INVALID_INPUT）。
+    const over = await invoke('POST', COLLABORATION_ROLES_PATH, `${exactBody}x`)
+    expect(over.status).toBe(413)
+    const overBody = JSON.parse(over.body) as { error: { code: string; message: string } }
+    expect(overBody.error.code).toBe('BODY_TOO_LARGE')
+    expect(typeof overBody.error.message).toBe('string')
+  })
+
+  it('超限拒绝时不写 store（零落盘）', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    const overhead = Buffer.byteLength(JSON.stringify({ name: '', description: '' }), 'utf8')
+    const overBody = JSON.stringify({ name: 'x'.repeat(LIMIT - overhead + 1), description: '' })
+    const res = await invoke('POST', COLLABORATION_ROLES_PATH, overBody)
+    expect(res.status).toBe(413)
+    expect(await roles.list()).toHaveLength(0)
+  })
+
+  it('分块体超限：拒绝后收到 end 仍干净返回 413（不崩、不 200、不半写）', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    // name 本身就超过 1MiB；分两块喂，第一块未过半、第二块越过上限后 end 才到。
+    const overhead = Buffer.byteLength(JSON.stringify({ name: '', description: '' }), 'utf8')
+    const payload = Buffer.from(JSON.stringify({ name: 'x'.repeat(LIMIT - overhead + 10), description: '' }), 'utf8')
+    const mid = Math.floor(payload.length / 2)
+    const res = await invoke('POST', COLLABORATION_ROLES_PATH, [payload.subarray(0, mid), payload.subarray(mid)])
+    expect(res.status).toBe(413)
+    expect((JSON.parse(res.body) as { error: { code: string } }).error.code).toBe('BODY_TOO_LARGE')
+    expect(await roles.list()).toHaveLength(0)
   })
 })
 

@@ -106,6 +106,10 @@ describe('panel_links_and_scope — 根会话默认当前会话 + 输入框覆�
     const items = container.querySelectorAll('[data-router-collab-record]')
     expect(items).toHaveLength(1)
     expect(items[0]!.textContent).toContain('成员报告')
+    // brief：提示用户在宿主正常 UI 选择 Router 预设（不自动创建会话）。
+    const hint = container.querySelector('[data-router-collab-preset-hint]')
+    expect(hint).not.toBeNull()
+    expect(hint!.textContent).toContain('Router')
     await act(async () => { root.unmount() })
   })
 
@@ -294,6 +298,31 @@ describe('staleasyncresultsignored — 切换根后旧响应不落地到面板',
     await flush()
     // 面板不出现 A 的记录。
     expect(container.querySelectorAll('[data-router-collab-record]')).toHaveLength(0)
+    await act(async () => { root.unmount() })
+  })
+
+  it('切到根 B 后面板同步清掉 A 的记录与正文（不只忽略迟到响应）', async () => {
+    const { api } = scriptedApi({ records: [reportRecord], record: { record: reportRecord, path: '/p' } })
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    const { root, container } = render({ store, uiWorkspace: { openSession } })
+    await act(async () => { root.render(createElement(CollaborationWorkbench, { store, uiWorkspace: { openSession } })) })
+    click(container.querySelector('[data-router-collab-open]')!)
+    await flush()
+    // 选中 A 的报告记录，正文加载出来。
+    click(container.querySelector('[data-router-collab-record]')!)
+    await flush()
+    // 根 A 的记录列表与正文都在。
+    expect(container.querySelectorAll('[data-router-collab-record]')).toHaveLength(1)
+    expect(container.querySelector('[data-router-collab-detail]')).not.toBeNull()
+    expect(container.querySelector('[data-router-collab-detail-body]')!.textContent).toContain('完成了登录模块')
+    // 宿主切到根 B：一次同步发布里清掉 A 的记录与正文（不残留、不等待迟到响应）。
+    act(() => { store.setCurrentSession('root-B') })
+    expect(store.get().effectiveRootId).toBe('root-B')
+    expect(store.get().records).toEqual([])
+    expect(store.get().selectedRecord).toBeUndefined()
+    expect(container.querySelectorAll('[data-router-collab-record]')).toHaveLength(0)
+    expect(container.querySelector('[data-router-collab-detail]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 })

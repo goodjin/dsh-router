@@ -606,10 +606,21 @@ function createCollaborationRuntime(input = {}) {
 const COLLABORATION_RECORDS_PATH = "/router/collaboration/records";
 const COLLABORATION_RECORD_PATH = "/router/collaboration/record";
 const COLLABORATION_ROLES_PATH = "/router/collaboration/roles";
-/** POST 体上限：1MiB 简单 UI 传输限（非源存储约束）。 */
-const BODY_LIMIT = 1e6;
+/** POST 体上限：1MiB（1024×1024）简单 UI 传输限（非源存储约束）；按累计字节计，非 string 长度。 */
+const BODY_LIMIT = 1024 * 1024;
+/**
+* 请求体超过 1MiB 上限。HTTP 层传输契约错误，**不进** CollaborationError 枚举
+* （该枚举只容记录/模板四码），由 errorStatus 映射 413、errorCodeOf 给 BODY_TOO_LARGE。
+*/
+var BodyTooLargeError = class extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "BodyTooLargeError";
+	}
+};
 /** CollaborationError.code → HTTP 状态。 */
 function errorStatus(error) {
+	if (error instanceof BodyTooLargeError) return 413;
 	if (error instanceof SyntaxError) return 400;
 	if (error instanceof CollaborationError) switch (error.code) {
 		case "INVALID_INPUT": return 400;
@@ -637,21 +648,36 @@ function respondJson(response, status, body) {
 	});
 	response.end(body);
 }
-/** 读请求体（上限 1MiB，超出 413）。 */
+/**
+* 读请求体：按**累计字节**（Buffer.length，非解码后 string 长度）限 1MiB。
+* 跨块的多字节字符在 `end` 时一次性 `Buffer.concat` 解码，避免逐块 toString 把中文拆字成替换符。
+* 越限即拒（停止累计、不销毁 socket，让 413 正常回出）；拒绝后再来的 data/end/error 一律忽略。
+*/
 function readBody(request) {
 	return new Promise((resolve, reject) => {
 		const chunks = [];
 		let size = 0;
+		let settled = false;
 		request.on("data", (chunk) => {
+			if (settled) return;
 			size += chunk.length;
 			if (size > BODY_LIMIT) {
-				reject(new CollaborationError("INVALID_INPUT", "请求体过大"));
+				settled = true;
+				reject(new BodyTooLargeError(`请求体过大（超过 ${BODY_LIMIT} 字节上限）`));
 				return;
 			}
 			chunks.push(chunk);
 		});
-		request.on("end", () => resolve(chunks.map((chunk) => chunk.toString("utf8")).join("")));
-		request.on("error", reject);
+		request.on("end", () => {
+			if (settled) return;
+			settled = true;
+			resolve(Buffer.concat(chunks).toString("utf8"));
+		});
+		request.on("error", (error) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+		});
 	});
 }
 /**
@@ -732,9 +758,10 @@ function registerCollaborationRoutes(ctx, deps) {
 				body: JSON.stringify(roles)
 			};
 		}
+		const raw = await readBody(request);
 		let parsed;
 		try {
-			parsed = JSON.parse(await readBody(request));
+			parsed = JSON.parse(raw);
 		} catch (error) {
 			throw new CollaborationError("INVALID_INPUT", `请求体不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
 		}

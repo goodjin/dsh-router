@@ -159,33 +159,53 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
 
     setCurrentSession(sessionId: string | undefined): void {
       if (currentSessionId === sessionId) return
-      const prevRoot = resolveEffectiveRoot(rootInput, currentSessionId)
-      apply(() => { currentSessionId = sessionId })
-      // 当前会话变化可能改变生效根：作废旧在途请求（迟到旧根响应不得落地）。
-      if (resolveEffectiveRoot(rootInput, currentSessionId) !== prevRoot) {
-        recordsSeq += 1
-        apply(() => { loadingRecords = false })
+      // 显式 root 覆盖存在时，currentSession 切换而有效根未变则不清资料。
+      if (resolveEffectiveRoot(rootInput, sessionId) === resolveEffectiveRoot(rootInput, currentSessionId)) {
+        apply(() => { currentSessionId = sessionId })
+        return
       }
+      // 有效根改变：root 字段与清掉旧列表/正文/错误在**同一次** state 发布里完成，
+      // 避免先 emit 新 root、旧正文仍在的短暂显示；同时作废在途请求。
+      recordsSeq += 1
+      apply(() => {
+        currentSessionId = sessionId
+        records = []
+        selectedRecord = undefined
+        recordsError = null
+        loadingRecords = false
+      })
     },
 
     setRootInput(value: string): void {
       if (rootInput === value) return
-      const prevRoot = resolveEffectiveRoot(rootInput, currentSessionId)
-      apply(() => { rootInput = value })
-      if (resolveEffectiveRoot(rootInput, currentSessionId) !== prevRoot) {
-        recordsSeq += 1
-        apply(() => { loadingRecords = false })
+      if (resolveEffectiveRoot(value, currentSessionId) === resolveEffectiveRoot(rootInput, currentSessionId)) {
+        apply(() => { rootInput = value })
+        return
       }
+      recordsSeq += 1
+      apply(() => {
+        rootInput = value
+        records = []
+        selectedRecord = undefined
+        recordsError = null
+        loadingRecords = false
+      })
     },
 
     resetRootInput(): void {
       if (rootInput === '') return
-      const prevRoot = resolveEffectiveRoot(rootInput, currentSessionId)
-      apply(() => { rootInput = '' })
-      if (resolveEffectiveRoot(rootInput, currentSessionId) !== prevRoot) {
-        recordsSeq += 1
-        apply(() => { loadingRecords = false })
+      if (resolveEffectiveRoot('', currentSessionId) === resolveEffectiveRoot(rootInput, currentSessionId)) {
+        apply(() => { rootInput = '' })
+        return
       }
+      recordsSeq += 1
+      apply(() => {
+        rootInput = ''
+        records = []
+        selectedRecord = undefined
+        recordsError = null
+        loadingRecords = false
+      })
     },
 
     async refreshRecords(): Promise<void> {
@@ -201,7 +221,12 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
       try {
         const list = await api.listRecords(root)
         if (seq !== recordsSeq) return // 迟到/作废响应：丢弃
-        apply(() => { records = list; loadingRecords = false })
+        // 刷新后选中记录若已不在新列表（含空列表）则详情不残留；仍在则保留。
+        const kept = selectedRecord !== undefined
+          && list.some((r) => r.id === selectedRecord!.record.id && r.taskId === selectedRecord!.record.taskId)
+          ? selectedRecord
+          : undefined
+        apply(() => { records = list; selectedRecord = kept; loadingRecords = false })
       } catch (error) {
         if (seq !== recordsSeq) return
         report(`collaboration records load failed: ${errorMessage(error)}`)

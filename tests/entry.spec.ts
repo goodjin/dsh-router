@@ -54,6 +54,97 @@ describe('浏览器半边 src/client/index.ts：协作工作台单一表面', ()
   })
 })
 
+describe('I3 客户端激活守卫 — 服务 getter/method 抛错不穿透 apply（source entry）', () => {
+  /** 在 ctx 上装一个「访问即抛错」的访问器属性（真 getter throw，不是缺失、不是普通方法）。 */
+  const defineThrowing = (target: Record<string, unknown>, key: string, label: string): void => {
+    Object.defineProperty(target, key, { configurable: true, get() { throw new Error(`${label} getter threw`) } })
+  }
+
+  it('slots getter 抛错：apply 不穿透，不注册表面', () => {
+    const { ctx, captured } = recordingCtx()
+    defineThrowing(ctx as unknown as Record<string, unknown>, 'slots', 'slots')
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual([])
+  })
+
+  it('uiSession getter 抛错：apply 不穿透，表面仍注册（根会话留空）', () => {
+    const { ctx, captured } = recordingCtx()
+    defineThrowing(ctx as unknown as Record<string, unknown>, 'uiSession', 'uiSession')
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+  })
+
+  it('uiWorkspace getter 抛错：apply 不穿透，表面仍注册（no-op 跳转）', () => {
+    const { ctx, captured } = recordingCtx()
+    defineThrowing(ctx as unknown as Record<string, unknown>, 'uiWorkspace', 'uiWorkspace')
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+  })
+
+  it('uiSession 缺失：表面仍注册（根会话留空，不臆造）', () => {
+    const { ctx, captured } = recordingCtx()
+    delete (ctx as { uiSession?: unknown }).uiSession
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+  })
+
+  it('uiWorkspace 缺失：表面仍注册（no-op 跳转 + 可见诊断）', () => {
+    const { ctx, captured } = recordingCtx()
+    delete (ctx as { uiWorkspace?: unknown }).uiWorkspace
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+  })
+
+  it('logger.info/warn 抛错：不穿透（落 console 兜底）', () => {
+    const { ctx } = recordingCtx()
+    ctx.logger = () => ({ info: () => { throw new Error('info boom') }, warn: () => { throw new Error('warn boom') } })
+    expect(() => clientApply(ctx)).not.toThrow()
+  })
+
+  it('uiSession.subscribe 抛错：不穿透，表面仍注册', () => {
+    const { ctx, captured } = recordingCtx()
+    ;(ctx as { uiSession: unknown }).uiSession = {
+      adapter: { current: { subscribe: () => { throw new Error('subscribe boom') }, getSnapshot: () => ({ key: 's1' }) } },
+    }
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+  })
+
+  it('ctx.effect 抛错：不穿透，订阅立即清理（不留无限残留）', () => {
+    const disposed: string[] = []
+    const { ctx } = recordingCtx()
+    ;(ctx as { effect?: unknown }).effect = () => { throw new Error('effect boom') }
+    ;(ctx as { uiSession: unknown }).uiSession = {
+      adapter: { current: { subscribe: () => () => { disposed.push('session') }, getSnapshot: () => ({ key: 's1' }) } },
+    }
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(disposed).toEqual(['session'])
+  })
+
+  it('effect 缺席：订阅立即清理（不留无限残留）', () => {
+    const disposed: string[] = []
+    const ctx = {
+      logger: () => ({ info: () => {}, warn: () => {} }),
+      slots: { inject: (_k: string, p: () => unknown) => p(), register: (_o: unknown, _c: unknown) => ({}) },
+      uiSession: { adapter: { current: { subscribe: () => () => { disposed.push('session') }, getSnapshot: () => ({ key: 's1' }) } } },
+    }
+    expect(() => clientApply(ctx as never)).not.toThrow()
+    expect(disposed).toEqual(['session'])
+  })
+
+  it('effect 在位：订阅保留（绑定生命周期，不立即清理）', () => {
+    const disposed: string[] = []
+    const ctx = {
+      logger: () => ({ info: () => {}, warn: () => {} }),
+      effect: () => () => {},
+      slots: { inject: (_k: string, p: () => unknown) => p(), register: (_o: unknown, _c: unknown) => ({}) },
+      uiSession: { adapter: { current: { subscribe: () => () => { disposed.push('session') }, getSnapshot: () => ({ key: 's1' }) } } },
+    }
+    expect(() => clientApply(ctx as never)).not.toThrow()
+    expect(disposed).toEqual([])
+  })
+})
+
 describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用）', () => {
   it('LightTooltip / useHoverDarken / hoverDarkenStyle 是函数，样式常量在', () => {
     expect(typeof LightTooltip).toBe('function')

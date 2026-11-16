@@ -144,6 +144,107 @@ describe('stale async results ignored — 改变根/当前会话作废旧在途�
   })
 })
 
+describe('root switch clears stale content — 切根同步清空旧列表/详情，无中间态', () => {
+  it('setCurrentSession 切到根 B：A 的列表/详情/错误在同一 state 里清空', async () => {
+    const { api, setListRecords, setReadRecord } = scriptedApi()
+    setListRecords(async () => [record('a', 't', 'task', 'A的任务')])
+    setReadRecord(async () => ({ record: record('a', 't', 'report', 'A报告'), path: '/a' }))
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    await store.refreshRecords()
+    await store.selectRecord('t', 'a')
+    expect(store.get().records.map((r) => r.title)).toEqual(['A的任务'])
+    expect(store.get().selectedRecord?.record.title).toBe('A报告')
+    // 宿主切到根 B（有效根改变）：一次发布里清掉旧列表/正文/错误，关掉在途 loading。
+    store.setCurrentSession('root-B')
+    const state = store.get()
+    expect(state.effectiveRootId).toBe('root-B')
+    expect(state.records).toEqual([])
+    expect(state.selectedRecord).toBeUndefined()
+    expect(state.recordsError).toBeNull()
+    expect(state.loadingRecords).toBe(false)
+  })
+
+  it('setRootInput 显式切到另一个根：旧列表/正文同步清空', async () => {
+    const { api, setListRecords, setReadRecord } = scriptedApi()
+    setListRecords(async () => [record('a', 't', 'task', 'A的任务')])
+    setReadRecord(async () => ({ record: record('a', 't', 'report', 'A报告'), path: '/a' }))
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    await store.refreshRecords()
+    await store.selectRecord('t', 'a')
+    // 输入框显式改成另一个根。
+    store.setRootInput('root-B')
+    const state = store.get()
+    expect(state.effectiveRootId).toBe('root-B')
+    expect(state.records).toEqual([])
+    expect(state.selectedRecord).toBeUndefined()
+    expect(state.recordsError).toBeNull()
+    expect(state.loadingRecords).toBe(false)
+  })
+
+  it('resetRootInput 回到不同当前会话：旧列表/正文同步清空', async () => {
+    const { api, setListRecords, setReadRecord } = scriptedApi()
+    setListRecords(async () => [record('a', 't', 'task', 'A的任务')])
+    setReadRecord(async () => ({ record: record('a', 't', 'report', 'A报告'), path: '/a' }))
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    store.setRootInput('root-A-override')
+    await store.refreshRecords()
+    await store.selectRecord('t', 'a')
+    // 重置回当前会话 root-A（有效根从 override 变回 root-A）：清空。
+    store.resetRootInput()
+    const state = store.get()
+    expect(state.effectiveRootId).toBe('root-A')
+    expect(state.records).toEqual([])
+    expect(state.selectedRecord).toBeUndefined()
+  })
+
+  it('显式 root 覆盖存在时切 currentSession（有效根未变）：不清资料', async () => {
+    const { api, setListRecords } = scriptedApi()
+    setListRecords(async () => [record('a', 't', 'task', 'A的任务')])
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    store.setRootInput('root-A') // 显式覆盖 = 当前会话
+    await store.refreshRecords()
+    expect(store.get().records.map((r) => r.title)).toEqual(['A的任务'])
+    // 切 currentSession 到 root-B，但有效根仍是覆盖值 root-A：资料不得被清。
+    store.setCurrentSession('root-B')
+    expect(store.get().effectiveRootId).toBe('root-A')
+    expect(store.get().records.map((r) => r.title)).toEqual(['A的任务'])
+  })
+
+  it('刷新成功且选中记录已不在新列表中（含空列表）：详情不残留；仍在则保留', async () => {
+    const { api, setListRecords, setReadRecord } = scriptedApi()
+    let mode: 'with' | 'empty' = 'with'
+    setListRecords(async () => (mode === 'with' ? [record('a', 't', 'task', 'A的任务')] : []))
+    setReadRecord(async () => ({ record: record('a', 't', 'report', 'A报告'), path: '/a' }))
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    await store.refreshRecords()
+    await store.selectRecord('t', 'a')
+    expect(store.get().selectedRecord?.record.id).toBe('a')
+    // 刷新后列表里已无该记录（空列表）：详情清掉，不残留 A 正文。
+    mode = 'empty'
+    await store.refreshRecords()
+    expect(store.get().records).toEqual([])
+    expect(store.get().selectedRecord).toBeUndefined()
+  })
+
+  it('刷新后选中记录仍在列表中：详情保留', async () => {
+    const { api, setListRecords, setReadRecord } = scriptedApi()
+    setListRecords(async () => [record('a', 't', 'task', 'A的任务')])
+    setReadRecord(async () => ({ record: record('a', 't', 'report', 'A报告'), path: '/a' }))
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-A')
+    await store.refreshRecords()
+    await store.selectRecord('t', 'a')
+    await store.refreshRecords() // 列表仍含 a
+    expect(store.get().selectedRecord?.record.id).toBe('a')
+    expect(store.get().records.map((r) => r.title)).toEqual(['A的任务'])
+  })
+})
+
 describe('user-triggered load — 刷新/打开触发加载，无轮询定时器', () => {
   it('refreshRecords 调 api.listRecords 一次（针对 effective root）', async () => {
     const { api, setListRecords, calls, lastListRoot } = scriptedApi()

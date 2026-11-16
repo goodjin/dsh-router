@@ -29,8 +29,19 @@ export const COLLABORATION_RECORDS_PATH = '/router/collaboration/records'
 export const COLLABORATION_RECORD_PATH = '/router/collaboration/record'
 export const COLLABORATION_ROLES_PATH = '/router/collaboration/roles'
 
-/** POST 体上限：1MiB 简单 UI 传输限（非源存储约束）。 */
-const BODY_LIMIT = 1_000_000
+/** POST 体上限：1MiB（1024×1024）简单 UI 传输限（非源存储约束）；按累计字节计，非 string 长度。 */
+const BODY_LIMIT = 1024 * 1024
+
+/**
+ * 请求体超过 1MiB 上限。HTTP 层传输契约错误，**不进** CollaborationError 枚举
+ * （该枚举只容记录/模板四码），由 errorStatus 映射 413、errorCodeOf 给 BODY_TOO_LARGE。
+ */
+class BodyTooLargeError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'BodyTooLargeError'
+  }
+}
 
 /** 路由需要的最小宿主面（webServer/connection 可缺席：缺席即不挂路由）。 */
 export interface CollaborationRouteContext {
@@ -55,6 +66,7 @@ export interface CollaborationRouteDeps {
 
 /** CollaborationError.code → HTTP 状态。 */
 function errorStatus(error: unknown): number {
+  if (error instanceof BodyTooLargeError) return 413 // 体超限：传输契约，先于坏 JSON 判定
   if (error instanceof SyntaxError) return 400 // 坏 JSON
   if (error instanceof CollaborationError) {
     switch (error.code) {
@@ -91,21 +103,36 @@ function respondJson(response: ServerResponse, status: number, body: string): vo
   response.end(body)
 }
 
-/** 读请求体（上限 1MiB，超出 413）。 */
+/**
+ * 读请求体：按**累计字节**（Buffer.length，非解码后 string 长度）限 1MiB。
+ * 跨块的多字节字符在 `end` 时一次性 `Buffer.concat` 解码，避免逐块 toString 把中文拆字成替换符。
+ * 越限即拒（停止累计、不销毁 socket，让 413 正常回出）；拒绝后再来的 data/end/error 一律忽略。
+ */
 function readBody(request: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let size = 0
+    let settled = false
     request.on('data', (chunk: Buffer) => {
+      if (settled) return
       size += chunk.length
       if (size > BODY_LIMIT) {
-        reject(new CollaborationError('INVALID_INPUT', '请求体过大'))
+        settled = true
+        reject(new BodyTooLargeError(`请求体过大（超过 ${BODY_LIMIT} 字节上限）`))
         return
       }
       chunks.push(chunk)
     })
-    request.on('end', () => resolve(chunks.map((chunk) => chunk.toString('utf8')).join('')))
-    request.on('error', reject)
+    request.on('end', () => {
+      if (settled) return
+      settled = true
+      resolve(Buffer.concat(chunks).toString('utf8'))
+    })
+    request.on('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
   })
 }
 
@@ -196,10 +223,12 @@ export function registerCollaborationRoutes(
       const roles = await deps.roles.list()
       return { status: 200, body: JSON.stringify(roles) }
     }
-    // POST：坏 JSON 400；非对象体 400；id 可选、name 必填、description 字符串（空串合法）。
+    // POST：readBody 在 JSON 解析 try 之外——传输层错误（超限 413/中断）直接透出，
+    // 不被「坏 JSON」的 INVALID_INPUT 包装吞掉；只有 JSON.parse 失败才映射 400。
+    const raw = await readBody(request)
     let parsed: unknown
     try {
-      parsed = JSON.parse(await readBody(request))
+      parsed = JSON.parse(raw)
     } catch (error) {
       throw new CollaborationError('INVALID_INPUT', `请求体不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
     }
