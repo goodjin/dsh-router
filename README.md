@@ -1,94 +1,115 @@
 # dsh-router
 
-DSH Router：**主管 / 工作型 worker 的会话任务编排插件**——把一个会话级任务拆给多个 worker、追踪进度、汇总结果。功能已实现（任务账本与派发、分叉创建 worker、身份卡、问答浮窗、通知卡片、失控防护、三层记忆、浮窗工作台、设置页）。**完整需求以 [`docs/requirements.md`](docs/requirements.md)（整合版）为唯一权威**；历次分版规格保留在 `docs/superpowers/specs/` 作历史决策记录。
+DSH Router：**由模型主导的团队协作插件**——一个 Router 入口接任务，Router 用宿主原生子会话
+组建主管、主管组建成员；模型决定拆分、派发、补做、汇总，用户决定最终交付是否满足要求。
+DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保存工作记录、提供协作规则、展示资料。
 
-> **开发与排障请先查官方文档**：本插件的宿主契约（装载行、客户端模块、Slots、路由等）
-> 以 DeepSeek Harness 官方文档为准。本地镜像见
-> [`../docs/official/README.md`](../docs/official/README.md)（含按场景的导航表），
-> 线上版本见 <https://deepseek-harness.github.io/deepseek-harness/>。
-> 排查「装上了不生效」「界面整块没反应」前先查对应章节。
+> **设计与需求权威**：轻量协作设计见
+> [`docs/superpowers/specs/2026-11-16-router-lightweight-design.md`](docs/superpowers/specs/2026-11-16-router-lightweight-design.md)。
+> 本 README 描述的是**当前轻量设计**；`docs/requirements.md` 已同步为同一设计。
+> 历史上的 executor/dynamic/aliases/三层记忆/状态机/收编等旧方案见 `docs/superpowers/specs/`
+> 与 `docs/superpowers/plans/` 的历史决策记录，**旧用户数据与历史分支不删、不兼容、不迁移**。
+
+> **开发与排障请先查官方文档**：本插件的宿主契约（子会话、模型、持久化、提示词组装）以
+> DeepSeek Harness 官方文档为准。本地镜像见
+> [`../docs/official/README.md`](../docs/official/README.md)，线上版本见
+> <https://deepseek-harness.github.io/deepseek-harness/>。
+
+## 设计要点
+
+- **单一入口**：用户只需一个 Router preset（`dsh-router` / 显示名 `Router`）。主管与成员不出现在
+  preset 列表；它们继承同一基础组合，靠每次派发消息里的初始任务说明明确角色。
+- **模型决策，DSH 通信**：创建/查询/发送消息/继续/停止直接用 DSH 原生子会话能力（`spawn`，
+  `maxDepth=2`）。插件不建第二套通信系统、不做投递队列、不做业务授权矩阵。
+- **角色是提示规则**：Router/主管/成员职责写进统一协作提示词（`complete:true`），不是安全边界，
+  不修改系统提示词。
+- **工作记录是共享资料**：任务说明、分工记录、工作报告、汇总记录各存一份独立 JSON，落在插件
+  数据根的 `collaboration/` 下。模型/用户填写工作标签（待处理/进行中/受阻/已报告），插件**不
+  从会话结束或退出码推断业务完成**。
+- **保存与通知是独立动作**：保存失败原样返回工具错误，通知失败由模型决定下一步，插件不自动
+  补偿、重派、验收、换人或恢复执行。
+- **工作台只展示事实**：区分 DSH 运行事实、模型报告的工作描述、用户反馈三类信息；运行结束不
+  改写业务标签，子会话状态不可取得显示「未知」。
+- **单宿主写记录**：进程内串行、单文件原子替换；不支持多宿主共享目录与多文件事务。
+- **旧数据不兼容**：新数据用 `collaboration/` 命名空间，不扫描、导入、接管旧会话或旧账本。
+
+## 模块边界
+
+| 模块 | 职责 |
+| --- | --- |
+| 入口与规则 | `src/entry.ts` 装配一个 preset、统一协作提示词、七条记录工具、原生子会话工具 |
+| 工作记录 | `src/collaboration/{records,roles}.ts` 任务/分工/报告/角色模板的读写与会话关联 |
+| 工作台 | `src/client/collaboration-{api,store}.ts`、`collaboration-panel.tsx`：列表/详情/报告/成果链接/会话跳转/模板编辑（只读任务资料） |
+| DSH 接入 | `src/collaboration/{tools,context,routes,runtime}.ts` 用现有子会话工具、只读运行事实 |
+
+第一版不新增：执行代理、SQLite 业务库、消息箱、预算熔断、任务图调度、自动修复服务、旧会话迁移、
+业务授权引擎、独立投递状态机、自动成功判断、自动补做/换人、跨任务异步排空。
 
 ## 现在装上会发生什么
 
-- 预设选择器出现「Router」与「Router-执行者」预设（2026-11-13 显示名改定：执行者预设的显示名改为「Router-执行者」以标明归属；2026-11-12 合并裁定：主管/工作静态预设已合并为单条，花名册尾部另有两条旧会话兼容别名）；picker 自建的 Router 会话被收编进工作台并幂等收到身份卡（Router 会话全部独立，不去重不跳转）。
-- Router 会话里可派发任务（分叉创建 worker、继承历史与前缀缓存）、汇聚 worker 提问、收完成/异常卡片、作用域紧急暂停与解除冻结。
-- 设置页出现「Router 管理」栏目（worker 类型 CRUD、Router 默认模型）；提示词编辑 UI 已移除（2026-11），既有提示词数据与宿主按角色默认保留。
+- 预设选择器出现「Router」一条可选预设。
+- Router 会话里提供七条协作工具（记录 CRUD + 角色模板）与原生子会话工具；上下文行说明当前
+  会话 ID、协作目录与工具用法。
+- 侧栏出现「协作工作台」入口：浏览任务资料、查看报告、跳转宿主会话、编辑角色模板；显示具体
+  错误与重试，不把失败伪装成空列表。
 - 浏览器控制台自报一行 `Router client loaded …`，让「装没装上」可查。
 
-装载接线（声明行、产物形状、入口指向）由 `tests/bundle.spec.ts` 盯着，任何一条断掉测试就红，不会重演「装上但静默失效」。
+装载接线（声明行、产物形状、入口指向）由 `tests/bundle.spec.ts` 盯着，任何一条断掉测试就红。
 
 ## 安装挂载
 
 桌面版 profile（`~/.dsh/profiles/desktop`）里两处各加一条：
 
-- `package.json` 的 `dependencies`：`"@goodjin2/dsh-router": "link:<本仓路径>"`（本地验证用 `link:`，key 必须与包名一致，否则会被 install 归一化改回去）；
+- `package.json` 的 `dependencies`：`"@goodjin2/dsh-router": "link:<本仓路径>"`（本地验证用
+  `link:`，key 必须与包名一致，否则会被 install 归一化改回去）；
 - 同文件 `dsh.profile.bundles` 数组：加 `"@goodjin2/dsh-router"`（bundle id = 包名）。
 
-然后 `pnpm install`，重开 DeepSeek Harness 生效。要验证「从 GitHub 安装」的完整流程，先把改动提交并推送，再走 web 版按正常安装路径拉取。
+然后 `pnpm install`，重开 DeepSeek Harness 生效。要验证「从 GitHub 安装」的完整流程，先把改动
+提交并推送，再走 web 版按正常安装路径拉取。
 
 ## 开发命令
 
 | 命令 | 做什么 |
 | --- | --- |
 | `npm run typecheck` | `tsc --noEmit`：src 一遍、src+tests 一遍 |
-| `npm test` | `vitest run`：装载接线测试 + sanity 测试 |
-| `npm run build` | `tsc -p tsconfig.json && tsdown`：产出 `dist/entry.js`（宿主入口）与 `lib/client.js`（浏览器产物） |
+| `npm test` | `vitest run`：装载接线测试 + 协作单元测试 + sanity |
+| `npm run build` | `tsc -p tsconfig.json && tsdown`：产出 `dist/entry.js`、`dist/tools.js`、`dist/context.js`（宿主入口）与 `lib/client.js`（浏览器产物） |
 
 门禁 = 三项全绿；产物入库，改了源码必须重建再提交（详见 [AGENTS.md](AGENTS.md)）。
 
 ## 浏览器半边三条件（改接线前必读）
 
-带界面的插件有一半在浏览器里跑。「装上了不等于跑起来了」，三件事要同时成立，少一条就是「界面没反应、也没有任何报错」：
+带界面的插件有一半在浏览器里跑。「装上了不等于跑起来了」，三件事要同时成立，少一条就是
+「界面没反应、也没有任何报错」：
 
 1. **package.json 声明 `dsh.bundle.patch`** 指向本包的 `cordis.patch.yml`；
 2. **package.json 声明 `dsh.client.platform = "web"`**；
-3. **patch 里装载行的 name 是裸包名** `@goodjin2/dsh-router`——带子路径的行会退化成在 node 里 import 浏览器产物，整块静默失效。
+3. **patch 里装载行的 name 是裸包名** `@goodjin2/dsh-router`——带子路径的行会退化成在 node 里
+   import 浏览器产物，整块静默失效。
 
-配套的形状规矩：`exports["./client"]` 只能写字符串或 `{ "default": 字符串 }`；`lib/client.js` 必须是「单文件 CJS 工厂」（`window.__ModuleLoader__.load({ id, factory })` 包裹，顶层不得有 import/export）；`.` 入口指向宿主侧入口 `dist/entry.js`，浏览器代码不进宿主进程。以上全部有 `tests/bundle.spec.ts` 断言。
+配套形状规矩：`exports["./client"]` 只能写字符串或 `{ "default": 字符串 }`；`lib/client.js`
+必须是「单文件 CJS 工厂」（`window.__ModuleLoader__.load({ id, factory })` 包裹，顶层不得有
+import/export）；`.` 入口指向宿主侧入口 `dist/entry.js`，浏览器代码不进宿主进程。以上全部有
+`tests/bundle.spec.ts` 断言。
 
 ## 布局
 
 ```
-src/entry.ts          宿主侧入口（组装 routerCore、问答桥、HTTP 路由、类型存储与动态预设）→ dist/entry.js
-src/host/             账本 ledger / 调度与完成 core / 防护 guard / 会话桥 bridge /
-                      收编索引 session / 记忆 memory / 上下文 context / 预设 presets / 工具 tools
-src/client/           浏览器半边（工作台标签、问答/通知浮窗、返回按钮、设置段）→ lib/client.js
-src/shared/           宿主/浏览器共享类型与视图契约
-cordis.patch.yml      装载行（裸包名根服务行 + 一条静态「执行者」预设行；Router 预设运行时动态注册；旧 supervisor/worker id 启动时注册兼容别名）
-tests/                装载接线、账本/状态机、防护、收编、记忆、客户端模型等全套测试
+src/entry.ts              宿主侧入口（装配单 preset + 协作记录服务 + 路由 + 上下文/工具行）→ dist/entry.js
+src/tools.ts              七条协作工具行（@goodjin2/dsh-router/tools）→ dist/tools.js
+src/context.ts            协作上下文行（@goodjin2/dsh-router/context）→ dist/context.js
+src/client/               浏览器半边（协作工作台面板 + 资料 API + 状态 store + ui-kit 基线）→ lib/client.js
+src/collaboration/        轻量协作核心：records/roles 存储、tools/prompt/context/runtime、routes
+cordis.patch.yml          装载行（裸包名根服务行 + 一条静态 Router 预设行 + 原生执行/提问/指令/压缩/子会话工具行）
+tests/                    collaboration/* 单元测试 + bundle/entry/tracked-install/preset-rows/validate-row 装载接线
+scripts/                  check-subrows / check-collaboration-host / check-collaboration-client 候选核查
 ```
 
-改任何声明行 / 预设行后必须跑容器核查脚本（双宿主都绿）：`node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router`，以及本仓 `node scripts/check-subrows.mjs`。
+改任何声明行 / 预设行后必须跑核查脚本，两个宿主都要绿：
 
-## 记忆文档布局
-
-三层记忆（`src/host/memory/`，需求 [`docs/requirements.md`](docs/requirements.md) §12）各是一份 Markdown，同一个形状：YAML 头 +「## 摘要」+「## 条目」。rootDir 由宿主集成层配置（默认插件状态目录）。
-
-| 层 | 文档 | 说明 |
-| --- | --- | --- |
-| 会话摘要 | `sessions/<sessionId>.md` | 头部记 `lastSummarizedSeq`（增量位）与 `title`；「## 摘要」存最近一次增量总结的条目化文本 |
-| 项目记忆 | `project.md` | 项目约定、已确认事实、重要交付物 |
-| 全局记忆 | `global.md` | 明确长期偏好、跨项目约定 |
-
-条目（`## 条目` 节，追加式，锚点 `e1`、`e2`……单调递增）：
-
-```text
-- [决定] 条目正文（[决定]=用户决定 / [建议]=worker 建议 / [事实]=已验证事实）
-  anchor: e1
-  key: <主题>
-  sources: <来源会话#消息范围>; …
-  at: <写入时间>
-  conflicts-with: e0    ← 同主题重复时指向旧条目锚（冲突保留不合成）
+```sh
+node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # 容器：声明行 × 宿主版本
+node scripts/check-subrows.mjs                                                 # 本仓：子行 config 校验（双宿主）
+node scripts/check-collaboration-host.mjs "$(pwd)"                            # 候选绝对路径宿主声明核查（双宿主）
+node scripts/check-collaboration-client.mjs "$(pwd)"                          # 候选浏览器半边激活预检
 ```
-
-规则：结论带来源引用；三类分别标记；冲突保留不合成；增量位记录摘要已处理到的事件 seq（`summarizeIncremental` 只喂其后的事件，空增量跳过，llm 失败不推进）；正文去空白后不足 20 字符的条目拒绝写入（低信息门）。检索 `search(query, scope)`：关键词扫描（大小写不敏感、中文包含匹配、多词 AND），按条目写入时间倒序最多 20 条，`memoryRef` = `memory://<文档>#<锚>`。摘要用注入式 `llm.stream(messages, signal)`（宿主集成接 `ctx.llm.stream`，样板见 `docs/research/r2-sessions.md` §7.3），记忆模块不 import 任何宿主包。
-
-## 运维：Router 收编的读取成本与诊断（v1.4）
-
-v1.4 语义：Router 会话全部独立——不去重、不归档、不跳转；收编扫描只把 picker
-自建的 Router 预设会话登记进工作台并幂等补发身份卡。判定源是受限会话头读取器
-+ 持久化增量索引（`src/host/session/`），`/router/state` 轮询只消费增量候选，
-稳态零副作用——2026-11-07 的「每轮全量重扫导致 OOM」现场已按此修复。运行边界、
-扫描上限、失败冷却与 `GET /router/health` 诊断口径见
-[`docs/router-adoption-operations.md`](docs/router-adoption-operations.md)
-（核对日期 2026-11-08）。

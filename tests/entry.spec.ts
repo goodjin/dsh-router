@@ -185,12 +185,11 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
   })
 
   it('浏览器面全部组件不再用原生 title 悬浮提示', () => {
+    // 只扫**当前存活**的浏览器面文件：ui-kit 基线 + 新协作面板。旧
+    // back-button/question-cards/settings/workbench-tabs 已随旧工作台退役，不再扫描。
     const files = [
-      'back-button.tsx',
-      'question-cards.tsx',
-      'settings.tsx',
       'ui-kit.tsx',
-      'workbench-tabs.tsx',
+      'collaboration-panel.tsx',
     ]
     for (const file of files) {
       const source = readFileSync(fileURLToPath(new URL(`../src/client/${file}`, import.meta.url)), 'utf8')

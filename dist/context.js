@@ -176,7 +176,7 @@ function buildCollaborationContext(input) {
 /** 本入口的插件名（诊断显示用）。 */
 const name = "router-context";
 const inject = ["systemPrompt", "routerCollaboration"];
-const Config = Schema.object({ order: Schema.number().default(100).volatile() });
+const Config = Schema.object({ order: Schema.number().default(100) });
 /** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
 function currentSessionId(assembly) {
 	if (typeof assembly !== "object" || assembly === null) return void 0;

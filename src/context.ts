@@ -28,7 +28,10 @@ export interface RouterContextConfig {
 }
 
 export const Config = Schema.object({
-  order: Schema.number().default(100).volatile(),
+  // order 是行加载时一次性给定的静态值，不做运行时更新，故不用 .volatile()
+  // （volatile 会把值包成 { get(), [write]() } 引用对象，导致 typeof number 检查
+  // 永远失败、order 被回退到默认 100）。
+  order: Schema.number().default(100),
 })
 
 /** 官方 AssembleContext 的最小面：dsh-agent 注入当前 agent（含公开只读 id）。 */

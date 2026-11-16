@@ -10,6 +10,8 @@
 import { describe, expect, it } from 'vitest'
 
 import { buildCollaborationContext } from '../../src/collaboration/context.ts'
+import { apply as contextApply, Config as contextConfig } from '../../src/context.ts'
+import { createCollaborationRuntime } from '../../src/collaboration/runtime.ts'
 
 const TOOL_NAMES = [
   'router_record_create',
@@ -76,5 +78,36 @@ describe('buildCollaborationContext — pure deterministic text', () => {
     expect(() => buildCollaborationContext({ sessionId: 'sid', dataDir: '' })).toThrow()
     // @ts-expect-error invalid shape on purpose
     expect(() => buildCollaborationContext({ sessionId: 42, dataDir: '/data' })).toThrow()
+  })
+})
+
+describe('Config order registration — context row order is honored, not forced to 100', () => {
+  /** 记录型假宿主面：capture 注册进 systemPrompt.context 的条目与其 order。 */
+  function recordingHost() {
+    interface CapturedEntry { name: string; order: number; text: (assembly?: unknown) => string }
+    const entries: CapturedEntry[] = []
+    const systemPrompt = {
+      context(entry: CapturedEntry): () => void {
+        entries.push(entry)
+        return () => {}
+      },
+    }
+    const routerCollaboration = createCollaborationRuntime({ dataDir: '/tmp/router-context-order-test' })
+    return { systemPrompt, routerCollaboration, entries }
+  }
+
+  it('Config({order:17}) registers the context entry with order 17, not the default 100', () => {
+    const { systemPrompt, routerCollaboration, entries } = recordingHost()
+    const parsedConfig = contextConfig({ order: 17 })
+    contextApply({ systemPrompt, routerCollaboration }, parsedConfig)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.order).toBe(17)
+  })
+
+  it('Config({}) falls back to the documented default order 100', () => {
+    const { systemPrompt, routerCollaboration, entries } = recordingHost()
+    contextApply({ systemPrompt, routerCollaboration }, contextConfig({}))
+    expect(entries).toHaveLength(1)
+    expect(entries[0]!.order).toBe(100)
   })
 })
