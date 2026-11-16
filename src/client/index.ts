@@ -169,7 +169,10 @@ function subscribeCurrentSession(safeCtx: PluginContext, store: CollaborationSto
     log.warn('uiSession service unavailable — root session defaults to blank (no current session)')
     return
   }
-  const sync = (): void => { store.setCurrentSession(readCurrentSessionId(safeCtx)) }
+  const sync = (): void => {
+    store.setCurrentSession(readCurrentSessionId(safeCtx))
+    void store.refreshRecords()
+  }
   let dispose: unknown
   try {
     dispose = (subscribe as (listener: () => void) => unknown).call(current, sync)
