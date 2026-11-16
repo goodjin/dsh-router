@@ -1,14 +1,10 @@
 /**
- * 入口接线测试（轻量协作版，计划 Task 2B，Layer 3）。
+ * 入口接线测试（轻量协作版，计划 Task 3 起）。
  *
- * 宿主侧 src/entry.ts 已重写为薄根服务：裸包名、inject 为空（只 provide 不 require
- * 旧宿主服务）、Config 只有 dataDir、apply 提供 routerCollaboration 单实例。旧
- * resolveRootConfig/bindSessionLifecycle/fireAndForget/SessionHeaderIndex/收编/
- * 判定器/预算那套装配整体退役（见 docs/superpowers/specs/2026-11-16-router-lightweight-
- * design.md），相应断言随之下线——新入口的宿主面断言在 tests/collaboration/host-entry.spec.ts。
- *
- * 本文件保留**未变**的浏览器半边工厂面与 ui-kit 形状断言（src/client 本轮不动，下一层
- * Task 3 接工作台）。
+ * 宿主侧 src/entry.ts 已重写为薄根服务 + 机会式薄路由（见 tests/collaboration/host-routes.spec.ts
+ * 用真实 Cordis Context 验证）。本文件断言浏览器半边工厂面：src/client/index.ts 注册**协作工作台**
+ * 单一表面（头部「协作工作台」按钮 + 可关闭浮层），旧的工作台标签条/问题浮窗/返回按钮/设置段
+ * 一概不再注册（oldsurfacesnotregistered）。ui-kit 形状断言保留。
  */
 
 import { describe, expect, it } from 'vitest'
@@ -17,40 +13,32 @@ import { fileURLToPath } from 'node:url'
 import { apply as clientApply, inject as clientInject, name as clientName } from '../src/client/index.ts'
 import { hoverDarkenStyle, LightTooltip, LIGHT_TOOLTIP_STYLE, useHoverDarken } from '../src/client/ui-kit.tsx'
 
-describe('浏览器半边 src/client/index.ts：工厂面（本轮不变，Task 3 接工作台）', () => {
-  it('name 与包名一致；inject 按页面真实服务名声明', () => {
+describe('浏览器半边 src/client/index.ts：协作工作台单一表面', () => {
+  it('name 与包名一致；inject 按页面真实服务名声明（slots/uiSession/uiWorkspace）', () => {
     expect(clientName).toBe('@goodjin2/dsh-router')
-    expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
+    expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace'])
   })
 
-  it('apply 注册全部表面：键名正确、id 各自独立', () => {
+  it('apply 注册协作工作台：头部 leading 一个按钮，旧表面一概不注册', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
-    expect([...captured.injected].sort()).toEqual([
-      'settings.section',
-      'shell.overlay',
-      'shell.overlay',
-      'conversation.header.leading',
-    ].sort())
-    expect(captured.injected, '提示词视图已移除，不得再注入 conversation.view').not.toContain('conversation.view')
+    expect([...captured.injected].sort()).toEqual(['conversation.header.leading'].sort())
+    // 旧表面已退役，不得再注入。
+    expect(captured.injected, '旧标签条/浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
+    expect(captured.injected).not.toContain('settings.section')
     const ids = captured.registered.map((entry) => entry.id)
-    expect(ids).toContain('router-workbench-tabs')
-    expect(ids).not.toContain('router-question-overlay')
-    expect(ids).toContain('router-back-button')
-    expect(ids).not.toContain('router-system-prompt')
-    expect(ids).toContain('router-notification-overlay')
-    expect(ids).toContain('router-settings')
+    expect(ids).toEqual(['router-collaboration-workbench'])
     expect(new Set(ids).size).toBe(ids.length)
     for (const pair of captured.pairs) {
       expect(pair.names, `表面 ${pair.key} 的 registration name 应为槽位键本身`).toContain(pair.key)
     }
   })
 
-  it('自报一行状态；轮询生命周期挂在 ctx.effect 上', () => {
+  it('自报一行状态；当前会话订阅清理挂在 ctx.effect 上', () => {
     const { ctx, captured } = recordingCtx()
     clientApply(ctx)
     expect(captured.infos).toHaveLength(1)
-    expect(captured.infos[0]).toMatch(/client loaded/i)
+    expect(captured.infos[0]).toMatch(/collaboration workbench/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
   })
 

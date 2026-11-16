@@ -601,20 +601,174 @@ function createCollaborationRuntime(input = {}) {
 }
 
 //#endregion
+//#region src/collaboration/routes.ts
+/** 三条路由前缀（与客户端 api 一侧逐字对齐）。 */
+const COLLABORATION_RECORDS_PATH = "/router/collaboration/records";
+const COLLABORATION_RECORD_PATH = "/router/collaboration/record";
+const COLLABORATION_ROLES_PATH = "/router/collaboration/roles";
+/** POST 体上限：1MiB 简单 UI 传输限（非源存储约束）。 */
+const BODY_LIMIT = 1e6;
+/** CollaborationError.code → HTTP 状态。 */
+function errorStatus(error) {
+	if (error instanceof SyntaxError) return 400;
+	if (error instanceof CollaborationError) switch (error.code) {
+		case "INVALID_INPUT": return 400;
+		case "NOT_FOUND": return 404;
+		case "CORRUPT_RECORD":
+		case "IO_ERROR": return 500;
+		default: return 500;
+	}
+	return 500;
+}
+/** 错误体里的 code：让客户端按 code 分流（store 错误用其 code，其余给传输码）。 */
+function errorCodeOf(error, status) {
+	if (error instanceof CollaborationError) return error.code;
+	if (error instanceof SyntaxError) return "INVALID_INPUT";
+	if (status === 405) return "METHOD_NOT_ALLOWED";
+	if (status === 413) return "BODY_TOO_LARGE";
+	return "INTERNAL_ERROR";
+}
+/** JSON 应答：no-store + 显式长度。 */
+function respondJson(response, status, body) {
+	response.writeHead(status, {
+		"content-type": "application/json",
+		"cache-control": "no-store",
+		"content-length": Buffer.byteLength(body)
+	});
+	response.end(body);
+}
+/** 读请求体（上限 1MiB，超出 413）。 */
+function readBody(request) {
+	return new Promise((resolve, reject) => {
+		const chunks = [];
+		let size = 0;
+		request.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > BODY_LIMIT) {
+				reject(new CollaborationError("INVALID_INPUT", "请求体过大"));
+				return;
+			}
+			chunks.push(chunk);
+		});
+		request.on("end", () => resolve(chunks.map((chunk) => chunk.toString("utf8")).join("")));
+		request.on("error", reject);
+	});
+}
+/**
+* 挂 exact 路由。webServer/connection 缺席时不挂（不挡装载）；
+* 每条路由先过 connection.admit 同一登录准入，再校验方法，再进逻辑。
+*/
+function registerCollaborationRoutes(ctx, deps) {
+	if (ctx.webServer === void 0 || ctx.connection === void 0) return;
+	const handle = (path, methods, logic) => {
+		const allow = methods.join(", ");
+		ctx.effect(() => ctx.webServer?.register({
+			kind: "exact",
+			path,
+			async handler(request, response) {
+				const admission = ctx.connection?.admit(request);
+				if (admission !== void 0 && "rejection" in admission) {
+					response.writeHead(admission.rejection);
+					response.end(admission.rejection === 401 ? "unauthorized" : "forbidden");
+					return;
+				}
+				if (request.method === void 0 || !methods.includes(request.method)) {
+					response.writeHead(405, { allow });
+					response.end(JSON.stringify({ error: {
+						code: "METHOD_NOT_ALLOWED",
+						message: `method not allowed（允许 ${allow}）`
+					} }));
+					return;
+				}
+				try {
+					const { status, body } = await logic(request);
+					respondJson(response, status, body);
+				} catch (error) {
+					const status = errorStatus(error);
+					const code = errorCodeOf(error, status);
+					const message = status >= 500 ? error instanceof CollaborationError ? error.message : "internal error" : error instanceof Error ? error.message : String(error);
+					respondJson(response, status, JSON.stringify({ error: {
+						code,
+						message
+					} }));
+				}
+			}
+		}), `dsh-router: collaboration ${allow} ${path}`);
+	};
+	handle(COLLABORATION_RECORDS_PATH, ["GET"], async (request) => {
+		const url = new URL(request.url ?? "/", "http://localhost");
+		const rootSessionId = url.searchParams.get("rootSessionId") ?? "";
+		if (rootSessionId === "") throw new CollaborationError("INVALID_INPUT", "rootSessionId 查询参数必填");
+		const taskId = url.searchParams.get("taskId") ?? void 0;
+		const kindParam = url.searchParams.get("kind") ?? void 0;
+		const query = {};
+		if (taskId !== void 0) query.taskId = taskId;
+		if (kindParam !== void 0) query.kind = kindParam;
+		const records = await deps.records.list(rootSessionId, query);
+		return {
+			status: 200,
+			body: JSON.stringify(records)
+		};
+	});
+	handle(COLLABORATION_RECORD_PATH, ["GET"], async (request) => {
+		const url = new URL(request.url ?? "/", "http://localhost");
+		const rootSessionId = url.searchParams.get("rootSessionId") ?? "";
+		const taskId = url.searchParams.get("taskId") ?? "";
+		const recordId = url.searchParams.get("recordId") ?? "";
+		if (rootSessionId === "") throw new CollaborationError("INVALID_INPUT", "rootSessionId 查询参数必填");
+		if (taskId === "") throw new CollaborationError("INVALID_INPUT", "taskId 查询参数必填");
+		if (recordId === "") throw new CollaborationError("INVALID_INPUT", "recordId 查询参数必填");
+		const saved = await deps.records.read(rootSessionId, taskId, recordId);
+		return {
+			status: 200,
+			body: JSON.stringify(saved)
+		};
+	});
+	handle(COLLABORATION_ROLES_PATH, ["GET", "POST"], async (request) => {
+		if (request.method === "GET") {
+			const roles = await deps.roles.list();
+			return {
+				status: 200,
+				body: JSON.stringify(roles)
+			};
+		}
+		let parsed;
+		try {
+			parsed = JSON.parse(await readBody(request));
+		} catch (error) {
+			throw new CollaborationError("INVALID_INPUT", `请求体不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new CollaborationError("INVALID_INPUT", "请求体须为 JSON 对象");
+		const body = parsed;
+		const input = {
+			name: typeof body.name === "string" ? body.name : "",
+			description: typeof body.description === "string" ? body.description : ""
+		};
+		if (typeof body.id === "string" && body.id !== "") input.id = body.id;
+		if (typeof body.description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
+		const saved = await deps.roles.save(input);
+		return {
+			status: 200,
+			body: JSON.stringify(saved)
+		};
+	});
+}
+
+//#endregion
 //#region src/entry.ts
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 const name = "@goodjin2/dsh-router";
 /**
 * 根服务不 require 任何旧宿主服务：它只 provide 一个纯内存运行时。
-* （旧版 require sessionController/agents/workspaceRegistry/sessionQuery/llm/agentPresets
-* 的那套装配整体退役。）
+* webServer/connection 经官方 ctx.inject 机会式注入（见 apply），不进全局必需数组——
+* 否则缺席时整行装载失败、CLI 记录/工具服务也被拖死（brief：不能 required 使 CLI 不可用）。
 */
 const inject = [];
 /** 根配置：只有 dataDir，全部可缺省（缺省 DSH_HOME/router，运行时解析一次）。 */
 const Config = Schema.object({ dataDir: Schema.string().default("") });
 /**
-* 装载入口：组装根服务并 provide。标准 Cordis 生命周期——返回注销器（此处无副作用可清理，
-* 存储单实例随 fiber 销毁自然回收；保留 disposer 形状以供宿主 effect 统一调度）。
+* 装载入口：组装根服务并 provide，再机会式挂三条薄路由。标准 Cordis 生命周期——
+* 返回注销器（路由注册与存储单实例随 fiber 销毁自然回收；保留 disposer 形状）。
 */
 function apply(ctx, rawConfig) {
 	const config = rawConfig ?? {};
@@ -625,6 +779,12 @@ function apply(ctx, rawConfig) {
 		dataDir: runtime.dataDir
 	};
 	ctx.provide("routerCollaboration", face);
+	ctx.inject?.(["webServer", "connection"], (child) => {
+		registerCollaborationRoutes(child, {
+			records: runtime.records,
+			roles: runtime.roles
+		});
+	});
 	return () => {};
 }
 

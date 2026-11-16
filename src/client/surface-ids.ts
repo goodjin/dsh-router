@@ -11,6 +11,14 @@ export const WORKBENCH_TABS_SLOT = 'conversation.header.leading'
 export const WORKBENCH_TABS_ID = 'router-workbench-tabs'
 export const WORKBENCH_TABS_ORDER = 10
 
+/**
+ * 协作工作台面板（Task 3 起取代旧标签条/浮窗/设置段，挂同一头部 leading 座位）。
+ * 一个按钮开合可关闭浮层，集中展示任务资料/详情/会话跳转/角色模板编辑。
+ */
+export const COLLABORATION_PANEL_SLOT = 'conversation.header.leading'
+export const COLLABORATION_PANEL_ID = 'router-collaboration-workbench'
+export const COLLABORATION_PANEL_ORDER = 11
+
 /** 全局问题浮窗（list、root、frame 级浮层）。 */
 export const QUESTION_OVERLAY_SLOT = 'shell.overlay'
 export const QUESTION_OVERLAY_ID = 'router-question-overlay'

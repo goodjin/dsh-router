@@ -285,7 +285,7 @@ describe('lib/client.js 是页面能装的产物', () => {
     const loaded = row.factory(require)
     expect(loaded.name, '产物必须导出与包名一致的 name').toBe('@goodjin2/dsh-router')
     expect(Array.isArray(loaded.inject), '产物必须导出 inject（页面真实服务名）').toBe(true)
-    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace', 'workspaces'])
+    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace'])
     expect(typeof loaded.apply, '产物必须导出 apply').toBe('function')
     for (const specifier of require.required) {
       expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
@@ -295,20 +295,16 @@ describe('lib/client.js 是页面能装的产物', () => {
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
       'conversation.header.leading',
-      'settings.section',
-      'shell.overlay',
-      'shell.overlay',
     ].sort())
-    expect(captured.injected, '提示词视图已移除，产物不得再注入 conversation.view').not.toContain('conversation.view')
+    expect(captured.injected, '旧浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
+    expect(captured.injected).not.toContain('settings.section')
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toEqual([
-      'router-workbench-tabs',
-      'router-notification-overlay',
-      'router-back-button',
-      'router-settings',
+      'router-collaboration-workbench',
     ])
-    expect(ids, '产物不得再登记提示词视图').not.toContain('router-system-prompt')
-    expect(captured.infos.join(' ')).toMatch(/client loaded/i)
+    expect(ids, '产物不得再登记旧表面').not.toContain('router-workbench-tabs')
+    expect(ids).not.toContain('router-settings')
+    expect(captured.infos.join(' ')).toMatch(/collaboration workbench/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
   })
 
