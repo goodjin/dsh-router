@@ -45,9 +45,10 @@ export interface RouterCollaborationFace {
   dataDir: string
 }
 
-/** apply 收到的 ctx 最小面：provide 必需；inject 机会式（官方 Cordis 注入回调，可缺席）。 */
+/** apply 收到的 ctx 最小面：provide 必需；root 用于全局服务发布；inject 机会式。 */
 interface EntryContext {
   provide(name: string, value: unknown): () => void
+  root?: { provide(name: string, value: unknown): () => void }
   inject?(deps: string[], body: (child: unknown) => unknown): unknown
   effect?(factory: () => unknown, label?: string): unknown
 }
@@ -64,7 +65,11 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
     roles: runtime.roles,
     dataDir: runtime.dataDir,
   }
-  ctx.provide('routerCollaboration', face)
+  // 服务必须发布到根作用域：预设内部插件（tools/context 行）经 isolate 符号解析服务，
+  // 只有根级 provide 才能让所有子上下文（含预设 realm）看见。ctx.provide 只发布到
+  // 当前 fiber 的隔离作用域，预设内部 inject 永远等不到。
+  const provideRoot = ctx.root?.provide?.bind(ctx.root) ?? ctx.provide.bind(ctx)
+  provideRoot('routerCollaboration', face)
 
   // 机会式注入 webServer+connection：缺席（CLI）则跳过，工作台路由不挂、记录/工具照常。
   // 与模型工具共享同一 runtime 的 records/roles（routes_reuse_store）。
