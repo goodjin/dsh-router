@@ -294,7 +294,7 @@ describe('lib/client.js 是页面能装的产物', () => {
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
-      'conversation.header.leading',
+      'conversation.session.header.actions',
     ].sort())
     expect(captured.injected, '旧浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
     expect(captured.injected).not.toContain('settings.section')

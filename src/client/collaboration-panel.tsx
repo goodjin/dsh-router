@@ -36,12 +36,12 @@ export interface CollaborationPanelFace {
 /** 组件 props = face。 */
 export type CollaborationPanelProps = CollaborationPanelFace
 
-/** slots 表面登记（conversation.header.leading 头部按钮）。 */
-export const COLLABORATION_PANEL_SLOT = 'conversation.header.leading'
+/** slots 表面登记（conversation.session.header.actions — 与编队按钮同栏）。 */
+export const COLLABORATION_PANEL_SLOT = 'conversation.session.header.actions'
 export const COLLABORATION_PANEL_ID = 'router-collaboration-workbench'
-export const COLLABORATION_PANEL_ORDER = 10
+export const COLLABORATION_PANEL_ORDER = -10
 
-/** slots 表面登记（conversation.header.leading 头部按钮）。 */
+/** slots 表面登记（conversation.session.header.actions — 与编队同栏）。 */
 export interface CollaborationSlotsHost {
   inject(key: string, prepare: () => unknown): unknown
   register(options: { name: string; id?: string; order?: number; inject?: () => unknown }, component: unknown): unknown
@@ -77,55 +77,58 @@ const RUNTIME_FACT_TEXT: Record<SessionRuntimeFact, string> = {
 
 const OVERLAY_STYLE: CSSProperties = {
   position: 'fixed',
-  zIndex: 70,
+  zIndex: 100,
   top: 56,
   insetInlineEnd: 16,
-  width: 380,
-  maxHeight: 'calc(100vh - 80px)',
+  width: 'min(420px, calc(100vw - 32px))',
+  maxHeight: 'min(680px, calc(100vh - 32px))',
   overflow: 'auto',
-  background: '#f7f8fa',
-  border: '1px solid #d0d4dd',
-  borderRadius: 10,
-  boxShadow: '0 8px 28px rgba(31, 33, 38, 0.18)',
-  padding: 14,
+  background: 'var(--dsw-specific-menu, #f7f8fa)',
+  backdropFilter: 'var(--dsw-menu-backdrop-filter, blur(20px))',
+  border: '1px solid var(--dsw-alias-border-l1, #d0d4dd)',
+  borderRadius: 12,
+  boxShadow: 'var(--dsw-elevation-prominent, 0 8px 28px rgba(31,33,38,0.18))',
+  padding: '12px 14px',
   boxSizing: 'border-box',
   fontSize: 13,
   lineHeight: 1.5,
-  color: '#1f2126',
+  color: 'var(--dsw-alias-label-primary, #1f2126)',
 }
 
 const OPEN_BUTTON_STYLE: CSSProperties = {
   display: 'inline-flex',
   alignItems: 'center',
-  gap: 4,
-  padding: '4px 10px',
+  gap: 5,
+  minHeight: 28,
+  padding: '3px 7px',
   borderRadius: 6,
-  border: '1px solid #d8dbe0',
-  background: '#fff',
-  color: 'inherit',
+  border: 0,
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-tertiary, #8a8f98)',
   fontSize: 12,
-  lineHeight: '18px',
+  lineHeight: '16px',
   cursor: 'pointer',
 }
 
 const SECTION_STYLE: CSSProperties = {
   marginTop: 12,
   paddingTop: 10,
-  borderTop: '1px solid #e4e7ec',
+  borderTop: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
 }
 
 const RECORD_ITEM_STYLE: CSSProperties = {
   display: 'block',
   width: '100%',
   textAlign: 'start',
-  padding: '6px 8px',
-  marginBottom: 4,
-  borderRadius: 6,
-  border: '1px solid #e4e7ec',
-  background: '#fff',
-  color: 'inherit',
+  padding: '8px 10px',
+  marginBottom: 6,
+  borderRadius: 8,
+  border: '0.5px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
   cursor: 'pointer',
   fontSize: 12,
+  boxShadow: 'var(--dsw-elevation-stroke, 0 1px 2px rgba(0,0,0,0.04))',
 }
 
 const ERROR_STYLE: CSSProperties = {
@@ -134,18 +137,18 @@ const ERROR_STYLE: CSSProperties = {
   gap: 6,
   padding: '6px 8px',
   borderRadius: 6,
-  border: '1px solid #d93025',
-  background: 'color-mix(in srgb, #d93025 8%, #fff)',
-  color: 'inherit',
+  border: '1px solid var(--dsw-alias-state-error-primary, #d93025)',
+  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 8%, transparent)',
+  color: 'var(--dsw-alias-state-error-primary, #d93025)',
   fontSize: 12,
 }
 
 const RETRY_BUTTON_STYLE: CSSProperties = {
   padding: '2px 8px',
   borderRadius: 5,
-  border: '1px solid #d8dbe0',
-  background: '#fff',
-  color: 'inherit',
+  border: '1px solid var(--dsw-alias-border-l2, #d8dbe0)',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
   cursor: 'pointer',
   fontSize: 12,
 }
@@ -155,9 +158,9 @@ const INPUT_STYLE: CSSProperties = {
   boxSizing: 'border-box',
   padding: '5px 8px',
   borderRadius: 6,
-  border: '1px solid #d0d4dd',
-  background: '#fff',
-  color: 'inherit',
+  border: '1px solid var(--dsw-alias-border-l2, #d0d4dd)',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
   fontSize: 12,
 }
 
@@ -167,8 +170,8 @@ const BODY_STYLE: CSSProperties = {
   margin: '6px 0',
   padding: 8,
   borderRadius: 6,
-  background: '#fff',
-  border: '1px solid #e4e7ec',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
+  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
   fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
   fontSize: 12,
 }
@@ -424,12 +427,14 @@ function RolesSection(props: {
   )
 }
 
-/** 工作台面板组件：头部按钮 + 可关闭浮层。 */
+/** 工作台面板组件：与编队同栏的触发按钮 + 浮层面板。 */
 export function CollaborationWorkbench(props: CollaborationPanelProps): ReactNode {
   const [open, setOpen] = useState(false)
   const [roleName, setRoleName] = useState('')
   const [roleDesc, setRoleDesc] = useState('')
   const [editingRoleId, setEditingRoleId] = useState<string | undefined>(undefined)
+  const state = useSyncExternalStore(props.store.subscribe, props.store.get)
+  const recordCount = state.records.length
 
   // 面板打开时更新资料（用户打开触发，无轮询定时器）。
   useEffect(() => {
@@ -444,15 +449,22 @@ export function CollaborationWorkbench(props: CollaborationPanelProps): ReactNod
         type="button"
         data-router-collab-open
         style={OPEN_BUTTON_STYLE}
-        onClick={() => { setOpen(true) }}
+        onClick={() => { setOpen(!open) }}
+        onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--dsw-alias-label-primary, #1f2126)' }}
+        onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--dsw-alias-label-tertiary, #8a8f98)' }}
       >
-        协作工作台
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="2" width="12" height="12" rx="2" />
+          <path d="M5 6h6M5 8.5h4M5 11h5" />
+        </svg>
+        <span>协作</span>
+        {recordCount > 0 ? <span style={{ fontVariantNumeric: 'tabular-nums', color: 'var(--dsw-alias-label-caption, #aab0b8)' }}>{recordCount}</span> : null}
       </button>
       {open ? (
         <div data-router-collab-panel role="dialog" aria-label="协作工作台" style={OVERLAY_STYLE}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <strong>协作工作台</strong>
-            <button type="button" data-router-collab-close aria-label="关闭协作工作台" style={RETRY_BUTTON_STYLE} onClick={() => { setOpen(false) }}>
+            <strong style={{ fontSize: 13, fontWeight: 500 }}>协作记录</strong>
+            <button type="button" data-router-collab-close aria-label="关闭" style={{ ...OPEN_BUTTON_STYLE, fontSize: 16, padding: '2px 6px' }} onClick={() => { setOpen(false) }}>
               ×
             </button>
           </div>

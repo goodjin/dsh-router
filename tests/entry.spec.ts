@@ -20,10 +20,10 @@ describe('浏览器半边 src/client/index.ts：协作工作台单一表面', ()
     expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace'])
   })
 
-  it('apply 注册协作工作台：头部 leading 一个按钮，旧表面一概不注册', () => {
+  it('apply 注册协作工作台：与编队同栏（session.header.actions），旧表面一概不注册', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
-    expect([...captured.injected].sort()).toEqual(['conversation.header.leading'].sort())
+    expect([...captured.injected].sort()).toEqual(['conversation.session.header.actions'].sort())
     // 旧表面已退役，不得再注入。
     expect(captured.injected, '旧标签条/浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
     expect(captured.injected).not.toContain('settings.section')
