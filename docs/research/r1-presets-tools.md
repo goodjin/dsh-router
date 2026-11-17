@@ -189,7 +189,7 @@ id **不是生成的，是声明的**：`config.id`（1.1）。注册表 `AgentP
 
 - 宿主服务：**`commands`**（`CommandRuntime`；包 `@deepseek-ai/dsh-commands`，服务名 `const name = "commands"`，`dsh-commands/lib/index.js:77`）。官方 README：`dsh-commands/README.zh.md:30-46`——`ctx.commands.register({ name, description, input?: { hint }, handler })`；处理器返回 `{ kind: 'success' | 'error', text? }`，直接作用于 agent、**不产生模型消息**；同名重复注册抛错（:46）；命令名必须小写 `[a-z0-9_-]`（:50）；`execute(agent, line, attachments, signal)` 分发、语法/名称不符返回 undefined（:62）；agent 作用域下注册的命令只遮蔽该 agent 的同名全局命令（:54）；取消语义（:68）。
 - 处理器 invocation 还带 `attachments`（`input.attachments` 声明后接受 composer 图片/文件，README.zh.md:58）与可选 `definitionId` 品牌标识（:32）。
-- **本地样本**（`/Users/good/github/dsh-plugins/dsh-command-commit-merge-push/src/index.ts`，全文 29 行）：
+- **本地样本**（`dsh-command-commit-merge-push/src/index.ts`，全文 29 行；**该插件已于 2026-11-17 删除**，下面引的是删除前的原文，只留作命令注册形态的样本）：
 
   - `src/index.ts:10-11`：`export const name = 'command-commit-merge-push'`；`export const inject = ['commands']`。
   - `src/index.ts:23-28`：`ctx.commands.register({ name: 'commit-merge-push', description: 'Commit, merge to main, and push', input: { hint: '[commit message]' }, handler: ({ rawInput }) => executeShip(rawInput ?? '') })`。
