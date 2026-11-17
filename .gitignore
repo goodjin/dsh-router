@@ -20,3 +20,4 @@ dist/*.d.ts.map
 .worktrees/
 # tsc 中间产物（只喂 tsdown，与 dist/client/ 同性质，不入库）
 dist/shared/
+docs/.DS_Store
