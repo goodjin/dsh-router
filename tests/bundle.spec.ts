@@ -146,9 +146,11 @@ describe('cordis.patch.yml 的装载行', () => {
     expect(after).not.toMatch(/role:/)
   })
 
-  it('delegation 组挂子代理行：control 裸行 + list-agents + spawn 行；禁死键', () => {
+  it('delegation 组挂子代理行：control 裸行 + spawn 行；list-agents 子路径行已删；禁死键', () => {
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
-    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-list-agents\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control\/list-agents'\n/)
+    // 2026-11-18：桌面 0.2.2-rc.1 已把 list_agents 并进主包，./list-agents 子路径被删——
+    // 单挂这一行会让整棵预设树回滚（桌面建不出 Router 会话）。行必须删除。
+    expect(PATCH_TEXT, 'list-agents 子路径行必须删除（0.2.2 并入主包）').not.toMatch(/tool-subagent-control\/list-agents/)
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s*config:\n\s*provider:\s*spawn\n\s*toolName:\s*subagent\n\s*maxDepth:\s*2\n/)
     for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
       expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
@@ -246,6 +248,7 @@ describe('lib/client.js 是页面能装的产物', () => {
         warn: () => {},
       }),
       effect: (callback: () => unknown) => { captured.effects += 1; return undefined },
+      sessions: { refreshProjections: async (_id: string) => {} },
       slots: {
         inject: (key: string, prepare: () => unknown) => {
           captured.injected.push(key)
@@ -285,7 +288,7 @@ describe('lib/client.js 是页面能装的产物', () => {
     const loaded = row.factory(require)
     expect(loaded.name, '产物必须导出与包名一致的 name').toBe('@goodjin2/dsh-router')
     expect(Array.isArray(loaded.inject), '产物必须导出 inject（页面真实服务名）').toBe(true)
-    expect(loaded.inject).toEqual(['slots', 'uiSession', 'uiWorkspace'])
+    expect(loaded.inject).toEqual(['slots', 'sessions', 'uiSession', 'uiWorkspace'])
     expect(typeof loaded.apply, '产物必须导出 apply').toBe('function')
     for (const specifier of require.required) {
       expect(['react', 'react-dom', 'react/jsx-runtime']).toContain(specifier)
@@ -294,17 +297,19 @@ describe('lib/client.js 是页面能装的产物', () => {
     const { ctx, captured } = recordingWindowCtx()
     expect(() => (loaded.apply as (ctx: unknown) => void)(ctx)).not.toThrow()
     expect([...captured.injected].sort()).toEqual([
-      'conversation.session.header.actions',
+      'conversation.view',
     ].sort())
-    expect(captured.injected, '旧浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
+    expect(captured.injected, '旧浮窗/设置段/头部按钮已退役，不得再注入').not.toContain('shell.overlay')
     expect(captured.injected).not.toContain('settings.section')
+    expect(captured.injected).not.toContain('conversation.session.header.actions')
     const ids = captured.registered.map((entry) => entry.id)
     expect(ids).toEqual([
-      'router-collaboration-workbench',
+      'router-collaboration',
     ])
     expect(ids, '产物不得再登记旧表面').not.toContain('router-workbench-tabs')
     expect(ids).not.toContain('router-settings')
-    expect(captured.infos.join(' ')).toMatch(/collaboration workbench/i)
+    expect(ids).not.toContain('router-collaboration-workbench')
+    expect(captured.infos.join(' ')).toMatch(/collaboration view/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
   })
 

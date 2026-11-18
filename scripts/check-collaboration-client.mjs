@@ -9,7 +9,7 @@
  *
  * 判据（与 cordis-client-runner / 容器脚本一致），且**正常路径与故障路径分开下结论**：
  *  - 正常路径（服务齐全）：apply 不得穿透，且必须注册预期 slotID
- *    `router-collaboration-workbench`——零表面在正常路径是 FAIL（不是 PASS）。
+ *    `router-collaboration`（会话标签行「协作」视图页）——零表面在正常路径是 FAIL（不是 PASS）。
  *  - 故障路径（三服务各自 getter 抛错 / 缺失 / 方法抛错，外加 logger/effect 抛错）：
  *    apply 一律不得穿透（真实宿主里 = fiber failed / entry did notactivate）。
  *    slots 故障下零表面可接受（明确，不混结论）；uiSession/uiWorkspace 故障下表面仍须注册。
@@ -30,8 +30,8 @@ const candidate = resolve(process.argv[2] ?? join(dirname(SELF), '..'))
 const clientRel = './lib/client.js'
 const clientPath = resolve(candidate, clientRel)
 
-/** 正常路径必须注册的表面 id（与 src/client/collaboration-panel.tsx 一致）。 */
-const EXPECTED_SLOT_ID = 'router-collaboration-workbench'
+/** 正常路径必须注册的表面 id（与 src/client/collaboration-view.tsx 一致）。 */
+const EXPECTED_SLOT_ID = 'router-collaboration'
 
 const reactStub = {
   createElement: () => null, Fragment: 'frag',

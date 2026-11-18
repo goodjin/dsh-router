@@ -123,8 +123,8 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
-              - id: tool-subagent-list-agents
-                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+              # 2026-11-18 删除 tool-subagent-list-agents 子路径行：桌面 0.2.2-rc.1 已把
+              # list_agents 并进主包、./list-agents 导出被删，单挂此行会让预设整树回滚。
               - id: tool-subagent
                 name: '@deepseek-ai/dsh-tool-subagent'
                 config:

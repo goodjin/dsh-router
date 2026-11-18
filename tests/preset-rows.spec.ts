@@ -94,7 +94,6 @@ export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   'tool-jobs': {},
   'delegation': {},
   'tool-subagent-control': {},
-  'tool-subagent-list-agents': {},
   'compaction': {},
   'compaction-basic': {},
   'command-compact': {},
