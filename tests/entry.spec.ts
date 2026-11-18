@@ -1,10 +1,10 @@
 /**
- * 入口接线测试（轻量协作版，计划 Task 3 起）。
+ * 入口接线测试（协作视图页版）。
  *
  * 宿主侧 src/entry.ts 已重写为薄根服务 + 机会式薄路由（见 tests/collaboration/host-routes.spec.ts
- * 用真实 Cordis Context 验证）。本文件断言浏览器半边工厂面：src/client/index.ts 注册**协作工作台**
- * 单一表面（头部「协作工作台」按钮 + 可关闭浮层），旧的工作台标签条/问题浮窗/返回按钮/设置段
- * 一概不再注册（oldsurfacesnotregistered）。ui-kit 形状断言保留。
+ * 用真实 Cordis Context 验证）。本文件断言浏览器半边工厂面：src/client/index.ts 注册**协作视图页**
+ * 单一表面（会话标签行 conversation.view 的「协作」页），旧的头部按钮浮层、工作台标签条、问题浮窗、
+ * 返回按钮、设置段一概不再注册（oldsurfacesnotregistered）。ui-kit 形状断言保留。
  */
 
 import { describe, expect, it } from 'vitest'
@@ -14,22 +14,23 @@ import { apply as clientApply, inject as clientInject, name as clientName } from
 import type { CollaborationStore } from '../src/client/collaboration-store.ts'
 import { hoverDarkenStyle, LightTooltip, LIGHT_TOOLTIP_STYLE, useHoverDarken } from '../src/client/ui-kit.tsx'
 
-describe('浏览器半边 src/client/index.ts：协作工作台单一表面', () => {
-  it('name 与包名一致；inject 按页面真实服务名声明（slots/uiSession/uiWorkspace）', () => {
+describe('浏览器半边 src/client/index.ts：协作视图页单一表面', () => {
+  it('name 与包名一致；inject 按页面真实服务名声明（slots/sessions/uiSession/uiWorkspace）', () => {
     expect(clientName).toBe('@goodjin2/dsh-router')
-    expect(clientInject).toEqual(['slots', 'uiSession', 'uiWorkspace'])
+    expect(clientInject).toEqual(['slots', 'sessions', 'uiSession', 'uiWorkspace'])
   })
 
-  it('apply 注册协作工作台：与编队同栏（session.header.actions），旧表面一概不注册', () => {
+  it('apply 注册协作视图页：会话标签行（conversation.view）的「协作」页，旧表面一概不注册', () => {
     const { ctx, captured } = recordingCtx()
     expect(() => clientApply(ctx)).not.toThrow()
-    expect([...captured.injected].sort()).toEqual(['conversation.session.header.actions'].sort())
+    expect([...captured.injected].sort()).toEqual(['conversation.view'].sort())
     // 旧表面已退役，不得再注入。
-    expect(captured.injected, '旧标签条/浮窗/设置段已退役，不得再注入').not.toContain('shell.overlay')
+    expect(captured.injected, '旧浮层/标签条/设置段已退役，不得再注入').not.toContain('shell.overlay')
     expect(captured.injected).not.toContain('settings.section')
-    const ids = captured.registered.map((entry) => entry.id)
-    expect(ids).toEqual(['router-collaboration-workbench'])
-    expect(new Set(ids).size).toBe(ids.length)
+    expect(captured.injected).not.toContain('conversation.session.header.actions')
+    expect(captured.registered).toEqual([
+      { name: 'conversation.view', id: 'router-collaboration', order: 50, label: '协作' },
+    ])
     for (const pair of captured.pairs) {
       expect(pair.names, `表面 ${pair.key} 的 registration name 应为槽位键本身`).toContain(pair.key)
     }
@@ -39,7 +40,7 @@ describe('浏览器半边 src/client/index.ts：协作工作台单一表面', ()
     const { ctx, captured } = recordingCtx()
     clientApply(ctx)
     expect(captured.infos).toHaveLength(1)
-    expect(captured.infos[0]).toMatch(/collaboration workbench/i)
+    expect(captured.infos[0]).toMatch(/collaboration view/i)
     expect(captured.effects).toBeGreaterThanOrEqual(1)
   })
 
@@ -72,28 +73,42 @@ describe('I3 客户端激活守卫 — 服务 getter/method 抛错不穿透 appl
     const { ctx, captured } = recordingCtx()
     defineThrowing(ctx as unknown as Record<string, unknown>, 'uiSession', 'uiSession')
     expect(() => clientApply(ctx)).not.toThrow()
-    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
+  })
+
+  it('sessions getter 抛错：apply 不穿透，表面仍注册（画布刷新降级 no-op）', () => {
+    const { ctx, captured } = recordingCtx()
+    defineThrowing(ctx as unknown as Record<string, unknown>, 'sessions', 'sessions')
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
+  })
+
+  it('sessions 缺失：表面仍注册（refreshProjection no-op，不臆造）', () => {
+    const { ctx, captured } = recordingCtx()
+    delete (ctx as { sessions?: unknown }).sessions
+    expect(() => clientApply(ctx)).not.toThrow()
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
   })
 
   it('uiWorkspace getter 抛错：apply 不穿透，表面仍注册（no-op 跳转）', () => {
     const { ctx, captured } = recordingCtx()
     defineThrowing(ctx as unknown as Record<string, unknown>, 'uiWorkspace', 'uiWorkspace')
     expect(() => clientApply(ctx)).not.toThrow()
-    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
   })
 
   it('uiSession 缺失：表面仍注册（根会话留空，不臆造）', () => {
     const { ctx, captured } = recordingCtx()
     delete (ctx as { uiSession?: unknown }).uiSession
     expect(() => clientApply(ctx)).not.toThrow()
-    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
   })
 
   it('uiWorkspace 缺失：表面仍注册（no-op 跳转 + 可见诊断）', () => {
     const { ctx, captured } = recordingCtx()
     delete (ctx as { uiWorkspace?: unknown }).uiWorkspace
     expect(() => clientApply(ctx)).not.toThrow()
-    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
   })
 
   it('logger.info/warn 抛错：不穿透（落 console 兜底）', () => {
@@ -108,7 +123,7 @@ describe('I3 客户端激活守卫 — 服务 getter/method 抛错不穿透 appl
       adapter: { current: { subscribe: () => { throw new Error('subscribe boom') }, getSnapshot: () => ({ key: 's1' }) } },
     }
     expect(() => clientApply(ctx)).not.toThrow()
-    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration-workbench'])
+    expect(captured.registered.map((r) => r.id)).toEqual(['router-collaboration'])
   })
 
   it('ctx.effect 抛错：不穿透，订阅立即清理（不留无限残留）', () => {
@@ -185,11 +200,15 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
   })
 
   it('浏览器面全部组件不再用原生 title 悬浮提示', () => {
-    // 只扫**当前存活**的浏览器面文件：ui-kit 基线 + 新协作面板。旧
-    // back-button/question-cards/settings/workbench-tabs 已随旧工作台退役，不再扫描。
+    // 只扫**当前存活**的浏览器面文件：ui-kit 基线 + 协作视图页各组件。旧
+    // collaboration-panel/浮窗/设置段已随弹出卡片退役，不再扫描。
     const files = [
       'ui-kit.tsx',
-      'collaboration-panel.tsx',
+      'collaboration-view.tsx',
+      'task-board.tsx',
+      'session-canvas.tsx',
+      'roles-section.tsx',
+      'record-detail.tsx',
     ]
     for (const file of files) {
       const source = readFileSync(fileURLToPath(new URL(`../src/client/${file}`, import.meta.url)), 'utf8')
@@ -203,7 +222,7 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
 function recordingCtx() {
   const captured = {
     injected: [] as string[],
-    registered: [] as Array<{ name: string; id?: string; order?: number }>,
+    registered: [] as Array<{ name: string; id?: string; order?: number; label?: unknown }>,
     pairs: [] as Array<{ key: string; names: string[] }>,
     effects: 0,
     infos: [] as string[],
@@ -217,8 +236,8 @@ function recordingCtx() {
       captured.pairs.push({ key, names: captured.registered.slice(before).map((entry) => entry.name) })
       return result
     },
-    register: (options: { name: string; id?: string; order?: number }, _component: unknown) => {
-      captured.registered.push({ name: options.name, id: options.id, order: options.order })
+    register: (options: { name: string; id?: string; order?: number; label?: unknown }, _component: unknown) => {
+      captured.registered.push({ name: options.name, id: options.id, order: options.order, label: options.label })
       return options
     },
   }
@@ -229,6 +248,7 @@ function recordingCtx() {
     }),
     effect: (callback: () => unknown) => { captured.effects += 1; return callback() },
     slots,
+    sessions: { refreshProjections: async (_id: string) => {} },
     uiSession: {
       adapter: {
         current: {

@@ -1,38 +1,38 @@
 /**
- * DSH Router — 浏览器半边工厂（轻量协作版，计划 Task 3 起）。
+ * DSH Router — 浏览器半边工厂（协作视图页版）。
  *
  * 页面把 exports["./client"]（lib/client.js，tsdown 产物）当普通脚本加载，
  * 本文件编译进 `window.__ModuleLoader__.load({ id, factory })` 的 factory：
  * factory 返回 { name, inject, apply }，页面在物化时调 apply。
  *
- * Task 3 起浏览器半边是**协作工作台**：头部一个按钮「协作工作台」开合可关闭浮层，
- * 集中展示任务资料/记录详情/会话跳转/角色模板编辑。旧的工作台标签条、问题浮窗、
- * 返回按钮、设置段一概不再注册（oldsurfacesnotregistered；旧模块文件保留待 Task 4
- * 退役）。工作台经同源薄 HTTP（/router/collaboration/*）取数，DSH 仍负责通信与执行。
+ * 浏览器半边是**协作视图页**：会话标签行（conversation.view）的「协作」页，
+ * 与官方统计页同款挂法——整页显示在会话界面里，取代旧「头部按钮 + 弹出卡片」。
+ * 工作台经同源薄 HTTP（/router/collaboration/*）取数，DSH 仍负责通信与执行。
  *
- * inject 声明页面真实服务名：slots（表面座位）、uiSession（当前会话——根会话默认值）、
- * uiWorkspace（openSession 会话跳转）。组件绝不收 ctx：apply 把服务组装成业务面，
- * 经 registration 的 inject 工厂下发。所有服务可选、缺失即降级，不炸整条 entry。
+ * inject 声明页面真实服务名：slots（表面座位）、sessions（子会话目录按需加载）、
+ * uiSession（当前会话——根会话默认值）、uiWorkspace（openSession 会话跳转）。
+ * 组件绝不收 ctx：apply 把服务组装成业务面，经 registration 的 inject 工厂下发。
+ * 所有服务可选、缺失即降级，不炸整条 entry。
  */
 
 import { createCollaborationApi } from './collaboration-api.ts'
-import { registerCollaborationPanel } from './collaboration-panel.tsx'
 import type { CollaborationStore } from './collaboration-store.ts'
 import { startCollaborationStore } from './collaboration-store.ts'
+import { registerCollaborationView } from './collaboration-view.tsx'
 
 /** Loader 行与诊断里看到的插件名；与 cordis.patch.yml 的裸包名行一致。 */
 export const name = '@goodjin2/dsh-router'
 
 /**
- * 依赖的页面服务（确切服务名）。工作台只需 slots/uiSession/uiWorkspace；
- * 旧的 workspaces 列表映射随旧标签条退役，不再声明。
+ * 依赖的页面服务（确切服务名）。视图页需要 slots/sessions/uiSession/uiWorkspace；
+ * sessions 用于按需加载子会话目录（画布父子树），缺失时画布降级为无子层。
  */
-export const inject = ['slots', 'uiSession', 'uiWorkspace'] as const
+export const inject = ['slots', 'sessions', 'uiSession', 'uiWorkspace'] as const
 
 /** slots 服务的最小面（结构化；真实 face 由页面提供）。 */
 export interface SlotsHost {
   inject(key: string, prepare: () => unknown): unknown
-  register(options: { name: string; id?: string; order?: number }, component: unknown): unknown
+  register(options: { name: string; id?: string; order?: number; label?: string | (() => string) }, component: unknown): unknown
 }
 
 /** apply 收到的 ctx 的最小面（全部可选：缺失时降级，不抛）。 */
@@ -40,6 +40,7 @@ export interface PluginContext {
   logger?(name: string): { info(message: string): void; warn(message: string): void }
   effect?(callback: () => unknown): unknown
   slots?: SlotsHost
+  sessions?: { refreshProjections?(sessionId: string): unknown }
   uiSession?: {
     adapter?: {
       current?: {
@@ -113,6 +114,35 @@ function makeUiWorkspace(safeCtx: PluginContext, log: ReturnType<typeof makeLogg
     }
   }
   return { openSession: () => { log.warn('uiWorkspace unavailable: openSession skipped') } }
+}
+
+/**
+ * sessions.refreshProjections：守卫读取 + 调用；不可用 → no-op（画布降级为无子层）。
+ * 诊断只警告一次（每次画布节点请求都会走这里，逐次刷屏没意义）；调用返回的 Promise 就地兜底。
+ */
+function makeRefreshProjection(safeCtx: PluginContext, log: ReturnType<typeof makeLogger>): (sessionId: string) => void {
+  const sessions = safeGet(() => safeCtx.sessions)
+  const refresh = sessions === undefined ? undefined : safeGet(() => (sessions as { refreshProjections?: unknown }).refreshProjections)
+  if (typeof refresh !== 'function') {
+    let warned = false
+    return () => {
+      if (warned) return
+      warned = true
+      log.warn('sessions.refreshProjections unavailable — canvas catalogs degrade to loaded projections only')
+    }
+  }
+  return (sessionId: string) => {
+    try {
+      const result = (refresh as (id: string) => unknown).call(sessions, sessionId)
+      if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+        ;(result as Promise<void>).catch((error: unknown) => {
+          log.warn(`sessions.refreshProjections failed for ${sessionId}: ${errorMessageOf(error)}`)
+        })
+      }
+    } catch (error) {
+      log.warn(`sessions.refreshProjections threw for ${sessionId}: ${errorMessageOf(error)}`)
+    }
+  }
 }
 
 /** 从 uiSession binding source 读当前主视图会话 id（根会话默认值来源）；全程守卫，抛错按无会话。 */
@@ -199,10 +229,10 @@ function subscribeCurrentSession(safeCtx: PluginContext, store: CollaborationSto
 }
 
 /**
- * 组装依赖并注册协作工作台。**全体最后兜底**：任何意外都不穿透 apply——
+ * 组装依赖并注册协作视图页。**全体最后兜底**：任何意外都不穿透 apply——
  * 真实宿主里 apply 抛错 = fiber 标记 failed、web boot 报 entry did not activate、整行功能消失。
  * 逐块守卫：slots 不可用 → 不挂表面；uiSession 不可用 → 根会话留空、表面仍注册；
- * uiWorkspace 不可用 → no-op 跳转 + 可见诊断、表面仍注册。
+ * uiWorkspace 不可用 → no-op 跳转 + 可见诊断、表面仍注册；sessions 不可用 → 画布降级、表面仍注册。
  */
 export function apply(ctx?: PluginContext): void {
   try {
@@ -220,7 +250,7 @@ export function apply(ctx?: PluginContext): void {
 function applyWorkbench(ctx?: PluginContext): void {
   const safeCtx: PluginContext = ctx ?? {}
   const log = makeLogger(safeCtx)
-  log.info('Router client loaded — collaboration workbench')
+  log.info('Router client loaded — collaboration view')
 
   // slots 守卫读取：不可用（缺失/抛错/方法非函数）则警告、不注册表面、不抛。
   const slots = safeGet(() => safeCtx.slots)
@@ -232,6 +262,7 @@ function applyWorkbench(ctx?: PluginContext): void {
   }
 
   const uiWorkspace = makeUiWorkspace(safeCtx, log)
+  const refreshProjection = makeRefreshProjection(safeCtx, log)
 
   // 工作台 store：经同源薄 API 取数；失败可见、不冒充空。诊断接 logger.warn。
   const store: CollaborationStore = startCollaborationStore({
@@ -242,10 +273,10 @@ function applyWorkbench(ctx?: PluginContext): void {
   // 当前会话 → store（根会话默认值）；订阅清理经 ctx.effect，绑不上立即清理。
   subscribeCurrentSession(safeCtx, store, log)
 
-  // 头部按钮「协作工作台」+ 可关闭浮层（取代旧标签条/浮窗/设置段/返回按钮）。
+  // 会话标签行的「协作」视图页（与官方统计页同款挂法，取代旧头部按钮 + 弹出卡片）。
   try {
-    registerCollaborationPanel(slots!, { store, uiWorkspace })
+    registerCollaborationView(slots!, { store, uiWorkspace, refreshProjection })
   } catch (error) {
-    log.warn(`collaboration panel failed to register: ${errorMessageOf(error)}`)
+    log.warn(`collaboration view failed to register: ${errorMessageOf(error)}`)
   }
 }
