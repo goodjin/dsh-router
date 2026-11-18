@@ -111,3 +111,76 @@ describe('Config order registration — context row order is honored, not forced
     expect(entries[0]!.order).toBe(100)
   })
 })
+
+describe('buildCollaborationContext — 角色清单注入', () => {
+  it('提供角色：渲染名称与职责说明，并给出用法与工具指引', () => {
+    const out = buildCollaborationContext({
+      sessionId: 'sid', dataDir: '/data/plugin',
+      roles: [
+        { name: '主管', description: '拆解任务并派发汇总' },
+        { name: '执行者', description: '' },
+      ],
+    })
+    expect(out).toContain('主管')
+    expect(out).toContain('拆解任务并派发汇总')
+    expect(out).toContain('执行者')
+    expect(out).toContain('router_role_list')
+    expect(out).toContain('初始指令')
+  })
+
+  it('空角色库：显示暂无并指引用户/模型新建', () => {
+    const out = buildCollaborationContext({ sessionId: 'sid', dataDir: '/data/plugin', roles: [] })
+    expect(out).toContain('暂无角色模板')
+    expect(out).toContain('router_role_save')
+  })
+
+  it('未提供（undefined，尚未加载）：显示暂不可用并指向查询工具', () => {
+    const out = buildCollaborationContext({ sessionId: 'sid', dataDir: '/data/plugin' })
+    expect(out).toContain('暂不可用')
+    expect(out).toContain('router_role_list')
+  })
+})
+
+describe('context row apply — 角色清单缓存与后台刷新', () => {
+  interface CapturedEntry { name: string; order: number; text(assembly?: unknown): string }
+
+  function registerRow(face: { dataDir: string; roles: { list(): Promise<Array<{ name: string; description: string }>> } }, config?: Record<string, unknown>): { entry: CapturedEntry; dispose: () => void } {
+    let captured: CapturedEntry | undefined
+    const dispose = contextApply(
+      { systemPrompt: { context: (e: CapturedEntry) => { captured = e } }, routerCollaboration: face as never },
+      { order: 100, ...config } as never,
+    )
+    return { get entry() { return captured! }, dispose }
+  }
+
+  async function flush(): Promise<void> {
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+
+  it('初始未加载显示暂不可用；后台加载完成后 text() 带上角色清单', async () => {
+    let current = [{ name: '主管', description: '拆解' }]
+    const row = registerRow({ dataDir: '/tmp/roles-row', roles: { list: async () => current } }, { rolesTtlMs: 0 })
+    // 初始：后台加载已 kicked，但本轮 text() 仍用未加载缓存。
+    expect(row.entry.text({ agent: { id: 'sid' } })).toContain('暂不可用')
+    await flush()
+    expect(row.entry.text({ agent: { id: 'sid' } })).toContain('主管')
+    // TTL=0：每次 text() 都 kick 后台刷新。注意在途刷新会吸收旧数据并刷新时间戳——
+    // 先让上一轮在途完成，再改数据、再触发新刷新（与生产 30s 窗口的自愈语义一致）。
+    current = [{ name: '评审员', description: '把关' }]
+    await flush()
+    expect(row.entry.text({ agent: { id: 'sid' } })).toContain('主管') // 新刷新在途，本轮仍渲染旧缓存
+    await flush()
+    expect(row.entry.text({ agent: { id: 'sid' } })).toContain('评审员')
+    row.dispose()
+  })
+
+  it('roles.list 抛错：text() 降级不抛，显示暂不可用', async () => {
+    const row = registerRow({ dataDir: '/tmp/roles-row', roles: { list: async () => { throw new Error('boom') } } }, { rolesTtlMs: 0 })
+    await flush()
+    expect(() => row.entry.text({ agent: { id: 'sid' } })).not.toThrow()
+    expect(row.entry.text({ agent: { id: 'sid' } })).toContain('暂不可用')
+    row.dispose()
+  })
+})

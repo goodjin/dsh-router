@@ -167,8 +167,21 @@ function buildCollaborationContext(input) {
 		"如果你拿不到 rootSessionId，请向上级会话询问，不要自行推断或猜测。",
 		"",
 		"可用的协作工具（共 " + String(COLLABORATION_TOOL_NAMES.length) + " 个）：" + toolList,
-		"记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。"
+		"记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。",
+		"",
+		...renderRoles(input.roles)
 	].join("\n");
+}
+/** 角色清单段：注入名称与职责说明 + 用法指引；缺失/为空各自如实说明并指向工具。 */
+function renderRoles(roles) {
+	const header = "角色模板（专业类型）：派子会话时，把选中角色的职责说明连同任务要求一起写进给子会话的初始指令。";
+	if (roles === void 0) return [header, "角色清单暂不可用（尚未加载完成）：用 router_role_list 查询最新。"];
+	if (roles.length === 0) return [header, "暂无角色模板：用 router_role_save 新建，或在协作页角色区创建。"];
+	return [
+		header,
+		...roles.map((role) => `- ${role.name}：${role.description === "" ? "（无职责说明）" : role.description}`),
+		"最新清单与详情用 router_role_list / router_role_read 查询；router_role_save 可新增或修改。"
+	];
 }
 
 //#endregion
@@ -176,7 +189,10 @@ function buildCollaborationContext(input) {
 /** 本入口的插件名（诊断显示用）。 */
 const name = "router-context";
 const inject = ["systemPrompt", "routerCollaboration"];
-const Config = Schema.object({ order: Schema.number().default(100) });
+const Config = Schema.object({
+	order: Schema.number().default(100),
+	rolesTtlMs: Schema.number().default(3e4)
+});
 /** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
 function currentSessionId(assembly) {
 	if (typeof assembly !== "object" || assembly === null) return void 0;
@@ -195,16 +211,47 @@ function diagnosticText(dataDir) {
 /** 注册协作上下文；返回注销器交给宿主 effect 生命周期。 */
 function apply(ctx, config) {
 	const order = typeof config.order === "number" && Number.isFinite(config.order) ? config.order : 100;
+	const ttlMs = typeof config.rolesTtlMs === "number" && Number.isFinite(config.rolesTtlMs) && config.rolesTtlMs >= 0 ? config.rolesTtlMs : 3e4;
 	const dataDir = ctx.routerCollaboration.dataDir;
+	const cache = {
+		value: void 0,
+		at: -Infinity,
+		loading: false
+	};
+	const refresh = async () => {
+		if (cache.loading) return;
+		cache.loading = true;
+		try {
+			const list = ctx.routerCollaboration.roles?.list;
+			if (typeof list !== "function") {
+				cache.at = Date.now();
+				return;
+			}
+			cache.value = await list.call(ctx.routerCollaboration.roles);
+			cache.at = Date.now();
+		} catch {
+			cache.at = Date.now();
+		} finally {
+			cache.loading = false;
+		}
+	};
+	const kickIfStale = () => {
+		if (cache.loading) return;
+		if (Date.now() - cache.at < ttlMs) return;
+		refresh();
+	};
+	kickIfStale();
 	const dispose = ctx.systemPrompt.context({
 		name: "router-collaboration",
 		order,
 		text: (assembly) => {
+			kickIfStale();
 			const sessionId = currentSessionId(assembly);
 			if (sessionId === void 0) return diagnosticText(dataDir);
 			return buildCollaborationContext({
 				sessionId,
-				dataDir
+				dataDir,
+				roles: cache.value
 			});
 		}
 	});

@@ -21,6 +21,11 @@ export interface CollaborationContextInput {
   sessionId: string
   /** 插件数据根，内部拼一次 collaboration 子目录。 */
   dataDir: string
+  /**
+   * 角色模板清单（注入给模型挑选）：undefined = 尚未加载（提示用工具自查）；
+   * 空数组 = 库里没有角色（指引新建）。纯函数不取数，由调用方喂入。
+   */
+  roles?: ReadonlyArray<{ name: string; description: string }>
 }
 
 /** 非空字符串校验（坏入参直接拒绝，不产出误导文本）。 */
@@ -56,5 +61,23 @@ export function buildCollaborationContext(input: CollaborationContextInput): str
     '',
     '可用的协作工具（共 ' + String(COLLABORATION_TOOL_NAMES.length) + ' 个）：' + toolList,
     '记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。',
+    '',
+    ...renderRoles(input.roles),
   ].join('\n')
+}
+
+/** 角色清单段：注入名称与职责说明 + 用法指引；缺失/为空各自如实说明并指向工具。 */
+function renderRoles(roles: ReadonlyArray<{ name: string; description: string }> | undefined): string[] {
+  const header = '角色模板（专业类型）：派子会话时，把选中角色的职责说明连同任务要求一起写进给子会话的初始指令。'
+  if (roles === undefined) {
+    return [header, '角色清单暂不可用（尚未加载完成）：用 router_role_list 查询最新。']
+  }
+  if (roles.length === 0) {
+    return [header, '暂无角色模板：用 router_role_save 新建，或在协作页角色区创建。']
+  }
+  return [
+    header,
+    ...roles.map((role) => `- ${role.name}：${role.description === '' ? '（无职责说明）' : role.description}`),
+    '最新清单与详情用 router_role_list / router_role_read 查询；router_role_save 可新增或修改。',
+  ]
 }

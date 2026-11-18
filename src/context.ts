@@ -22,9 +22,10 @@ export const name = 'router-context'
 
 export const inject = ['systemPrompt', 'routerCollaboration'] as const
 
-/** 行配置：上下文段在 runtime context 里的排序。 */
+/** 行配置：上下文段在 runtime context 里的排序 + 角色清单缓存刷新间隔。 */
 export interface RouterContextConfig {
   order?: number
+  rolesTtlMs?: number
 }
 
 export const Config = Schema.object({
@@ -32,6 +33,9 @@ export const Config = Schema.object({
   // （volatile 会把值包成 { get(), [write]() } 引用对象，导致 typeof number 检查
   // 永远失败、order 被回退到默认 100）。
   order: Schema.number().default(100),
+  // 角色清单缓存的刷新间隔（毫秒）：text() 是同步回调，不能 await 异步 list()——
+  // 采用缓存 + 过期后台刷新；0 表示每次组装都 kick 一次刷新（测试用）。
+  rolesTtlMs: Schema.number().default(30_000),
 })
 
 /** 官方 AssembleContext 的最小面：dsh-agent 注入当前 agent（含公开只读 id）。 */
@@ -51,6 +55,8 @@ interface SystemPromptFace {
 
 interface RouterCollaborationFace {
   dataDir: string
+  /** 角色模板存储（共享单实例）；缺席或不可调用时角色段降级为「暂不可用」。 */
+  roles?: { list(): Promise<Array<{ name: string; description: string }>> }
 }
 
 /** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
@@ -72,14 +78,52 @@ function diagnosticText(dataDir: string): string {
 /** 注册协作上下文；返回注销器交给宿主 effect 生命周期。 */
 export function apply(ctx: ContextHost, config: RouterContextConfig): () => void {
   const order = typeof config.order === 'number' && Number.isFinite(config.order) ? config.order : 100
+  const ttlMs = typeof config.rolesTtlMs === 'number' && Number.isFinite(config.rolesTtlMs) && config.rolesTtlMs >= 0
+    ? config.rolesTtlMs
+    : 30_000
   const dataDir = ctx.routerCollaboration.dataDir
+
+  // 角色清单缓存：text() 是同步回调，不能 await list()——过期即后台刷新（fire-and-forget
+  // 就地兜底，绝不留 unhandled rejection），本轮先用缓存值渲染。
+  const cache: {
+    value: ReadonlyArray<{ name: string; description: string }> | undefined
+    at: number
+    loading: boolean
+  } = { value: undefined, at: -Infinity, loading: false }
+  const refresh = async (): Promise<void> => {
+    if (cache.loading) return
+    cache.loading = true
+    try {
+      const list = ctx.routerCollaboration.roles?.list
+      if (typeof list !== 'function') {
+        // 角色存储缺席：保持 undefined（「暂不可用」），但仍记录时间避免每次组装空转。
+        cache.at = Date.now()
+        return
+      }
+      cache.value = await list.call(ctx.routerCollaboration.roles)
+      cache.at = Date.now()
+    } catch {
+      // 读取失败：保留上一份缓存（没有则维持「暂不可用」），退避到当前时刻。
+      cache.at = Date.now()
+    } finally {
+      cache.loading = false
+    }
+  }
+  const kickIfStale = (): void => {
+    if (cache.loading) return
+    if (Date.now() - cache.at < ttlMs) return
+    void refresh()
+  }
+  kickIfStale()
+
   const dispose = ctx.systemPrompt.context({
     name: 'router-collaboration',
     order,
     text: (assembly: unknown) => {
+      kickIfStale()
       const sessionId = currentSessionId(assembly)
       if (sessionId === undefined) return diagnosticText(dataDir)
-      return buildCollaborationContext({ sessionId, dataDir })
+      return buildCollaborationContext({ sessionId, dataDir, roles: cache.value })
     },
   })
   return () => {
