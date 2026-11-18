@@ -23,6 +23,8 @@ export interface SessionNode {
   sessionId: string
   label: string
   status: SessionRunStatus
+  /** 成员角色名（分工记录关联会话的标签；派发工具登记的即角色名）。 */
+  roleLabel: string | undefined
   /** 能对上该任务分工记录的成员带工作标签（模型所填）。 */
   workLabel: WorkLabel | undefined
   /** 是否被该任务记录关联。 */
@@ -42,8 +44,16 @@ export interface SessionTreeInput {
   statusOf(sessionId: string): boolean | undefined
   /** 备选标题（会话摘要里的标题），目录条目无 label 时用。 */
   titleOf?(sessionId: string): string | undefined
-  /** 该任务记录关联的会话 → 分工工作标签（键存在即关联；值 undefined 表示无标签）。 */
-  linked: Map<string, WorkLabel | undefined>
+  /** 该任务记录关联的会话 → 角色名/工作标签（键存在即关联）。 */
+  linked: Map<string, SessionLinkage>
+}
+
+/** 会话与任务的关联信息（来自记录里的 sessions 与分工）。 */
+export interface SessionLinkage {
+  /** 角色名：分工记录关联会话的 label（router_dispatch 登记的即角色名）。 */
+  roleLabel?: string
+  /** 分工工作标签（模型所填四态）。 */
+  workLabel?: WorkLabel
 }
 
 /** 构建结果：根树 + 树外孤儿。 */
@@ -67,7 +77,7 @@ export function buildSessionTree(input: SessionTreeInput): SessionTreeResult {
 
   const build = (id: string, catalogLabel: string | undefined, depth: number): SessionNode => {
     built.add(id)
-    const linkedEntry = input.linked.get(id)
+    const linkage = input.linked.get(id)
     const children: SessionNode[] = []
     if (depth < maxDepth) {
       for (const entry of input.childrenOf(id)) {
@@ -83,7 +93,8 @@ export function buildSessionTree(input: SessionTreeInput): SessionTreeResult {
         ? input.rootLabel
         : labelOf(id, catalogLabel),
       status: running === true ? 'running' : running === false ? 'inactive' : 'unknown',
-      workLabel: linkedEntry,
+      roleLabel: linkage?.roleLabel,
+      workLabel: linkage?.workLabel,
       linked: input.linked.has(id),
       children,
     }
@@ -122,14 +133,15 @@ export function buildSessionTree(input: SessionTreeInput): SessionTreeResult {
 
   // 孤儿：被关联但不在（深度内）树中的会话——单独列出，不臆造父边。
   const orphans: SessionNode[] = []
-  for (const [id, workLabel] of input.linked) {
+  for (const [id, linkage] of input.linked) {
     if (built.has(id)) continue
     const running = input.statusOf(id)
     orphans.push({
       sessionId: id,
-      label: labelOf(id, undefined),
+      label: linkage?.roleLabel ?? labelOf(id, undefined),
       status: running === true ? 'running' : running === false ? 'inactive' : 'unknown',
-      workLabel,
+      roleLabel: linkage?.roleLabel,
+      workLabel: linkage?.workLabel,
       linked: true,
       children: [],
     })
@@ -154,16 +166,32 @@ export interface TreeLayout {
   height: number
 }
 
-/** 组织架构图式布局：x=深度×columnWidth，y=行×rowHeight。 */
-export function layoutTree(root: SessionNode, options?: { columnWidth?: number; rowHeight?: number }): TreeLayout {
+/* ---- 通用键树布局（任务画布复用同一算法） ---- */
+
+/** 只认键与子节点的最小树形（TaskGraphNode 等结构满足）。 */
+export interface KeyTreeLayoutNode {
+  key: string
+  children: KeyTreeLayoutNode[]
+}
+
+/** 通用布局结果：node 为原对象引用（调用方自行取业务字段）。 */
+export interface KeyTreeLayout {
+  nodes: Array<{ node: KeyTreeLayoutNode; depth: number; x: number; y: number }>
+  edges: Array<{ from: string; to: string; x1: number; y1: number; x2: number; y2: number }>
+  width: number
+  height: number
+}
+
+/** 组织架构图式布局（通用）：x=深度×columnWidth，y=行×rowHeight。 */
+export function layoutKeyTree(root: KeyTreeLayoutNode, options?: { columnWidth?: number; rowHeight?: number }): KeyTreeLayout {
   const columnWidth = options?.columnWidth ?? 220
   const rowHeight = options?.rowHeight ?? 92
-  const nodes: PositionedNode[] = []
-  const edges: TreeLayout['edges'] = []
+  const nodes: KeyTreeLayout['nodes'] = []
+  const edges: KeyTreeLayout['edges'] = []
   let nextRow = 0
   let maxDepth = 0
 
-  const place = (node: SessionNode, depth: number): number => {
+  const place = (node: KeyTreeLayoutNode, depth: number): number => {
     maxDepth = Math.max(maxDepth, depth)
     if (node.children.length === 0) {
       const y = nextRow * rowHeight
@@ -175,12 +203,32 @@ export function layoutTree(root: SessionNode, options?: { columnWidth?: number; 
     const y = (childYs[0]! + childYs[childYs.length - 1]!) / 2
     nodes.push({ node, depth, x: depth * columnWidth, y })
     for (const child of node.children) {
-      const childNode = nodes.find((n) => n.node === child)!
-      edges.push({ from: node.sessionId, to: child.sessionId, x1: depth * columnWidth, y1: y, x2: childNode.x, y2: childNode.y })
+      const placed = nodes.find((n) => n.node === child)!
+      edges.push({ from: node.key, to: child.key, x1: depth * columnWidth, y1: y, x2: placed.x, y2: placed.y })
     }
     return y
   }
 
   place(root, 0)
   return { nodes, edges, width: (maxDepth + 1) * columnWidth, height: Math.max(nextRow, 1) * rowHeight }
+}
+
+/** 会话树布局：把 SessionNode 适配成键树走通用布局，再映射回原节点。 */
+export function layoutTree(root: SessionNode, options?: { columnWidth?: number; rowHeight?: number }): TreeLayout {
+  const adapt = (node: SessionNode): KeyTreeLayoutNode & { source: SessionNode } => ({
+    key: node.sessionId,
+    children: node.children.map(adapt),
+    source: node,
+  })
+  const adapted = adapt(root)
+  const generic = layoutKeyTree(adapted, options)
+  return {
+    nodes: generic.nodes.map((n) => {
+      const origin = n.node as KeyTreeLayoutNode & { source: SessionNode }
+      return { node: origin.source, depth: n.depth, x: n.x, y: n.y }
+    }),
+    edges: generic.edges,
+    width: generic.width,
+    height: generic.height,
+  }
 }

@@ -13,8 +13,7 @@
 import { useEffect, useRef, type CSSProperties, type ReactNode } from 'react'
 
 import { buildSessionTree, layoutTree } from './session-tree.ts'
-import type { SessionRunStatus } from './session-tree.ts'
-import type { WorkLabel } from '../collaboration/types.ts'
+import type { SessionLinkage, SessionRunStatus } from './session-tree.ts'
 
 const STATUS_TEXT: Record<SessionRunStatus, string> = {
   running: '运行中',
@@ -60,8 +59,8 @@ const CANVAS_STYLE: CSSProperties = {
 /** 画布入口属性：全部纯数据 + 回调，组件不做任何取数。 */
 export interface SessionCanvasProps {
   rootId: string | undefined
-  /** 该任务记录关联的会话 → 分工工作标签（键存在即关联）。 */
-  linked: Map<string, WorkLabel | undefined>
+  /** 该任务记录关联的会话 → 角色名/工作标签（键存在即关联）。 */
+  linked: Map<string, SessionLinkage>
   childrenOf(sessionId: string): Array<{ id: string; label?: string }>
   statusOf(sessionId: string): boolean | undefined
   titleOf(sessionId: string): string | undefined
@@ -142,11 +141,18 @@ export function SessionCanvas(props: SessionCanvasProps): ReactNode {
               <span aria-hidden style={{ width: 6, height: 6, borderRadius: 3, background: STATUS_COLOR[node.status], display: 'inline-block' }} />
               {STATUS_TEXT[node.status]}
             </span>
-            {node.workLabel !== undefined ? (
-              <span data-router-collab-node-worklabel={node.sessionId} style={{ display: 'inline-block', marginTop: 2, fontSize: 11, padding: '1px 5px', borderRadius: 4, background: '#eef1fb', color: '#3b4a9c' }}>
-                {node.workLabel}
-              </span>
-            ) : null}
+            <span style={{ display: 'flex', gap: 4, marginTop: 2, flexWrap: 'wrap' }}>
+              {node.roleLabel !== undefined ? (
+                <span data-router-collab-node-role={node.sessionId} style={{ display: 'inline-block', fontSize: 11, padding: '1px 5px', borderRadius: 4, background: '#e6f4ea', color: '#1e7e45' }}>
+                  {node.roleLabel}
+                </span>
+              ) : null}
+              {node.workLabel !== undefined ? (
+                <span data-router-collab-node-worklabel={node.sessionId} style={{ display: 'inline-block', fontSize: 11, padding: '1px 5px', borderRadius: 4, background: '#eef1fb', color: '#3b4a9c' }}>
+                  {node.workLabel}
+                </span>
+              ) : null}
+            </span>
           </button>
         ))}
       </div>
