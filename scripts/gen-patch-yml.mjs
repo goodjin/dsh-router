@@ -3,10 +3,11 @@
 //
 // 单一静态预设 dsh-router/Router：persona 的 complete 提示词来自 collaborationPrompt
 // 的**实际导出**（Node TS stripping 直接 import src/collaboration/prompt.ts，纯静态字符串，
-// 无类型/无副作用），不再正则解析旧 unifiedPrompt。其余为小型固定定义：七条协作工具行
-// （@goodjin2/dsh-router/tools，无 role 配置）+ DSH 原生执行/用户提问/项目指令/默认压缩/
-// 子代理控制。delegation 组沿用已双宿主验证过的隔离结构（tool-subagent-control 裸行 +
-// tool-subagent provider spawn/toolName subagent/maxDepth 2），不挂旧动态服务。
+// 无类型/无副作用），不再正则解析旧 unifiedPrompt。其余为小型固定定义：八条协作工具行
+// （@goodjin2/dsh-router/tools，含派发工具 router_dispatch）+ DSH 原生执行/用户提问/
+// 项目指令/默认压缩/子代理控制。delegation 组只挂 tool-subagent-control（控制与发现）；
+// 派发统一走 router_dispatch（经 subagents 服务内部选 spawn/fork），不挂原生 spawn
+// 工具——防绕过职责注入。
 //
 // 改过任何行之后必须跑双核查（两个宿主都要绿）：
 //   node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router
@@ -39,10 +40,10 @@ const yml = `# @goodjin2/dsh-router 的挂载配置（轻量协作版，计划 T
 #     RoleStore 单实例）。config 全部可缺省（缺省 DSH_HOME/router）。
 #   - 一条静态预设行 dsh-router/Router（@deepseek-ai/dsh-agent-preset）：
 #     · persona complete:true，prefix 即 collaborationPrompt 单一来源（生成脚本实际导入）；
-#     · tools 行 @goodjin2/dsh-router/tools 注册七条协作工具（无 role 配置/角色闸）；
+#     · tools 行 @goodjin2/dsh-router/tools 注册八条协作工具（含 router_dispatch；无 role 配置/角色闸）；
 #     · agent-instructions 项目指令、tool-bash/fs/fs-search/web/todo/jobs 原生执行、
 #       tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
-#       （tool-subagent-control 裸行 + tool-subagent provider spawn/toolName subagent/maxDepth 2）；
+#       （tool-subagent-control 裸行；派发走 router_dispatch，不挂原生 spawn 工具）；
 #     · 无旧 executor/supervisor/worker 别名、无 perrole 插件、无动态预设引擎。
 #
 # 改过任何行之后必须跑双核查（两个宿主都要绿）：
@@ -67,7 +68,7 @@ const yml = `# @goodjin2/dsh-router 的挂载配置（轻量协作版，计划 T
 ${personaBlock}
               complete: true
 
-          # 七条协作工具（记录 CRUD + 角色模板）；无 role 配置，角色闸已退役。
+          # 八条协作工具（派发 router_dispatch + 记录 CRUD + 角色模板）；无 role 配置，角色闸已退役。
           - id: tools
             name: '@goodjin2/dsh-router/tools'
           # 协作上下文行（官方 systemPrompt.context：当前会话 ID + 协作目录 + 工具清单）。
@@ -106,7 +107,12 @@ ${personaBlock}
           # 用户提问（宿主原生浮窗）。
           - id: ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
-          # 子代理控制（宿主原生）：控制与发现 + 一次性进程内子代理（spawn，maxDepth 2）。
+          # 子代理（宿主原生服务由 base 全局提供：subagents + spawn/fork 后端）。
+          # 控制与发现挂原生工具；派发走 router_dispatch（代码注入职责、内部选
+          # spawn/fork），不再挂原生 spawn 工具——防绕过职责注入。
+          # 2026-11-18 删 tool-subagent-list-agents 子路径行：桌面 0.2.2-rc.1 已把
+          # list_agents 并进主包、./list-agents 导出被删，单挂此行会让预设整树回滚。
+          # 2026-11-18 删 tool-subagent（provider spawn）行：派发统一走 router_dispatch。
           - id: delegation
             name: cordis:group
             group: true
@@ -115,14 +121,6 @@ ${personaBlock}
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
-              - id: tool-subagent-list-agents
-                name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
-              - id: tool-subagent
-                name: '@deepseek-ai/dsh-tool-subagent'
-                config:
-                  provider: spawn
-                  toolName: subagent
-                  maxDepth: 2
           # 默认压缩（宿主原生，非旧 @goodjin2/dsh-router/compaction）。
           - id: compaction
             name: cordis:group

@@ -61,13 +61,10 @@ export interface SavedRecord {
   path: string
 }
 
-/** 角色模板：仅为数据（编号、名称、职责说明），不注册 preset、不含运行时插件树。 */
+/** 角色模板：一个角色一个 md 文件——文件名 = 角色名、正文 = 职责说明。 */
 export interface RoleTemplate {
-  id: string
   name: string
   description: string
-  createdAt: number
-  updatedAt: number
 }
 
 /** 工作记录存储：模型主导读写，文件是唯一事实源，无全局索引/Markdown 副本。 */
@@ -78,11 +75,13 @@ export interface RecordStore {
   update(rootSessionId: string, taskId: string, recordId: string, patch: RecordPatch): Promise<SavedRecord>
 }
 
-/** 角色模板存储：用户与模型通过同一保存能力创建/修改。 */
+/** 角色模板存储：用户与模型通过同一保存能力创建/修改（按名 upsert）。 */
 export interface RoleStore {
   list(): Promise<RoleTemplate[]>
-  read(id: string): Promise<RoleTemplate>
-  save(input: { id?: string; name: string; description: string }): Promise<RoleTemplate>
+  read(name: string): Promise<RoleTemplate>
+  save(input: { name: string; description: string }): Promise<RoleTemplate>
+  /** 一次性把旧版 <uuid>.json 角色迁成 <name>.md；原 json 保留不删，坏文件跳过。 */
+  migrateLegacyJson(): Promise<void>
 }
 
 /**
@@ -134,9 +133,7 @@ export interface RecordStoreDeps {
   fs?: CollaborationFs
 }
 
-/** RoleStore 可注入依赖：时间、UUID 与文件系统，供单测固定。 */
+/** RoleStore 可注入依赖：文件系统（md 无时间戳/编号，供单测注入）。 */
 export interface RoleStoreDeps {
-  now?: () => number
-  uuid?: () => string
   fs?: CollaborationFs
 }

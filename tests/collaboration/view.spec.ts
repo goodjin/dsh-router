@@ -285,7 +285,7 @@ describe('view_task_selection — 多任务切换', () => {
 
 describe('role edit shared manual/model — 视图页保存与模型工具共享同一 RoleStore', () => {
   it('填表保存角色后出现在模板列表', async () => {
-    const saved: RoleTemplate = { id: '66666666-6666-4666-8666-666666666666', name: '测试工程师', description: '写测试', createdAt: 1, updatedAt: 1 }
+    const saved: RoleTemplate = { name: '测试工程师', description: '写测试' }
     let roles: RoleTemplate[] = []
     const api: CollaborationApi = {
       listRecords: async () => [],
@@ -348,7 +348,7 @@ describe('staleasyncresultsignored — 切换根后旧响应不落地', () => {
       listRecords: () => new Promise<WorkRecord[]>((resolve) => { resolveA = resolve }),
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => [],
-      saveRole: async (input) => ({ id: '77777777-7777-4777-8777-777777777777', name: input.name, description: input.description, createdAt: 1, updatedAt: 1 }),
+      saveRole: async (input) => ({ name: input.name, description: input.description }),
     }
     const store = startCollaborationStore({ api })
     store.setCurrentSession('root-A')

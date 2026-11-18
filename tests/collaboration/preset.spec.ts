@@ -95,9 +95,10 @@ describe('preset_one_entry — exactly one user-selectable Router preset', () =>
     }
   })
 
-  it('native subagent-control + subagent (provider spawn, toolName subagent, maxDepth 2)', () => {
+  it('delegation 组只挂控制工具；原生 spawn 工具行已删（派发走 router_dispatch）', () => {
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
-    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s*config:\n\s*provider:\s*spawn\n\s*toolName:\s*subagent\n\s*maxDepth:\s*2\n/)
+    expect(PATCH_TEXT, '原生 spawn 派发行必须删除（防绕过职责注入）').not.toMatch(/- id:\s*tool-subagent\n/)
+    expect(PATCH_TEXT).not.toMatch(/tool-subagent-control\/list-agents/)
   })
 
   it('native execution + user question + project instructions + default compaction present', () => {

@@ -145,11 +145,11 @@ describe('routes_reuse_store — UI 模板保存与模型工具共享同一 Role
     // 同一 RoleStore 的 list 读到同一条（与模型工具 router_role_list 共享）。
     const listed = await invoke('GET', COLLABORATION_ROLES_PATH)
     expect(listed.status).toBe(200)
-    const listBody = JSON.parse(listed.body) as Array<{ id: string; name: string }>
-    expect(listBody.map((r) => r.id)).toEqual([savedBody.id])
+    const listBody = JSON.parse(listed.body) as Array<{ name: string }>
+    expect(listBody.map((r) => r.name)).toEqual([savedBody.name])
     // 模型工具直接读同一 store 也看得到。
     const viaStore = await roles.list()
-    expect(viaStore.map((r) => r.id)).toEqual([savedBody.id])
+    expect(viaStore.map((r) => r.name)).toEqual([savedBody.name])
   })
 
   it('保存错误不返回 200：空 name 返回 400 {error:{code,message}}', async () => {
@@ -352,8 +352,8 @@ describe('POST body transport — 跨块多字节解码 + 1MiB 累计字节上�
   it('恰好 1MiB 的合法 JSON 允许；多 1 字节返回 413 BODY_TOO_LARGE', async () => {
     const dataDir = await freshDir()
     const { invoke } = harness({ records: createRecordStore(dataDir), roles: createRoleStore(dataDir) })
-    const overhead = Buffer.byteLength(JSON.stringify({ name: '', description: '' }), 'utf8')
-    const exactBody = JSON.stringify({ name: 'x'.repeat(LIMIT - overhead), description: '' })
+    const overhead = Buffer.byteLength(JSON.stringify({ name: 'x', description: '' }), 'utf8')
+    const exactBody = JSON.stringify({ name: 'x', description: 'y'.repeat(LIMIT - overhead) })
     expect(Buffer.byteLength(exactBody, 'utf8')).toBe(LIMIT)
     const ok = await invoke('POST', COLLABORATION_ROLES_PATH, exactBody)
     expect(ok.status).toBe(200)
@@ -369,8 +369,8 @@ describe('POST body transport — 跨块多字节解码 + 1MiB 累计字节上�
     const dataDir = await freshDir()
     const roles = createRoleStore(dataDir)
     const { invoke } = harness({ records: createRecordStore(dataDir), roles })
-    const overhead = Buffer.byteLength(JSON.stringify({ name: '', description: '' }), 'utf8')
-    const overBody = JSON.stringify({ name: 'x'.repeat(LIMIT - overhead + 1), description: '' })
+    const overhead = Buffer.byteLength(JSON.stringify({ name: 'x', description: '' }), 'utf8')
+    const overBody = JSON.stringify({ name: 'x', description: 'y'.repeat(LIMIT - overhead + 1) })
     const res = await invoke('POST', COLLABORATION_ROLES_PATH, overBody)
     expect(res.status).toBe(413)
     expect(await roles.list()).toHaveLength(0)

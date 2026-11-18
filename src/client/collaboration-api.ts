@@ -5,7 +5,7 @@
  *   listRecords(rootSessionId, query?) → WorkRecord[]
  *   readRecord(rootSessionId, taskId, recordId) → SavedRecord
  *   listRoles() → RoleTemplate[]
- *   saveRole({id?,name,description}) → RoleTemplate
+ *   saveRole({name,description}) → RoleTemplate（按名 upsert）
  *
  * 浏览器半边纪律：fetch 可注入（缺省 globalThis.fetch，同源会话登录传输沿用宿主既有
  * transport，不自建传输层）；失败**不**变成空数组——抛 CollaborationApiError 并保留
@@ -46,7 +46,7 @@ export interface CollaborationApi {
   listRecords(rootSessionId: string, query?: RecordQuery): Promise<WorkRecord[]>
   readRecord(rootSessionId: string, taskId: string, recordId: string): Promise<SavedRecord>
   listRoles(): Promise<RoleTemplate[]>
-  saveRole(input: { id?: string; name: string; description: string }): Promise<RoleTemplate>
+  saveRole(input: { name: string; description: string }): Promise<RoleTemplate>
 }
 
 /** 把响应体收成 JSON；解析失败给 null。 */
@@ -117,18 +117,14 @@ export function createCollaborationApi(deps: CollaborationApiDeps = {}): Collabo
       return body as RoleTemplate[]
     },
 
-    async saveRole(input: { id?: string; name: string; description: string }): Promise<RoleTemplate> {
-      // id 优先（编辑既有模板时先带定位键），与宿主读取顺序一致。
-      const payload: Record<string, unknown> = input.id !== undefined
-        ? { id: input.id, name: input.name, description: input.description }
-        : { name: input.name, description: input.description }
+    async saveRole(input: { name: string; description: string }): Promise<RoleTemplate> {
       const body = await request(COLLABORATION_API_ROLES_PATH, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ name: input.name, description: input.description }),
       })
       const role = body as RoleTemplate | null
-      if (role === null || typeof role !== 'object' || typeof role.id !== 'string') {
+      if (role === null || typeof role !== 'object' || typeof role.name !== 'string') {
         throw new CollaborationApiError('router: roles response missing role')
       }
       return role as RoleTemplate

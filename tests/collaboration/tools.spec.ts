@@ -110,13 +110,7 @@ function makeFakeStores(): {
     path: '/x/y.json',
   }
   const workRecord: WorkRecord = { ...savedRecord.record }
-  const roleTemplate = {
-    id: '22222222-2222-4222-8222-222222222222',
-    name: '编码',
-    description: '写代码',
-    createdAt: 1,
-    updatedAt: 1,
-  }
+  const roleTemplate = { name: '编码', description: '写代码' }
   const records: RecordStore = {
     create: rec('create', savedRecord),
     read: rec('read', savedRecord),
@@ -127,11 +121,13 @@ function makeFakeStores(): {
     list: role('list', [roleTemplate]),
     read: role('read', roleTemplate),
     save: role('save', roleTemplate),
+    migrateLegacyJson: async () => {},
   }
   return { records, roles, calls }
 }
 
 const TOOL_NAMES = [
+  'router_dispatch',
   'router_record_create',
   'router_record_read',
   'router_record_list',
@@ -144,10 +140,10 @@ const TOOL_NAMES = [
 /* ───────────────────────── 工具名与 schema ───────────────────────── */
 
 describe('buildCollaborationTools — names & schemas', () => {
-  const tools = buildCollaborationTools(makeFakeStores().records, makeFakeStores().roles)
+  const tools = buildCollaborationTools(makeFakeStores())
   const byName = new Map(tools.map((t) => [t.name, t]))
 
-  it('exposes exactly the seven fixed tool names in order', () => {
+  it('exposes exactly the eight fixed tool names in order', () => {
     expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES)
   })
 
@@ -225,14 +221,14 @@ describe('buildCollaborationTools — names & schemas', () => {
     matches(p, { rootSessionId: 'r', taskId: 't', recordId: 'rec', patch: { body: 'x', workLabel: '进行中' } })
   })
 
-  it('role tools schemas: role_save nested input required name/description; role_read required id', () => {
+  it('role tools schemas: role_save nested input required name/description; role_read required name', () => {
     const save = byName.get('router_role_save')!.parameters as JsonSchema
     expect(save.required).toEqual(['input'])
     const input = save.properties!.input as JsonSchema
     expect(input.required).toEqual(['name', 'description'])
-    matches(save, { input: { id: '22222222-2222-4222-8222-222222222222', name: '编码', description: '写代码' } })
+    matches(save, { input: { name: '编码', description: '写代码' } })
     const read = byName.get('router_role_read')!.parameters as JsonSchema
-    expect(read.required).toEqual(['id'])
+    expect(read.required).toEqual(['name'])
   })
 
   it('output schema describes real returned shape (record+path), not invented success flags', () => {
@@ -260,7 +256,7 @@ describe('buildCollaborationTools — names & schemas', () => {
 describe('buildCollaborationTools — execute forwards to store', () => {
   function find(name: string) {
     const { records, roles, calls } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     return { tool: tools.find((t) => t.name === name)!, calls }
   }
 
@@ -297,10 +293,10 @@ describe('buildCollaborationTools — execute forwards to store', () => {
     expect(calls).toEqual([{ method: 'roles.list', args: [] }])
   })
 
-  it('router_role_read forwards (id) to roles.read', async () => {
+  it('router_role_read forwards (name) to roles.read', async () => {
     const { tool, calls } = find('router_role_read')
-    await tool.execute({ id: 'rid' }, {})
-    expect(calls).toEqual([{ method: 'roles.read', args: ['rid'] }])
+    await tool.execute({ name: '主管' }, {})
+    expect(calls).toEqual([{ method: 'roles.read', args: ['主管'] }])
   })
 
   it('router_role_save forwards (input) to roles.save', async () => {
@@ -316,10 +312,11 @@ describe('buildCollaborationTools — execute forwards to store', () => {
     expect(calls).toHaveLength(1)
   })
 
-  it('no subagent/communication surface: dependency surface is only (records, roles)', () => {
+  it('subagents 缺席时其余七条照常注册（派发工具在调用时才明确报错）', () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    expect(tools).toHaveLength(7)
+    const tools = buildCollaborationTools({ records, roles })
+    expect(tools).toHaveLength(8)
+    expect(tools.map((t) => t.name)).toContain('router_dispatch')
   })
 })
 
@@ -351,6 +348,9 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
       save: async () => {
         throw err
       },
+      migrateLegacyJson: async () => {
+        throw err
+      },
     } as RoleStore
     return { records, roles }
   }
@@ -358,51 +358,57 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
   it('store rejection is the SAME CollaborationError object thrown (not success-shaped)', async () => {
     const storeErr = new CollaborationError('NOT_FOUND', '记录不存在')
     const { records, roles } = throwingStores(storeErr)
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
     await expect(
-      tools[0]!.execute({ rootSessionId: 'r', input: { kind: 'task', title: 'T', body: '' } }, {}),
+      recordCreate.execute({ rootSessionId: 'r', input: { kind: 'task', title: 'T', body: '' } }, {}),
     ).rejects.toBe(storeErr)
   })
 
   it('invalid wrapper: null args → INVALID_INPUT', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    await expect(tools[0]!.execute(null, {})).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
+    await expect(recordCreate.execute(null, {})).rejects.toMatchObject({ code: 'INVALID_INPUT' })
   })
 
   it('invalid wrapper: non-object args → INVALID_INPUT', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    await expect(tools[0]!.execute('not-an-object', {})).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
+    await expect(recordCreate.execute('not-an-object', {})).rejects.toMatchObject({ code: 'INVALID_INPUT' })
   })
 
   it('invalid wrapper: missing rootSessionId on record tool → INVALID_INPUT (no silent bind)', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    await expect(tools[0]!.execute({ input: { kind: 'task', title: 'T', body: '' } }, {})).rejects.toMatchObject({
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
+    await expect(recordCreate.execute({ input: { kind: 'task', title: 'T', body: '' } }, {})).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     })
   })
 
   it('invalid wrapper: empty rootSessionId → INVALID_INPUT', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    await expect(tools[0]!.execute({ rootSessionId: '', input: { kind: 'task', title: 'T', body: '' } }, {})).rejects.toMatchObject(
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
+    await expect(recordCreate.execute({ rootSessionId: '', input: { kind: 'task', title: 'T', body: '' } }, {})).rejects.toMatchObject(
       { code: 'INVALID_INPUT' },
     )
   })
 
   it('invalid wrapper: present-but-non-object input → INVALID_INPUT before property access', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
-    await expect(tools[0]!.execute({ rootSessionId: 'r', input: 'oops' }, {})).rejects.toMatchObject({
+    const tools = buildCollaborationTools({ records, roles })
+    const recordCreate = tools.find((t) => t.name === 'router_record_create')!
+    await expect(recordCreate.execute({ rootSessionId: 'r', input: 'oops' }, {})).rejects.toMatchObject({
       code: 'INVALID_INPUT',
     })
   })
 
   it('invalid wrapper: present-but-non-object patch on update → INVALID_INPUT', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     const update = tools.find((t) => t.name === 'router_record_update')!
     await expect(update.execute({ rootSessionId: 'r', taskId: 't', recordId: 'rec', patch: 5 }, {})).rejects.toMatchObject(
       { code: 'INVALID_INPUT' },
@@ -411,7 +417,7 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
 
   it('invalid wrapper: missing taskId on record_read → INVALID_INPUT', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     await expect(tools.find((t) => t.name === 'router_record_read')!.execute({ rootSessionId: 'r' }, {})).rejects.toMatchObject(
       { code: 'INVALID_INPUT' },
     )
@@ -419,9 +425,9 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
 
   it('raw invoke does not throw untyped TypeError for scalar/array/boolean wrappers', async () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     for (const bad of [42, [], 'x', true]) {
-      await expect(tools[0]!.execute(bad, {})).rejects.toMatchObject({ name: 'CollaborationError' })
+      await expect(tools.find((t) => t.name === 'router_record_create')!.execute(bad, {})).rejects.toMatchObject({ name: 'CollaborationError' })
     }
   })
 })
@@ -431,7 +437,7 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
 describe('buildCollaborationTools — render emits JSON text matching value', () => {
   it('render returns a single text block whose text is JSON of the store value', () => {
     const { records, roles } = makeFakeStores()
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     const value = {
       record: { id: 'x', taskId: 't', rootSessionId: 'r', kind: 'task', title: 'T', body: '', createdAt: 1, updatedAt: 1 },
       path: '/p',
@@ -455,7 +461,7 @@ describe('buildCollaborationTools — real owned store roundtrip', () => {
     dirs.push(dir)
     const records = createRecordStore(dir)
     const roles = createRoleStore(dir)
-    const tools = buildCollaborationTools(records, roles)
+    const tools = buildCollaborationTools({ records, roles })
     return {
       records,
       roles,
@@ -501,14 +507,14 @@ describe('buildCollaborationTools — real owned store roundtrip', () => {
     // manual store save first
     const manual = await r.roles.save({ name: '调研', description: '做调研' })
     // model tool read sees it
-    const viaTool = await r.roleRead.execute({ id: manual.id }, {})
+    const viaTool = await r.roleRead.execute({ name: '调研' }, {})
     expect((viaTool as { name: string }).name).toBe('调研')
 
     // model tool save next
     const viaSave = await r.roleSave.execute({ input: { name: '文档', description: '写文档' } }, {})
-    const savedId = (viaSave as { id: string }).id
+    const savedName = (viaSave as { name: string }).name
     // manual store read sees it
-    const manualRead = await r.roles.read(savedId)
+    const manualRead = await r.roles.read(savedName)
     expect(manualRead.name).toBe('文档')
   })
 })

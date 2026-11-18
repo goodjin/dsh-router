@@ -5,7 +5,7 @@
  *   GET  /records?rootSessionId=&taskId=&kind=  → WorkRecord[]（复用 RecordStore.list）
  *   GET  /record?rootSessionId=&taskId=&recordId= → SavedRecord（复用 RecordStore.read）
  *   GET  /roles                                 → RoleTemplate[]（复用 RoleStore.list）
- *   POST /roles {id?,name,description}          → RoleTemplate（复用 RoleStore.save）
+ *   POST /roles {name,description}              → RoleTemplate（按名 upsert，复用 RoleStore.save）
  *
  * 第一版工作台只读任务资料：记录修改由模型工具负责，宿主不挂任务写/控制路由
  * （旧 /router/tasks/control 等一概不注册）。本文件只折叠 HTTP，逻辑全部在注入的
@@ -235,16 +235,12 @@ export function registerCollaborationRoutes(
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new CollaborationError('INVALID_INPUT', '请求体须为 JSON 对象')
     }
-    const body = parsed as { id?: unknown; name?: unknown; description?: unknown }
-    const input: { id?: string; name: string; description: string } = {
+    const body = parsed as { name?: unknown; description?: unknown }
+    const input: { name: string; description: string } = {
       name: typeof body.name === 'string' ? body.name : '',
       description: typeof body.description === 'string' ? body.description : '',
     }
-    if (typeof body.id === 'string' && body.id !== '') input.id = body.id
-    // name 非空由 RoleStore.save 校验（INVALID_INPUT）；description 须为字符串。
-    if (typeof body.description !== 'string') {
-      throw new CollaborationError('INVALID_INPUT', 'description 必须是字符串')
-    }
+    // name 非空与文件名安全由 RoleStore.save 校验（INVALID_INPUT）。
     const saved = await deps.roles.save(input)
     return { status: 200, body: JSON.stringify(saved) }
   })

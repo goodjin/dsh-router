@@ -48,10 +48,13 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # �
 ```
 
 patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
-persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 七条协作工具行 + 协作上下文行 +
-DSH 原生执行/用户提问/项目指令/默认压缩/子会话控制（`tool-subagent` provider spawn、toolName subagent、
-maxDepth 2）。Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
-预设与旧动态服务已退役，不恢复。改行先跑核查再提交。
+persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 八条协作工具行（含派发工具
+`router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork，自动登记分工记录）+
+协作上下文行（含角色清单注入）+ DSH 原生执行/用户提问/项目指令/默认压缩/子代理控制
+（仅 `tool-subagent-control`；原生 spawn 工具行已删，防绕过职责注入；spawn/fork 后端由 base 全局提供）。
+Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
+预设与旧动态服务已退役，不恢复。角色模板是一个角色一个 md 文件（文件名=角色名、正文=职责说明），
+首次启用幂等种入四个预置角色、旧 JSON 自动迁移。改行先跑核查再提交。
 
 ## 工作方式
 

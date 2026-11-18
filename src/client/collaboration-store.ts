@@ -61,7 +61,7 @@ export interface CollaborationStore {
   selectRecord(taskId: string, recordId: string): Promise<void>
   clearSelectedRecord(): void
   refreshRoles(): Promise<void>
-  saveRole(input: { id?: string; name: string; description: string }): Promise<boolean>
+  saveRole(input: { name: string; description: string }): Promise<boolean>
   clearSaveError(): void
 }
 
@@ -263,7 +263,7 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
       await reloadRoles()
     },
 
-    async saveRole(input: { id?: string; name: string; description: string }): Promise<boolean> {
+    async saveRole(input: { name: string; description: string }): Promise<boolean> {
       try {
         await api.saveRole(input)
         saveError = null

@@ -128,8 +128,9 @@ const RECORD_SCHEMA = {
 		"updatedAt"
 	]
 };
-/** 固定七个工具名（注册与上下文共用的基准顺序）。 */
+/** 固定八个工具名（注册与上下文共用的基准顺序）。 */
 const COLLABORATION_TOOL_NAMES = [
+	"router_dispatch",
 	"router_record_create",
 	"router_record_read",
 	"router_record_list",

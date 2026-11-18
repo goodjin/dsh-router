@@ -99,10 +99,10 @@ const WORK_LABELS = new Set([
 	"受阻",
 	"已报告"
 ]);
-const RECORD_EXT$1 = ".json";
+const RECORD_EXT = ".json";
 const NAMESPACE$1 = "collaboration";
 /** UUID v4 形态（含版本位 4、变体位 8/9/a/b）——taskId/recordId 必须匹配，拒绝任意路径。 */
-const UUID_RE$1 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** 进程内临时文件序号：与 pid 一起保证同目录临时名唯一，并发写不互踩。 */
 let tmpSeq$1 = 0;
 /** 生产用 node:fs/promises 适配器。 */
@@ -122,21 +122,21 @@ function nodeFs$1() {
 function isEnoent$1(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
-function isUuid$1(value) {
-	return UUID_RE$1.test(value);
+function isUuid(value) {
+	return UUID_RE.test(value);
 }
 /** 非空字符串判定（可选字段与必需字段共用同一规则，不 as 虚假类型掩盖检查）。 */
-function isNonEmptyString$1(value) {
+function isNonEmptyString(value) {
 	return typeof value === "string" && value.length > 0;
 }
 /** 非空字符串校验（title/name 等非空必需字段）。 */
-function requireNonEmptyString$1(value, what) {
-	if (!isNonEmptyString$1(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
+function requireNonEmptyString(value, what) {
+	if (!isNonEmptyString(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
 	return value;
 }
 /** UUID 校验（taskId/recordId/parentRecordId/roleId）。 */
-function requireUuid$1(value, what) {
-	if (typeof value !== "string" || !isUuid$1(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是 UUID`);
+function requireUuid(value, what) {
+	if (typeof value !== "string" || !isUuid(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是 UUID`);
 	return value;
 }
 /** sessions 形状：省略合法；存在须为数组，每项含非空 sessionId/label。 */
@@ -146,7 +146,7 @@ function areSessionLinksValid(links) {
 	for (const link of links) {
 		if (typeof link !== "object" || link === null) return false;
 		const l = link;
-		if (!isNonEmptyString$1(l.sessionId) || !isNonEmptyString$1(l.label)) return false;
+		if (!isNonEmptyString(l.sessionId) || !isNonEmptyString(l.label)) return false;
 	}
 	return true;
 }
@@ -157,7 +157,7 @@ function areArtifactRefsValid(refs) {
 	for (const ref of refs) {
 		if (typeof ref !== "object" || ref === null) return false;
 		const r = ref;
-		if (!isNonEmptyString$1(r.location) || !isNonEmptyString$1(r.label)) return false;
+		if (!isNonEmptyString(r.location) || !isNonEmptyString(r.label)) return false;
 	}
 	return true;
 }
@@ -170,17 +170,17 @@ function validateArtifactRefs(refs) {
 /** 校验新建记录入参（种类、字段类型、枚举、父记录编号）。 */
 function validateDraft(input) {
 	if (!RECORD_KINDS.has(input.kind)) throw new CollaborationError("INVALID_INPUT", `未知记录种类: ${String(input.kind)}`);
-	requireNonEmptyString$1(input.title, "title");
+	requireNonEmptyString(input.title, "title");
 	if (typeof input.body !== "string") throw new CollaborationError("INVALID_INPUT", "body 必须是字符串");
 	if (input.workLabel !== void 0 && !WORK_LABELS.has(input.workLabel)) throw new CollaborationError("INVALID_INPUT", `未知工作标签: ${input.workLabel}`);
 	validateSessionLinks(input.sessions);
 	validateArtifactRefs(input.artifacts);
-	if (input.parentRecordId !== void 0) requireUuid$1(input.parentRecordId, "parentRecordId");
+	if (input.parentRecordId !== void 0) requireUuid(input.parentRecordId, "parentRecordId");
 }
 /** 校验更新补丁（只允许 title/body/workLabel/sessions/artifacts，且各自合法）。 */
 function validatePatch(patch) {
 	if (patch === null || typeof patch !== "object") throw new CollaborationError("INVALID_INPUT", "patch 必须是对象");
-	if (patch.title !== void 0) requireNonEmptyString$1(patch.title, "title");
+	if (patch.title !== void 0) requireNonEmptyString(patch.title, "title");
 	if (patch.body !== void 0 && typeof patch.body !== "string") throw new CollaborationError("INVALID_INPUT", "body 必须是字符串");
 	if (patch.workLabel !== void 0 && !WORK_LABELS.has(patch.workLabel)) throw new CollaborationError("INVALID_INPUT", `未知工作标签: ${patch.workLabel}`);
 	if (patch.sessions !== void 0) validateSessionLinks(patch.sessions);
@@ -190,7 +190,7 @@ function validatePatch(patch) {
 function isWorkRecordShape(value) {
 	if (typeof value !== "object" || value === null) return false;
 	const r = value;
-	return typeof r.id === "string" && typeof r.taskId === "string" && typeof r.rootSessionId === "string" && isNonEmptyString$1(r.title) && typeof r.body === "string" && typeof r.createdAt === "number" && typeof r.updatedAt === "number" && RECORD_KINDS.has(r.kind) && (r.workLabel === void 0 || WORK_LABELS.has(r.workLabel)) && areSessionLinksValid(r.sessions) && areArtifactRefsValid(r.artifacts) && (r.parentRecordId === void 0 || typeof r.parentRecordId === "string" && isUuid$1(r.parentRecordId));
+	return typeof r.id === "string" && typeof r.taskId === "string" && typeof r.rootSessionId === "string" && isNonEmptyString(r.title) && typeof r.body === "string" && typeof r.createdAt === "number" && typeof r.updatedAt === "number" && RECORD_KINDS.has(r.kind) && (r.workLabel === void 0 || WORK_LABELS.has(r.workLabel)) && areSessionLinksValid(r.sessions) && areArtifactRefsValid(r.artifacts) && (r.parentRecordId === void 0 || typeof r.parentRecordId === "string" && isUuid(r.parentRecordId));
 }
 function parseRecord(text, path) {
 	let raw;
@@ -232,7 +232,7 @@ function createRecordStore(dataDir, deps = {}) {
 	const fs = deps.fs ?? nodeFs$1();
 	const guard = new PathGuard(fs, base);
 	const tasksDir = (rootSessionId) => join(base, "roots", createHash("sha256").update(rootSessionId).digest("hex"), "tasks");
-	const recordPath = (rootSessionId, taskId, recordId) => join(tasksDir(rootSessionId), taskId, `${recordId}${RECORD_EXT$1}`);
+	const recordPath = (rootSessionId, taskId, recordId) => join(tasksDir(rootSessionId), taskId, `${recordId}${RECORD_EXT}`);
 	/** 进程内写队列：完整写操作（读/检查/写）从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
 	let writeChain = Promise.resolve();
 	const enqueue = (task) => {
@@ -266,7 +266,7 @@ function createRecordStore(dataDir, deps = {}) {
 	};
 	return {
 		async create(rootSessionId, input) {
-			requireNonEmptyString$1(rootSessionId, "rootSessionId");
+			requireNonEmptyString(rootSessionId, "rootSessionId");
 			validateDraft(input);
 			const kind = input.kind;
 			const title = input.title;
@@ -287,7 +287,7 @@ function createRecordStore(dataDir, deps = {}) {
 			if (kind === "task") taskId = recordId;
 			else {
 				if (input.taskId === void 0) throw new CollaborationError("INVALID_INPUT", "非任务记录必须提供 taskId");
-				requireUuid$1(input.taskId, "taskId");
+				requireUuid(input.taskId, "taskId");
 				taskId = input.taskId;
 			}
 			const path = recordPath(rootSessionId, taskId, recordId);
@@ -317,9 +317,9 @@ function createRecordStore(dataDir, deps = {}) {
 			});
 		},
 		async read(rootSessionId, taskId, recordId) {
-			requireNonEmptyString$1(rootSessionId, "rootSessionId");
-			requireUuid$1(taskId, "taskId");
-			requireUuid$1(recordId, "recordId");
+			requireNonEmptyString(rootSessionId, "rootSessionId");
+			requireUuid(taskId, "taskId");
+			requireUuid(recordId, "recordId");
 			const path = recordPath(rootSessionId, taskId, recordId);
 			const record = await readRecordFile(path);
 			assertRecordIdentity(record, rootSessionId, taskId, recordId, path);
@@ -329,8 +329,8 @@ function createRecordStore(dataDir, deps = {}) {
 			};
 		},
 		async list(rootSessionId, query) {
-			requireNonEmptyString$1(rootSessionId, "rootSessionId");
-			if (query?.taskId !== void 0) requireUuid$1(query.taskId, "taskId");
+			requireNonEmptyString(rootSessionId, "rootSessionId");
+			if (query?.taskId !== void 0) requireUuid(query.taskId, "taskId");
 			if (query?.kind !== void 0 && !RECORD_KINDS.has(query.kind)) throw new CollaborationError("INVALID_INPUT", `未知记录种类: ${query.kind}`);
 			const dir = tasksDir(rootSessionId);
 			let taskNames;
@@ -344,7 +344,7 @@ function createRecordStore(dataDir, deps = {}) {
 			}
 			const records = [];
 			for (const taskName of taskNames) {
-				if (!isUuid$1(taskName)) continue;
+				if (!isUuid(taskName)) continue;
 				if (query?.taskId !== void 0 && taskName !== query.taskId) continue;
 				let fileNames;
 				try {
@@ -356,9 +356,9 @@ function createRecordStore(dataDir, deps = {}) {
 					throw new CollaborationError("IO_ERROR", `列举记录失败: ${taskName}`, { cause: error });
 				}
 				for (const fileName of fileNames) {
-					if (!fileName.endsWith(RECORD_EXT$1)) continue;
+					if (!fileName.endsWith(RECORD_EXT)) continue;
 					const recordId = fileName.slice(0, -5);
-					if (!isUuid$1(recordId)) continue;
+					if (!isUuid(recordId)) continue;
 					const filePath = join(dir, taskName, fileName);
 					const record = await readRecordFile(filePath);
 					assertRecordIdentity(record, rootSessionId, taskName, recordId, filePath);
@@ -370,9 +370,9 @@ function createRecordStore(dataDir, deps = {}) {
 			return records;
 		},
 		async update(rootSessionId, taskId, recordId, patch) {
-			requireNonEmptyString$1(rootSessionId, "rootSessionId");
-			requireUuid$1(taskId, "taskId");
-			requireUuid$1(recordId, "recordId");
+			requireNonEmptyString(rootSessionId, "rootSessionId");
+			requireUuid(taskId, "taskId");
+			requireUuid(recordId, "recordId");
 			validatePatch(patch);
 			const snapshot = {
 				...patch.title !== void 0 ? { title: patch.title } : {},
@@ -421,9 +421,11 @@ function createRecordStore(dataDir, deps = {}) {
 
 //#endregion
 //#region src/collaboration/roles.ts
-const RECORD_EXT = ".json";
+const ROLE_EXT = ".md";
+const LEGACY_EXT = ".json";
 const NAMESPACE = "collaboration";
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** 名字（=文件名）长度上限。 */
+const NAME_MAX = 64;
 let tmpSeq = 0;
 /** 生产用 node:fs/promises 适配器。 */
 function nodeFs() {
@@ -442,41 +444,26 @@ function nodeFs() {
 function isEnoent(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
-function isUuid(value) {
-	return UUID_RE.test(value);
-}
-function isNonEmptyString(value) {
-	return typeof value === "string" && value.length > 0;
-}
-function requireNonEmptyString(value, what) {
-	if (!isNonEmptyString(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
-	return value;
-}
-function requireUuid(value, what) {
-	if (typeof value !== "string" || !isUuid(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是 UUID`);
-	return value;
-}
-/** 落库模板的形状校验：id 须 v4、name 非空、description 可空字符串。 */
-function isRoleTemplateShape(value) {
-	if (typeof value !== "object" || value === null) return false;
-	const r = value;
-	return typeof r.id === "string" && isUuid(r.id) && isNonEmptyString(r.name) && typeof r.description === "string" && typeof r.createdAt === "number" && typeof r.updatedAt === "number";
-}
-function parseRole(text, path) {
-	let raw;
-	try {
-		raw = JSON.parse(text);
-	} catch (error) {
-		throw new CollaborationError("CORRUPT_RECORD", `角色模板 JSON 损坏: ${path}`, { cause: error });
+/**
+* 校验角色名（=文件名）：去两端空白后必须非空、长度 ≤ 64、无路径分隔符/空字节、
+* 不以点开头、不是 . / ..、无控制字符。中文与常见标点合法。
+*/
+function validateRoleName(raw, what = "name") {
+	if (typeof raw !== "string") throw new CollaborationError("INVALID_INPUT", `${what} 必须是字符串`);
+	const name$1 = raw.trim();
+	if (name$1.length === 0 || name$1.length > NAME_MAX) throw new CollaborationError("INVALID_INPUT", `${what} 长度须在 1..${NAME_MAX} 之间（去空白后）`);
+	if (name$1.startsWith(".") || name$1 === "." || name$1 === "..") throw new CollaborationError("INVALID_INPUT", `${what} 不得以点开头`);
+	for (const ch of name$1) {
+		const code = ch.codePointAt(0);
+		if (ch === "/" || ch === "\\" || ch === "\0" || code < 32) throw new CollaborationError("INVALID_INPUT", `${what} 含非法字符（路径分隔符或控制字符）`);
 	}
-	if (!isRoleTemplateShape(raw)) throw new CollaborationError("CORRUPT_RECORD", `角色模板结构不符: ${path}`);
-	return raw;
+	return name$1;
 }
 /** 原子写：同目录临时文件 → rename 覆盖；目录准备也纳入 IO_ERROR 包装。 */
 async function atomicWrite(fs, target, content) {
 	const tmp = `${target}.tmp-${process.pid}-${++tmpSeq}`;
 	try {
-		await fs.mkdirp(dirname(target));
+		await fs.mkdirp(join(target, ".."));
 		await fs.writeFile(tmp, content);
 		await fs.rename(tmp, target);
 	} catch (error) {
@@ -488,20 +475,18 @@ async function atomicWrite(fs, target, content) {
 function createRoleStore(dataDir, deps = {}) {
 	const base = join(dataDir, NAMESPACE);
 	const rolesDir = join(base, "roles");
-	const now = deps.now ?? (() => Date.now());
-	const uuid = deps.uuid ?? randomUUID;
 	const fs = deps.fs ?? nodeFs();
 	const guard = new PathGuard(fs, base);
-	const rolePath = (id) => join(rolesDir, `${id}${RECORD_EXT}`);
-	/** 进程内写队列：完整写操作（读/检查/写）从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
+	const rolePath = (name$1) => join(rolesDir, `${name$1}${ROLE_EXT}`);
+	/** 进程内写队列：完整写操作从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
 	let writeChain = Promise.resolve();
 	const enqueue = (task) => {
 		const run = writeChain.then(task, task);
 		writeChain = run.then(() => void 0, () => void 0);
 		return run;
 	};
-	const readRoleFile = async (id) => {
-		const path = rolePath(id);
+	const readRoleFile = async (name$1) => {
+		const path = rolePath(name$1);
 		await guard.assertDirChain(path);
 		await guard.assertRegularFile(path, "角色模板");
 		let text;
@@ -511,9 +496,10 @@ function createRoleStore(dataDir, deps = {}) {
 			if (isEnoent(error)) throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${path}`);
 			throw new CollaborationError("IO_ERROR", `角色模板读取失败: ${path}`, { cause: error });
 		}
-		const template = parseRole(text, path);
-		if (template.id !== id) throw new CollaborationError("CORRUPT_RECORD", `角色模板编号与路径不符: ${path}`);
-		return template;
+		return {
+			name: name$1,
+			description: text
+		};
 	};
 	return {
 		async list() {
@@ -524,92 +510,100 @@ function createRoleStore(dataDir, deps = {}) {
 			} catch (error) {
 				if (isEnoent(error)) return [];
 				if (error instanceof CollaborationError) throw error;
-				throw new CollaborationError("IO_ERROR", `列举角色模板失败`, { cause: error });
+				throw new CollaborationError("IO_ERROR", "列举角色模板失败", { cause: error });
 			}
 			const roles = [];
-			for (const name$1 of names) {
-				if (!name$1.endsWith(RECORD_EXT)) continue;
-				const id = name$1.slice(0, -5);
-				if (!isUuid(id)) continue;
-				roles.push(await readRoleFile(id));
+			for (const filename of names) {
+				if (!filename.endsWith(ROLE_EXT)) continue;
+				const name$1 = filename.slice(0, -3);
+				if (name$1 === "") continue;
+				roles.push(await readRoleFile(name$1));
 			}
-			roles.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+			roles.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 			return roles;
 		},
-		async read(id) {
-			requireUuid(id, "roleId");
-			return readRoleFile(id);
+		async read(name$1) {
+			return readRoleFile(validateRoleName(name$1));
 		},
 		async save(input) {
-			const name$1 = input.name;
-			const description = input.description;
-			requireNonEmptyString(name$1, "name");
-			if (typeof description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
-			const requestId = input.id;
-			if (requestId !== void 0) requireUuid(requestId, "roleId");
+			const name$1 = validateRoleName(input.name);
+			if (typeof input.description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
 			return enqueue(async () => {
-				const nowMs = now();
-				let id;
-				let createdAt;
-				if (requestId !== void 0) {
-					const existing = await readRoleFile(requestId).catch((error) => {
-						if (error instanceof CollaborationError && error.code === "NOT_FOUND") return void 0;
-						throw error;
-					});
-					id = requestId;
-					createdAt = existing?.createdAt ?? nowMs;
-				} else {
-					id = uuid();
-					createdAt = nowMs;
-				}
-				const template = {
-					id,
-					name: name$1,
-					description,
-					createdAt,
-					updatedAt: nowMs
-				};
-				const path = rolePath(id);
+				const path = rolePath(name$1);
 				await guard.assertDirChain(path);
-				await atomicWrite(fs, path, JSON.stringify(template, null, 2));
-				return template;
+				await atomicWrite(fs, path, input.description);
+				return {
+					name: name$1,
+					description: input.description
+				};
 			});
+		},
+		async migrateLegacyJson() {
+			let names;
+			try {
+				await guard.assertDirectory(rolesDir);
+				names = await fs.readdir(rolesDir);
+			} catch (error) {
+				if (isEnoent(error)) return;
+				if (error instanceof CollaborationError) throw error;
+				throw new CollaborationError("IO_ERROR", "迁移旧角色时列举目录失败", { cause: error });
+			}
+			for (const filename of names) {
+				if (!filename.endsWith(LEGACY_EXT)) continue;
+				let parsed;
+				try {
+					parsed = JSON.parse(await fs.readFile(join(rolesDir, filename)));
+				} catch {
+					continue;
+				}
+				if (typeof parsed !== "object" || parsed === null) continue;
+				const legacy = parsed;
+				if (typeof legacy.name !== "string" || typeof legacy.description !== "string") continue;
+				let name$1;
+				try {
+					name$1 = validateRoleName(legacy.name);
+				} catch {
+					continue;
+				}
+				try {
+					await fs.readFile(rolePath(name$1));
+					continue;
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+				await atomicWrite(fs, rolePath(name$1), legacy.description);
+			}
 		}
 	};
 }
-/** 首次启用种入的预置角色（专业类型；职责说明会注入协作上下文）。 */
+/** 首次启用种入的预置角色。 */
 const PRESET_ROLE_TEMPLATES = [
 	{
-		id: "a1b2c3d4-0001-4000-8000-000000000001",
 		name: "主管",
 		description: "把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。"
 	},
 	{
-		id: "a1b2c3d4-0002-4000-8000-000000000002",
 		name: "执行者",
 		description: "接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。"
 	},
 	{
-		id: "a1b2c3d4-0003-4000-8000-000000000003",
 		name: "调研员",
 		description: "查资料、读源码与文档，产出结论与证据位置供决策参考；只调研不改动。"
 	},
 	{
-		id: "a1b2c3d4-0004-4000-8000-000000000004",
 		name: "评审员",
 		description: "对照任务说明的验收条件检查交付，给出通过或问题清单；评审不代做修改。"
 	}
 ];
 /**
-* 幂等种入预置角色：按固定 id 判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
-* 缺失则以固定 id 新建。并发双开最坏是同路径同内容覆盖，不产生重复角色。
+* 幂等种入预置角色：按名判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
+* 缺失则新建同名 md。并发双开最坏是同路径同内容覆盖，不产生重复角色。
 */
 async function seedPresetRoles(store) {
-	const existing = new Set((await store.list()).map((role) => role.id));
+	const existing = new Set((await store.list()).map((role) => role.name));
 	for (const preset of PRESET_ROLE_TEMPLATES) {
-		if (existing.has(preset.id)) continue;
+		if (existing.has(preset.name)) continue;
 		await store.save({
-			id: preset.id,
 			name: preset.name,
 			description: preset.description
 		});
@@ -812,8 +806,6 @@ function registerCollaborationRoutes(ctx, deps) {
 			name: typeof body.name === "string" ? body.name : "",
 			description: typeof body.description === "string" ? body.description : ""
 		};
-		if (typeof body.id === "string" && body.id !== "") input.id = body.id;
-		if (typeof body.description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
 		const saved = await deps.roles.save(input);
 		return {
 			status: 200,
@@ -847,8 +839,8 @@ function apply(ctx, rawConfig) {
 		dataDir: runtime.dataDir
 	};
 	(!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
-	seedPresetRoles(runtime.roles).catch((error) => {
-		console.warn("[dsh-router] seed preset roles failed:", error instanceof Error ? error.message : String(error));
+	runtime.roles.migrateLegacyJson().then(() => seedPresetRoles(runtime.roles)).catch((error) => {
+		console.warn("[dsh-router] migrate/seed roles failed:", error instanceof Error ? error.message : String(error));
 	});
 	ctx.inject?.(["webServer", "connection"], (child) => {
 		registerCollaborationRoutes(child, {

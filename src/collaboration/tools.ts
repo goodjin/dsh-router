@@ -1,16 +1,17 @@
 /**
- * 轻量团队协作模型工具 buildCollaborationTools（计划 Task 2A，Layer 2）。
+ * 轻量团队协作模型工具 buildCollaborationTools（派发工具版，2026-11-18 起）。
  *
- * 七个面向模型的工具，是 RecordStore/RoleStore 的薄壳：参数经原生 JSON Schema 描述
- * （宿主认可的裸 JSON Schema 工具路径），execute 在边界守卫后直接把参数转交存储，
- * 存储抛出的 CollaborationError 原样上抛（宿主据 code 收敛为 isError），不发明
- * approved/success 之类业务标志，render 输出与存储返回值一致的 JSON 文本。
+ * 八个面向模型的工具：七条存储薄壳（RecordStore/RoleStore）+ 一条派发工具
+ * router_dispatch（职责注入由代码完成，见 dispatch.ts）。参数经原生 JSON Schema
+ * 描述，execute 在边界守卫后转交存储/服务，CollaborationError 原样上抛（宿主据
+ * code 收敛为 isError），render 输出与返回值一致的 JSON 文本。
  *
- * 只依赖 ./types.ts：不 import 旧 ToolDefinition/RouterCore，不拖遗留 core 依赖树。
- * 当前会话的展示由纯上下文构建（context.ts）负责，execute 不读 exec。
+ * 依赖 ./types.ts 与 ./dispatch.ts：不 import 旧 ToolDefinition/RouterCore。
+ * 存储薄壳不读 exec；router_dispatch 读 exec.agent（宿主传入的调用方）。
  */
 
 import { CollaborationError, type RecordDraft, type RecordPatch, type RecordQuery, type RecordStore, type RoleStore } from './types.ts'
+import { buildDispatchTool, type SubagentsFace } from './dispatch.ts'
 
 /** 面向模型的一个内容块（与宿主工具输出内容块同形）。 */
 export interface ToolContentBlock {
@@ -121,13 +122,10 @@ const ROLE_TEMPLATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    id: { type: 'string', description: '模板编号' },
-    name: { type: 'string', description: '名称' },
+    name: { type: 'string', description: '角色名（=md 文件名）' },
     description: { type: 'string', description: '职责说明' },
-    createdAt: { type: 'number', description: '创建时间戳' },
-    updatedAt: { type: 'number', description: '更新时间戳' },
   },
-  required: ['id', 'name', 'description', 'createdAt', 'updatedAt'],
+  required: ['name', 'description'],
 }
 
 /* ───────────────────────── 工具定义构建 ───────────────────────── */
@@ -137,8 +135,9 @@ function jsonRender(_args: unknown, value: unknown): ToolContentBlock[] {
   return [{ type: 'text', text: JSON.stringify(value) }]
 }
 
-/** 固定七个工具名（注册与上下文共用的基准顺序）。 */
+/** 固定八个工具名（注册与上下文共用的基准顺序）。 */
 export const COLLABORATION_TOOL_NAMES = [
+  'router_dispatch',
   'router_record_create',
   'router_record_read',
   'router_record_list',
@@ -149,11 +148,14 @@ export const COLLABORATION_TOOL_NAMES = [
 ] as const
 
 /**
- * 构建团队协作工具集。records/roles 为已创建的存储单实例；rootSessionId 始终显式传入，
- * 不由当前会话推断、不接受角色/操作者输入。存储为字段校验的最终权威，本层只拦包装层坏值。
+ * 构建团队协作工具集。records/roles 为存储单实例，subagents 为宿主子代理服务
+ * （base 全局提供，缺席时派发工具明确报错、其余七条不受影响）。rootSessionId
+ * 始终显式传入；存储为字段校验的最终权威，本层只拦包装层坏值。
  */
-export function buildCollaborationTools(records: RecordStore, roles: RoleStore): ToolDefinition[] {
+export function buildCollaborationTools(deps: { records: RecordStore; roles: RoleStore; subagents?: SubagentsFace }): ToolDefinition[] {
+  const { records, roles } = deps
   return [
+    buildDispatchTool(deps),
     {
       name: 'router_record_create',
       description:
@@ -300,21 +302,21 @@ export function buildCollaborationTools(records: RecordStore, roles: RoleStore):
       parameters: {
         type: 'object',
         additionalProperties: false,
-        properties: { id: { type: 'string', description: '模板编号' } },
-        required: ['id'],
+        properties: { name: { type: 'string', description: '角色名（=md 文件名）' } },
+        required: ['name'],
       },
       output: { schema: ROLE_TEMPLATE_SCHEMA, render: jsonRender },
       async execute(args: unknown): Promise<unknown> {
         const a = asObject(args, '参数')
-        const id = asNonEmptyString(a.id, 'id')
-        return roles.read(id)
+        const name = asNonEmptyString(a.name, 'name')
+        return roles.read(name)
       },
     },
     {
       name: 'router_role_save',
       description:
-        '创建或修改角色模板（专业类型）。带 id 为修改已有模板，不带 id 为新建。' +
-        '角色模板只是职责文本，不注册运行时预设。',
+        '创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，' +
+        '一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -324,8 +326,7 @@ export function buildCollaborationTools(records: RecordStore, roles: RoleStore):
             additionalProperties: false,
             description: '模板入参',
             properties: {
-              id: { type: 'string', description: '已有模板编号（修改时带；新建省略）' },
-              name: { type: 'string', description: '名称（非空）' },
+              name: { type: 'string', description: '角色名（非空；同名即更新）' },
               description: { type: 'string', description: '职责说明' },
             },
             required: ['name', 'description'],
@@ -337,7 +338,7 @@ export function buildCollaborationTools(records: RecordStore, roles: RoleStore):
       async execute(args: unknown): Promise<unknown> {
         const a = asObject(args, '参数')
         const input = asObject(a.input, 'input')
-        return roles.save(input as unknown as { id?: string; name: string; description: string })
+        return roles.save(input as unknown as { name: string; description: string })
       },
     },
   ]

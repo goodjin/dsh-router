@@ -83,13 +83,13 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).not.toMatch(/记录是唯一事实源/)
   })
 
-  it('R1: spawn/notify are process descriptions via DSH tools with exact installed names', () => {
-    // 标明使用宿主 DSH 提供的创建子会话/发消息工具，名字以本预设实际挂载为准
-    expect(collaborationPrompt).toMatch(/宿主 DSH/)
-    // Task 2B：实际挂载的工具名出现在提示词里（subagent/list_agents/send_message），
-    // 不再用「由后续层绑定」占位。
-    expect(collaborationPrompt).toContain('subagent')
+  it('R1: dispatch/notify are process descriptions via installed tools with exact names', () => {
+    // 派发只走 router_dispatch（职责注入由代码完成）；控制与发现用宿主原生工具。
+    expect(collaborationPrompt).toContain('router_dispatch')
+    expect(collaborationPrompt).toContain('send_message')
     expect(collaborationPrompt).toContain('list_agents')
+    // 不再指名让模型直接用 subagent 工具派发（防绕过职责注入）。
+    expect(collaborationPrompt).not.toContain('subagent 工具')
     expect(collaborationPrompt).toContain('send_message')
     expect(collaborationPrompt).toContain('interrupt_agent')
     expect(collaborationPrompt).not.toContain('后续层绑定')

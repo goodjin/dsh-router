@@ -1,14 +1,17 @@
 /**
- * 轻量角色模板存储 RoleStore（计划 Task 1）。
+ * 轻量角色模板存储 RoleStore（md 按名键版）。
  *
- * 角色模板仅为数据（编号、名称、职责说明）：用户与模型通过同一 save 能力创建/修改，
- * 不注册 preset、不含运行时插件树、无业务授权语义。一项模板对应一个独立 JSON 文件。
- * 仅依赖 node 与 ./types.ts。
+ * 一个角色一个 md 文件：文件名 = 角色名、正文 = 职责说明。用户与模型通过同一
+ * save 能力按名 upsert；也可以用任何编辑器直接改 md 文件（文件是唯一事实源，
+ * 读取方按缓存节奏看到）。不注册 preset、不含运行时插件树、无业务授权语义。
+ *
+ * 名字即文件名：保存前校验（非空、无路径分隔符、不藏头、长度受限），中文合法；
+ * 目录链与符号链接守卫沿用 PathGuard。旧版 <uuid>.json 角色经 migrateLegacyJson
+ * 一次性迁为 md（json 保留不删、坏文件跳过）。
  */
 
-import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, writeFile, lstat } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { readFile, readdir, rename, rm, mkdir, writeFile, lstat } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import {
   CollaborationError,
@@ -19,9 +22,11 @@ import {
 } from './types.ts'
 import { PathGuard } from './path-guard.ts'
 
-const RECORD_EXT = '.json'
+const ROLE_EXT = '.md'
+const LEGACY_EXT = '.json'
 const NAMESPACE = 'collaboration'
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+/** 名字（=文件名）长度上限。 */
+const NAME_MAX = 64
 
 let tmpSeq = 0
 
@@ -44,60 +49,33 @@ function isEnoent(error: unknown): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: string }).code === 'ENOENT'
 }
 
-function isUuid(value: string): boolean {
-  return UUID_RE.test(value)
-}
-
-function isNonEmptyString(value: unknown): boolean {
-  return typeof value === 'string' && value.length > 0
-}
-
-function requireNonEmptyString(value: unknown, what: string): string {
-  if (!isNonEmptyString(value)) {
-    throw new CollaborationError('INVALID_INPUT', `${what} 必须是非空字符串`)
+/**
+ * 校验角色名（=文件名）：去两端空白后必须非空、长度 ≤ 64、无路径分隔符/空字节、
+ * 不以点开头、不是 . / ..、无控制字符。中文与常见标点合法。
+ */
+function validateRoleName(raw: unknown, what = 'name'): string {
+  if (typeof raw !== 'string') throw new CollaborationError('INVALID_INPUT', `${what} 必须是字符串`)
+  const name = raw.trim()
+  if (name.length === 0 || name.length > NAME_MAX) {
+    throw new CollaborationError('INVALID_INPUT', `${what} 长度须在 1..${NAME_MAX} 之间（去空白后）`)
   }
-  return value as string
-}
-
-function requireUuid(value: unknown, what: string): string {
-  if (typeof value !== 'string' || !isUuid(value)) {
-    throw new CollaborationError('INVALID_INPUT', `${what} 必须是 UUID`)
+  if (name.startsWith('.') || name === '.' || name === '..') {
+    throw new CollaborationError('INVALID_INPUT', `${what} 不得以点开头`)
   }
-  return value
-}
-
-/** 落库模板的形状校验：id 须 v4、name 非空、description 可空字符串。 */
-function isRoleTemplateShape(value: unknown): value is RoleTemplate {
-  if (typeof value !== 'object' || value === null) return false
-  const r = value as Record<string, unknown>
-  return (
-    typeof r.id === 'string' &&
-    isUuid(r.id) &&
-    isNonEmptyString(r.name) &&
-    typeof r.description === 'string' &&
-    typeof r.createdAt === 'number' &&
-    typeof r.updatedAt === 'number'
-  )
-}
-
-function parseRole(text: string, path: string): RoleTemplate {
-  let raw: unknown
-  try {
-    raw = JSON.parse(text)
-  } catch (error) {
-    throw new CollaborationError('CORRUPT_RECORD', `角色模板 JSON 损坏: ${path}`, { cause: error })
+  for (const ch of name) {
+    const code = ch.codePointAt(0)!
+    if (ch === '/' || ch === '\\' || ch === '\0' || code < 0x20) {
+      throw new CollaborationError('INVALID_INPUT', `${what} 含非法字符（路径分隔符或控制字符）`)
+    }
   }
-  if (!isRoleTemplateShape(raw)) {
-    throw new CollaborationError('CORRUPT_RECORD', `角色模板结构不符: ${path}`)
-  }
-  return raw
+  return name
 }
 
 /** 原子写：同目录临时文件 → rename 覆盖；目录准备也纳入 IO_ERROR 包装。 */
 async function atomicWrite(fs: CollaborationFs, target: string, content: string): Promise<void> {
   const tmp = `${target}.tmp-${process.pid}-${++tmpSeq}`
   try {
-    await fs.mkdirp(dirname(target))
+    await fs.mkdirp(join(target, '..'))
     await fs.writeFile(tmp, content)
     await fs.rename(tmp, target)
   } catch (error) {
@@ -110,13 +88,11 @@ async function atomicWrite(fs: CollaborationFs, target: string, content: string)
 export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): RoleStore {
   const base = join(dataDir, NAMESPACE)
   const rolesDir = join(base, 'roles')
-  const now = deps.now ?? (() => Date.now())
-  const uuid = deps.uuid ?? randomUUID
   const fs = deps.fs ?? nodeFs()
   const guard = new PathGuard(fs, base)
-  const rolePath = (id: string): string => join(rolesDir, `${id}${RECORD_EXT}`)
+  const rolePath = (name: string): string => join(rolesDir, `${name}${ROLE_EXT}`)
 
-  /** 进程内写队列：完整写操作（读/检查/写）从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
+  /** 进程内写队列：完整写操作从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
   let writeChain: Promise<unknown> = Promise.resolve()
   const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
     const run = writeChain.then(task, task)
@@ -124,8 +100,8 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
     return run
   }
 
-  const readRoleFile = async (id: string): Promise<RoleTemplate> => {
-    const path = rolePath(id)
+  const readRoleFile = async (name: string): Promise<RoleTemplate> => {
+    const path = rolePath(name)
     await guard.assertDirChain(path)
     await guard.assertRegularFile(path, '角色模板')
     let text: string
@@ -135,12 +111,7 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       if (isEnoent(error)) throw new CollaborationError('NOT_FOUND', `角色模板不存在: ${path}`)
       throw new CollaborationError('IO_ERROR', `角色模板读取失败: ${path}`, { cause: error })
     }
-    const template = parseRole(text, path)
-    // 盘内 id 必须与请求/文件名一致，否则不可用盘 id 选路径（视为坏盘数据）。
-    if (template.id !== id) {
-      throw new CollaborationError('CORRUPT_RECORD', `角色模板编号与路径不符: ${path}`)
-    }
-    return template
+    return { name, description: text }
   }
 
   return {
@@ -152,106 +123,111 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       } catch (error) {
         if (isEnoent(error)) return []
         if (error instanceof CollaborationError) throw error
-        throw new CollaborationError('IO_ERROR', `列举角色模板失败`, { cause: error })
+        throw new CollaborationError('IO_ERROR', '列举角色模板失败', { cause: error })
       }
       const roles: RoleTemplate[] = []
-      for (const name of names) {
-        if (!name.endsWith(RECORD_EXT)) continue
-        const id = name.slice(0, -RECORD_EXT.length)
-        if (!isUuid(id)) continue
-        roles.push(await readRoleFile(id))
+      for (const filename of names) {
+        if (!filename.endsWith(ROLE_EXT)) continue // 旧 json 等非 md 文件不进清单
+        const name = filename.slice(0, -ROLE_EXT.length)
+        if (name === '') continue
+        roles.push(await readRoleFile(name))
       }
-      roles.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      roles.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
       return roles
     },
 
-    async read(id: string): Promise<RoleTemplate> {
-      requireUuid(id, 'roleId')
-      return readRoleFile(id)
+    async read(name: string): Promise<RoleTemplate> {
+      const validated = validateRoleName(name)
+      return readRoleFile(validated)
     },
 
-    async save(input: { id?: string; name: string; description: string }): Promise<RoleTemplate> {
-      // 同步快照实际使用字段（name/description 为字符串原值），调用方在 await 后改入参不改变已提交内容。
-      const name = input.name
-      const description = input.description
-      requireNonEmptyString(name, 'name')
-      if (typeof description !== 'string') {
+    async save(input: { name: string; description: string }): Promise<RoleTemplate> {
+      const name = validateRoleName(input.name)
+      if (typeof input.description !== 'string') {
         throw new CollaborationError('INVALID_INPUT', 'description 必须是字符串')
       }
-      const requestId = input.id
-      if (requestId !== undefined) requireUuid(requestId, 'roleId')
       return enqueue(async () => {
-        const nowMs = now()
-        let id: string
-        let createdAt: number
-        if (requestId !== undefined) {
-          // upsert：带 id 优先更新既有；文件不存在则以该 id 新建（幂等种入依赖固定 id）。
-          // 已有记录读取在队列内；落盘路径坚持已校验的请求 id，不用盘内可能被改写的 id。
-          const existing = await readRoleFile(requestId).catch((error: unknown) => {
-            if (error instanceof CollaborationError && error.code === 'NOT_FOUND') return undefined
-            throw error
-          })
-          id = requestId
-          createdAt = existing?.createdAt ?? nowMs
-        } else {
-          id = uuid()
-          createdAt = nowMs
-        }
-        const template: RoleTemplate = {
-          id,
-          name,
-          description,
-          createdAt,
-          updatedAt: nowMs,
-        }
-        const path = rolePath(id)
+        const path = rolePath(name)
         await guard.assertDirChain(path)
-        await atomicWrite(fs, path, JSON.stringify(template, null, 2))
-        return template
+        await atomicWrite(fs, path, input.description)
+        return { name, description: input.description }
       })
+    },
+
+    async migrateLegacyJson(): Promise<void> {
+      let names: string[]
+      try {
+        await guard.assertDirectory(rolesDir)
+        names = await fs.readdir(rolesDir)
+      } catch (error) {
+        if (isEnoent(error)) return
+        if (error instanceof CollaborationError) throw error
+        throw new CollaborationError('IO_ERROR', '迁移旧角色时列举目录失败', { cause: error })
+      }
+      for (const filename of names) {
+        if (!filename.endsWith(LEGACY_EXT)) continue
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(await fs.readFile(join(rolesDir, filename)))
+        } catch {
+          continue // 坏 json 跳过（不删、不炸迁移）
+        }
+        if (typeof parsed !== 'object' || parsed === null) continue
+        const legacy = parsed as { name?: unknown; description?: unknown }
+        if (typeof legacy.name !== 'string' || typeof legacy.description !== 'string') continue
+        let name: string
+        try {
+          name = validateRoleName(legacy.name)
+        } catch {
+          continue
+        }
+        // 已有同名 md（用户已手工迁移或预置已种）则跳过，不覆盖。
+        try {
+          await fs.readFile(rolePath(name))
+          continue
+        } catch (error) {
+          if (!isEnoent(error)) throw error
+        }
+        await atomicWrite(fs, rolePath(name), legacy.description)
+      }
     },
   }
 }
 
-/** 预置角色模板：固定 id（幂等种入——同 id 重复 save 只覆盖同一路径，不产生重复角色）。 */
+/** 预置角色模板（专业类型；职责说明随协作上下文注入、随派发拼装进初始指令）。 */
 export interface PresetRoleTemplate {
-  id: string
   name: string
   description: string
 }
 
-/** 首次启用种入的预置角色（专业类型；职责说明会注入协作上下文）。 */
+/** 首次启用种入的预置角色。 */
 export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
   {
-    id: 'a1b2c3d4-0001-4000-8000-000000000001',
     name: '主管',
     description: '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。',
   },
   {
-    id: 'a1b2c3d4-0002-4000-8000-000000000002',
     name: '执行者',
     description: '接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。',
   },
   {
-    id: 'a1b2c3d4-0003-4000-8000-000000000003',
     name: '调研员',
     description: '查资料、读源码与文档，产出结论与证据位置供决策参考；只调研不改动。',
   },
   {
-    id: 'a1b2c3d4-0004-4000-8000-000000000004',
     name: '评审员',
     description: '对照任务说明的验收条件检查交付，给出通过或问题清单；评审不代做修改。',
   },
 ]
 
 /**
- * 幂等种入预置角色：按固定 id 判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
- * 缺失则以固定 id 新建。并发双开最坏是同路径同内容覆盖，不产生重复角色。
+ * 幂等种入预置角色：按名判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
+ * 缺失则新建同名 md。并发双开最坏是同路径同内容覆盖，不产生重复角色。
  */
 export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save'>): Promise<void> {
-  const existing = new Set((await store.list()).map((role) => role.id))
+  const existing = new Set((await store.list()).map((role) => role.name))
   for (const preset of PRESET_ROLE_TEMPLATES) {
-    if (existing.has(preset.id)) continue
-    await store.save({ id: preset.id, name: preset.name, description: preset.description })
+    if (existing.has(preset.name)) continue
+    await store.save({ name: preset.name, description: preset.description })
   }
 }

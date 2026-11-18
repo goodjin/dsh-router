@@ -53,7 +53,6 @@ export function RolesSection(props: { store: CollaborationStore }): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
   const [roleName, setRoleName] = useState('')
   const [roleDesc, setRoleDesc] = useState('')
-  const [editingRoleId, setEditingRoleId] = useState<string | undefined>(undefined)
   const canSave = roleName.trim() !== ''
   return (
     <section data-router-collab-roles-section style={SECTION_STYLE}>
@@ -70,17 +69,16 @@ export function RolesSection(props: { store: CollaborationStore }): ReactNode {
         {state.templates.length === 0
           ? <div style={{ fontSize: 12, color: '#6b7078' }}>暂无角色模板</div>
           : state.templates.map((template) => (
-            <div key={template.id} data-router-collab-template={template.id} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
+            <div key={template.name} data-router-collab-template={template.name} style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
               <span style={{ flex: 1, fontSize: 12 }}>
                 {template.name}
                 {template.description !== '' ? <span style={{ color: '#6b7078' }}> — {template.description}</span> : null}
               </span>
               <button
                 type="button"
-                data-router-collab-role-edit={template.id}
+                data-router-collab-role-edit={template.name}
                 style={BUTTON_STYLE}
                 onClick={() => {
-                  setEditingRoleId(template.id)
                   setRoleName(template.name)
                   setRoleDesc(template.description)
                 }}
@@ -94,7 +92,7 @@ export function RolesSection(props: { store: CollaborationStore }): ReactNode {
         <input
           data-router-collab-role-name
           style={{ ...INPUT_STYLE, marginBottom: 4 }}
-          placeholder={editingRoleId === undefined ? '新角色名称（必填）' : '角色名称（必填）'}
+          placeholder="角色名称（必填；同名保存即更新）"
           value={roleName}
           onChange={(event) => { setRoleName(event.target.value) }}
         />
@@ -112,26 +110,16 @@ export function RolesSection(props: { store: CollaborationStore }): ReactNode {
             style={{ ...BUTTON_STYLE, opacity: canSave ? 1 : 0.5 }}
             disabled={!canSave}
             onClick={() => {
-              void props.store.saveRole(
-                editingRoleId === undefined
-                  ? { name: roleName.trim(), description: roleDesc }
-                  : { id: editingRoleId, name: roleName.trim(), description: roleDesc },
-              ).then((ok) => {
+              void props.store.saveRole({ name: roleName.trim(), description: roleDesc }).then((ok) => {
                 if (ok) {
                   setRoleName('')
                   setRoleDesc('')
-                  setEditingRoleId(undefined)
                 }
               })
             }}
           >
-            {editingRoleId === undefined ? '保存角色' : '保存修改'}
+            保存角色
           </button>
-          {editingRoleId !== undefined ? (
-            <button type="button" data-router-collab-role-cancel style={BUTTON_STYLE} onClick={() => { setEditingRoleId(undefined); setRoleName(''); setRoleDesc('') }}>
-              取消
-            </button>
-          ) : null}
         </div>
         {state.saveError !== null ? (
           <div data-router-collab-role-error style={{ ...ERROR_STYLE, marginTop: 6 }} role="alert">

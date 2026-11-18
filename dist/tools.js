@@ -13,6 +13,156 @@ var CollaborationError = class extends Error {
 };
 
 //#endregion
+//#region src/collaboration/dispatch.ts
+/** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次。 */
+const DISPATCH_MODES = ["spawn", "fork"];
+/** 拼装给子会话的初始指令：职责 + 任务 + 根会话 + 报告链要点（纯函数）。 */
+function composeDispatchInstruction(input) {
+	const duty = input.role.description.trim() === "" ? "（该角色模板未写职责说明）" : input.role.description.trim();
+	return [
+		`你是轻量团队协作中的「${input.role.name}」。`,
+		"",
+		"你的职责说明：",
+		duty,
+		"",
+		"本次任务：",
+		input.task,
+		"",
+		`根会话（rootSessionId）：${input.rootSessionId}——之后每次保存工作记录都必须显式带上它，不要用你自己的会话 ID 充当。`,
+		"工作资料用记录工具保存（task/assignment/report/summary）；进度、问题与结果按报告链报给上级（worker→主管→Router→用户）。",
+		"完成后保存报告记录（标注工作标签），并把结果与产物位置写清楚；不要等待额外系统确认。"
+	].join("\n");
+}
+/** 构造 router_dispatch 工具定义。 */
+function buildDispatchTool(deps) {
+	return {
+		name: "router_dispatch",
+		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高，确需任务背景时才用）。rootSessionId 是整棵任务树的根会话，必须显式传入。",
+		parameters: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				rootSessionId: {
+					type: "string",
+					description: "根会话 ID（显式传入，不可推断）"
+				},
+				taskId: {
+					type: "string",
+					description: "归属任务的记录 ID（先用 router_record_create 建任务说明）"
+				},
+				role: {
+					type: "string",
+					description: "角色名（角色库中的名称，如 主管/执行者/调研员/评审员）"
+				},
+				task: {
+					type: "string",
+					description: "给该角色的任务内容（目标、约束、验收条件、材料位置）"
+				},
+				mode: {
+					type: "string",
+					enum: [...DISPATCH_MODES],
+					description: "派发方式：spawn=轻装新建（默认）；fork=带父级已完成轮次（成本更高，确需背景才用）"
+				}
+			},
+			required: [
+				"rootSessionId",
+				"taskId",
+				"role",
+				"task",
+				"mode"
+			]
+		},
+		output: {
+			schema: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					childId: { type: "string" },
+					record: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							taskId: { type: "string" },
+							recordId: { type: "string" },
+							path: { type: "string" }
+						}
+					},
+					recordError: { type: "string" }
+				},
+				required: ["childId"]
+			},
+			render: (_args, value) => [{
+				type: "text",
+				text: JSON.stringify(value)
+			}]
+		},
+		async execute(args, exec) {
+			if (typeof args !== "object" || args === null || Array.isArray(args)) throw new CollaborationError("INVALID_INPUT", "参数必须是对象");
+			const a = args;
+			const rootSessionId = nonEmpty(a.rootSessionId, "rootSessionId");
+			const taskId = nonEmpty(a.taskId, "taskId");
+			const roleName = nonEmpty(a.role, "role");
+			const task = nonEmpty(a.task, "task");
+			const mode = a.mode;
+			if (typeof mode !== "string" || !DISPATCH_MODES.includes(mode)) throw new CollaborationError("INVALID_INPUT", `mode 必须是 ${DISPATCH_MODES.join(" 或 ")}`);
+			const provider = mode;
+			const role = await deps.roles.read(roleName);
+			if (deps.subagents === void 0) throw new CollaborationError("IO_ERROR", "subagents 服务不可用：无法创建子会话（检查宿主装载）");
+			const parent = exec?.agent;
+			if (parent === void 0) throw new CollaborationError("INVALID_INPUT", "router_dispatch 需要调用方 agent（exec.agent 缺失）");
+			const instruction = composeDispatchInstruction({
+				role,
+				task,
+				rootSessionId
+			});
+			const { childId } = await deps.subagents.startActivation({
+				provider,
+				label: `${role.name}·${taskId}`,
+				request: {
+					prompt: [{
+						type: "text",
+						text: instruction
+					}],
+					parent,
+					maxDepth: 2
+				},
+				delivery: "parent"
+			});
+			try {
+				const saved = await deps.records.create(rootSessionId, {
+					kind: "assignment",
+					taskId,
+					title: `${role.name}：${task.slice(0, 40)}`,
+					body: instruction,
+					workLabel: "待处理",
+					sessions: [{
+						sessionId: childId,
+						label: role.name
+					}]
+				});
+				return {
+					childId,
+					record: {
+						taskId: saved.record.taskId,
+						recordId: saved.record.id,
+						path: saved.path
+					}
+				};
+			} catch (error) {
+				return {
+					childId,
+					recordError: `子会话已创建（${childId}），但分工记录登记失败：${error instanceof Error ? error.message : String(error)}——请用 router_record_create 补记并关联该子会话`
+				};
+			}
+		}
+	};
+}
+function nonEmpty(value, what) {
+	if (typeof value !== "string" || value.trim() === "") throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
+	return value;
+}
+
+//#endregion
 //#region src/collaboration/tools.ts
 /** 参数包装必须是非空、非数组的对象，否则 INVALID_INPUT。 */
 function asObject(value, what) {
@@ -160,34 +310,16 @@ const ROLE_TEMPLATE_SCHEMA = {
 	type: "object",
 	additionalProperties: false,
 	properties: {
-		id: {
-			type: "string",
-			description: "模板编号"
-		},
 		name: {
 			type: "string",
-			description: "名称"
+			description: "角色名（=md 文件名）"
 		},
 		description: {
 			type: "string",
 			description: "职责说明"
-		},
-		createdAt: {
-			type: "number",
-			description: "创建时间戳"
-		},
-		updatedAt: {
-			type: "number",
-			description: "更新时间戳"
 		}
 	},
-	required: [
-		"id",
-		"name",
-		"description",
-		"createdAt",
-		"updatedAt"
-	]
+	required: ["name", "description"]
 };
 /** render：输出与存储返回值一致的 JSON 文本（单文本块）。 */
 function jsonRender(_args, value) {
@@ -197,11 +329,14 @@ function jsonRender(_args, value) {
 	}];
 }
 /**
-* 构建团队协作工具集。records/roles 为已创建的存储单实例；rootSessionId 始终显式传入，
-* 不由当前会话推断、不接受角色/操作者输入。存储为字段校验的最终权威，本层只拦包装层坏值。
+* 构建团队协作工具集。records/roles 为存储单实例，subagents 为宿主子代理服务
+* （base 全局提供，缺席时派发工具明确报错、其余七条不受影响）。rootSessionId
+* 始终显式传入；存储为字段校验的最终权威，本层只拦包装层坏值。
 */
-function buildCollaborationTools(records, roles) {
+function buildCollaborationTools(deps) {
+	const { records, roles } = deps;
 	return [
+		buildDispatchTool(deps),
 		{
 			name: "router_record_create",
 			description: "新建一条工作记录（任务说明 task / 分工 assignment / 工作报告 report / 汇总 summary）。rootSessionId 是整棵任务树的根会话，必须显式传入，不要拿当前会话 ID 充当根会话。空 body 合法，空 title 不合法。",
@@ -453,24 +588,24 @@ function buildCollaborationTools(records, roles) {
 			parameters: {
 				type: "object",
 				additionalProperties: false,
-				properties: { id: {
+				properties: { name: {
 					type: "string",
-					description: "模板编号"
+					description: "角色名（=md 文件名）"
 				} },
-				required: ["id"]
+				required: ["name"]
 			},
 			output: {
 				schema: ROLE_TEMPLATE_SCHEMA,
 				render: jsonRender
 			},
 			async execute(args) {
-				const id = asNonEmptyString(asObject(args, "参数").id, "id");
-				return roles.read(id);
+				const name$1 = asNonEmptyString(asObject(args, "参数").name, "name");
+				return roles.read(name$1);
 			}
 		},
 		{
 			name: "router_role_save",
-			description: "创建或修改角色模板（专业类型）。带 id 为修改已有模板，不带 id 为新建。角色模板只是职责文本，不注册运行时预设。",
+			description: "创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。",
 			parameters: {
 				type: "object",
 				additionalProperties: false,
@@ -479,13 +614,9 @@ function buildCollaborationTools(records, roles) {
 					additionalProperties: false,
 					description: "模板入参",
 					properties: {
-						id: {
-							type: "string",
-							description: "已有模板编号（修改时带；新建省略）"
-						},
 						name: {
 							type: "string",
-							description: "名称（非空）"
+							description: "角色名（非空；同名即更新）"
 						},
 						description: {
 							type: "string",
@@ -512,15 +643,23 @@ function buildCollaborationTools(records, roles) {
 //#region src/tools.ts
 /** 本入口的插件名（诊断显示用；装载行的 name 是带子路径说明符）。 */
 const name = "router-tools";
-const inject = ["tools", "routerCollaboration"];
+const inject = [
+	"tools",
+	"routerCollaboration",
+	"subagents"
+];
 /**
 * 行配置：无。保留 Config（空对象）以与宿主行校验一致（check-host-rows 对无 config 行
 * 按「跳过校验」处理，但导出 Config 让形状显式、可测）。
 */
 const Config = Schema.object({});
-/** 注册七条协作工具；返回联合注销器交给宿主 effect 生命周期。disposal 干净。 */
+/** 注册八条协作工具；返回联合注销器交给宿主 effect 生命周期。disposal 干净。 */
 function apply(ctx) {
-	const disposers = buildCollaborationTools(ctx.routerCollaboration.records, ctx.routerCollaboration.roles).map((definition) => ctx.tools.register(definition));
+	const disposers = buildCollaborationTools({
+		records: ctx.routerCollaboration.records,
+		roles: ctx.routerCollaboration.roles,
+		subagents: ctx.subagents
+	}).map((definition) => ctx.tools.register(definition));
 	return () => {
 		for (const dispose of disposers) dispose?.();
 	};

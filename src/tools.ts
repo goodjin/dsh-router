@@ -1,11 +1,11 @@
 /**
- * 预设树工具行入口（`@goodjin2/dsh-router/tools`，轻量协作版，计划 Task 2B）。
+ * 预设树工具行入口（`@goodjin2/dsh-router/tools`，派发工具版）。
  *
- * inject ['tools', 'routerCollaboration']：从根实例（根服务行 provide 的
- * 'routerCollaboration'）经作用域链取记录/模板存储单实例，注册恰好七条 Layer2 工具
- * 定义（buildCollaborationTools）。只 register 不 provide：工具行是纯副作用，无需 realm。
- * 无角色配置/角色闸（旧 role:'superset' 的 assertCallerRole 退役）；存储为字段校验与
- * 执行的最终权威，工具执行失败原样成为 tool error。
+ * inject ['tools', 'routerCollaboration', 'subagents']：从根实例取记录/模板存储单实例，
+ * 另注入宿主子代理服务（base 全局提供）——router_dispatch 经它创建 spawn/fork 子会话。
+ * 注册恰好八条工具定义（buildCollaborationTools）。只 register 不 provide：工具行是
+ * 纯副作用。无角色配置/角色闸；存储与服务为字段校验与执行的最终权威，失败原样
+ * 成为 tool error。
  */
 
 import Schema from '@deepseek-ai/schemastery'
@@ -15,7 +15,7 @@ import { buildCollaborationTools, type ToolDefinition } from './collaboration/to
 /** 本入口的插件名（诊断显示用；装载行的 name 是带子路径说明符）。 */
 export const name = 'router-tools'
 
-export const inject = ['tools', 'routerCollaboration'] as const
+export const inject = ['tools', 'routerCollaboration', 'subagents'] as const
 
 /**
  * 行配置：无。保留 Config（空对象）以与宿主行校验一致（check-host-rows 对无 config 行
@@ -29,14 +29,19 @@ interface ToolsContext {
     register(definition: ToolDefinition): unknown
   }
   routerCollaboration: {
-    records: Parameters<typeof buildCollaborationTools>[0]
-    roles: Parameters<typeof buildCollaborationTools>[1]
+    records: Parameters<typeof buildCollaborationTools>[0]['records']
+    roles: Parameters<typeof buildCollaborationTools>[0]['roles']
   }
+  subagents?: Parameters<typeof buildCollaborationTools>[0]['subagents']
 }
 
-/** 注册七条协作工具；返回联合注销器交给宿主 effect 生命周期。disposal 干净。 */
+/** 注册八条协作工具；返回联合注销器交给宿主 effect 生命周期。disposal 干净。 */
 export function apply(ctx: ToolsContext): () => void {
-  const definitions = buildCollaborationTools(ctx.routerCollaboration.records, ctx.routerCollaboration.roles)
+  const definitions = buildCollaborationTools({
+    records: ctx.routerCollaboration.records,
+    roles: ctx.routerCollaboration.roles,
+    subagents: ctx.subagents,
+  })
   const disposers = definitions.map((definition) => ctx.tools.register(definition))
   return () => {
     for (const dispose of disposers) {

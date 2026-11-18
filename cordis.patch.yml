@@ -6,10 +6,10 @@
 #     RoleStore 单实例）。config 全部可缺省（缺省 DSH_HOME/router）。
 #   - 一条静态预设行 dsh-router/Router（@deepseek-ai/dsh-agent-preset）：
 #     · persona complete:true，prefix 即 collaborationPrompt 单一来源（生成脚本实际导入）；
-#     · tools 行 @goodjin2/dsh-router/tools 注册七条协作工具（无 role 配置/角色闸）；
+#     · tools 行 @goodjin2/dsh-router/tools 注册八条协作工具（含 router_dispatch；无 role 配置/角色闸）；
 #     · agent-instructions 项目指令、tool-bash/fs/fs-search/web/todo/jobs 原生执行、
 #       tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
-#       （tool-subagent-control 裸行 + tool-subagent provider spawn/toolName subagent/maxDepth 2）；
+#       （tool-subagent-control 裸行；派发走 router_dispatch，不挂原生 spawn 工具）；
 #     · 无旧 executor/supervisor/worker 别名、无 perrole 插件、无动态预设引擎。
 #
 # 改过任何行之后必须跑双核查（两个宿主都要绿）：
@@ -50,18 +50,18 @@
                 rootSessionId 是整棵任务树的根会话 ID，必须显式随每次记录传入；材料要自足，
                 包含根会话、上级（parent）与报告所在位置，下游据此自读，不要让人转述或猜测。
 
-                派发与通知协议（使用宿主 DSH 提供的原生子代理与控制工具，名字以本预设实际挂载为准）：
-                - 记录一条 assignment 后，用 subagent 工具（provider spawn，maxDepth 2）spawn 出子会话，你负责记住返回的子会话 childId；
+                派发与通知协议（派发只走 router_dispatch；控制与发现用宿主原生工具）：
+                - 先用 router_record_create 建任务说明（task），再用 router_dispatch 按角色派发：职责说明由代码从角色库读取并注入初始指令，分工记录自动登记（关联子会话、待处理标签）；
+                - 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；
                 - 成员把进度/问题/结果用 send_message 报给主管，主管把汇总/待决报给 Router，Router 把需用户决定的事项交给用户；
                 - 用 list_agents 查看可继续的直接子会话及其活跃状态（running/inactive），再决定是否 send_message 续跑；
-                - 需要中断某个活着的子会话时用 interrupt_agent（按父子邻接授权，不可越权）。
-                - 保存成功但通知失败时，保留这条记录，不要丢弃；
-                - 创建子会话成功但记录失败时，保留已拿到的 childId，不要重复 spawn 造成重复会话。
+                - 需要中断某个活着的子会话时用 interrupt_agent（按父子邻接授权，不可越权）；
+                - router_dispatch 返回 recordError 时（子会话已建但登记失败），保留 childId 并补记分工，不要重复派发造成重复会话。
 
                 Router 的核心职责是拆分与派发，不是自己执行具体工作。收到用户任务后：
                 1. 理解需求，把任务拆成可独立执行的子任务；
                 2. 为每个子任务创建 task 记录（目标、约束、验收条件、材料位置）；
-                3. 创建 assignment 记录，然后用 subagent 工具 spawn 子会话去执行；
+                3. 用 router_dispatch 按角色派发子会话去执行（职责注入与分工登记由工具完成）；
                 4. 等子会话报告，汇总后交用户判断。
                 只有单步即可完成、无需拆分的极简任务才由 Router 直接做。多文件、多步骤、需要调研或设计的任务必须派发。
 
@@ -75,7 +75,7 @@
                 本层不新建网络或通信通道，只负责记录、记忆与通知。
               complete: true
 
-          # 七条协作工具（记录 CRUD + 角色模板）；无 role 配置，角色闸已退役。
+          # 八条协作工具（派发 router_dispatch + 记录 CRUD + 角色模板）；无 role 配置，角色闸已退役。
           - id: tools
             name: '@goodjin2/dsh-router/tools'
           # 协作上下文行（官方 systemPrompt.context：当前会话 ID + 协作目录 + 工具清单）。
@@ -114,7 +114,12 @@
           # 用户提问（宿主原生浮窗）。
           - id: ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
-          # 子代理控制（宿主原生）：控制与发现 + 一次性进程内子代理（spawn，maxDepth 2）。
+          # 子代理（宿主原生服务由 base 全局提供：subagents + spawn/fork 后端）。
+          # 控制与发现挂原生工具；派发走 router_dispatch（代码注入职责、内部选
+          # spawn/fork），不再挂原生 spawn 工具——防绕过职责注入。
+          # 2026-11-18 删 tool-subagent-list-agents 子路径行：桌面 0.2.2-rc.1 已把
+          # list_agents 并进主包、./list-agents 导出被删，单挂此行会让预设整树回滚。
+          # 2026-11-18 删 tool-subagent（provider spawn）行：派发统一走 router_dispatch。
           - id: delegation
             name: cordis:group
             group: true
@@ -123,14 +128,6 @@
             config:
               - id: tool-subagent-control
                 name: '@deepseek-ai/dsh-tool-subagent-control'
-              # 2026-11-18 删除 tool-subagent-list-agents 子路径行：桌面 0.2.2-rc.1 已把
-              # list_agents 并进主包、./list-agents 导出被删，单挂此行会让预设整树回滚。
-              - id: tool-subagent
-                name: '@deepseek-ai/dsh-tool-subagent'
-                config:
-                  provider: spawn
-                  toolName: subagent
-                  maxDepth: 2
           # 默认压缩（宿主原生，非旧 @goodjin2/dsh-router/compaction）。
           - id: compaction
             name: cordis:group
