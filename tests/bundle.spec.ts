@@ -146,12 +146,13 @@ describe('cordis.patch.yml 的装载行', () => {
     expect(after).not.toMatch(/role:/)
   })
 
-  it('delegation 组挂子代理行：control 裸行 + spawn 行；list-agents 子路径行已删；禁死键', () => {
+  it('delegation 组只挂 control 裸行；spawn/list-agents 行已删；禁死键', () => {
     expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent-control\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent-control'\n/)
     // 2026-11-18：桌面 0.2.2-rc.1 已把 list_agents 并进主包，./list-agents 子路径被删——
     // 单挂这一行会让整棵预设树回滚（桌面建不出 Router 会话）。行必须删除。
     expect(PATCH_TEXT, 'list-agents 子路径行必须删除（0.2.2 并入主包）').not.toMatch(/tool-subagent-control\/list-agents/)
-    expect(PATCH_TEXT).toMatch(/- id:\s*tool-subagent\n\s*name:\s*'@deepseek-ai\/dsh-tool-subagent'\n\s*config:\n\s*provider:\s*spawn\n\s*toolName:\s*subagent\n\s*maxDepth:\s*2\n/)
+    // 2026-11-18：派发统一走 router_dispatch（代码注入职责），原生 spawn 工具行删除防绕过。
+    expect(PATCH_TEXT, '原生 spawn 派发行必须删除（防绕过职责注入）').not.toMatch(/- id:\s*tool-subagent\n/)
     for (const deadKey of ['modelSelectionSettings', 'modelSelection', 'modelDiscovery', 'backgroundMode']) {
       expect(PATCH_TEXT, `死键 ${deadKey} 不得出现`).not.toMatch(new RegExp(`^\\s+${deadKey}:`, 'm'))
     }

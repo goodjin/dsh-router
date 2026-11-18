@@ -73,11 +73,13 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
   const provideRoot = useRoot ? ctx.root!.provide.bind(ctx.root) : ctx.provide.bind(ctx)
   provideRoot('routerCollaboration', face)
 
-  // 首次空库幂等种入预置角色（主管/执行者/调研员/评审员，固定 id 不覆盖用户改动）。
+  // 旧 JSON 角色一次性迁成 md，再幂等种入预置角色（按名判断，不覆盖用户改动）。
   // fire-and-forget 必须就地兜底（宿主把未捕获 rejection 当致命错误）；失败只告警不挡装载。
-  seedPresetRoles(runtime.roles).catch((error: unknown) => {
-    console.warn('[dsh-router] seed preset roles failed:', error instanceof Error ? error.message : String(error))
-  })
+  runtime.roles.migrateLegacyJson()
+    .then(() => seedPresetRoles(runtime.roles))
+    .catch((error: unknown) => {
+      console.warn('[dsh-router] migrate/seed roles failed:', error instanceof Error ? error.message : String(error))
+    })
 
   // 机会式注入 webServer+connection：缺席（CLI）则跳过，工作台路由不挂、记录/工具照常。
   // 与模型工具共享同一 runtime 的 records/roles（routes_reuse_store）。

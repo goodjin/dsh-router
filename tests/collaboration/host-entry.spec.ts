@@ -2,7 +2,7 @@
  * 宿主入口接线测试（计划 Task 2B，Layer 3）。
  *
  * brief 命名断言：
- *  - seven_tool_registration：tools 行经 inject ['tools','routerCollaboration'] 注册恰好七条
+ *  - eight_tool_registration：tools 行经 inject ['tools','routerCollaboration','subagents'] 注册恰好八条
  *    Layer2 工具定义，无 role 配置/角色闸，disposal 干净。
  *  - context_actual_session：context 行经官方 systemPrompt.context 注册，text 回调从当前
  *    Agent 公共上下文（assembly.agent.id）取实际会话 ID；缺失宿主服务时诊断不臆造。
@@ -55,20 +55,20 @@ function recordingSystemPrompt() {
   return { systemPrompt, entries, disposers }
 }
 
-describe('seven_tool_registration — tools row registers exactly the seven Layer2 tools', () => {
+describe('eight_tool_registration — tools row registers exactly the eight Layer2 tools', () => {
   it('name/inject/Config shapes; no role config', () => {
     expect(toolsName).toBe('router-tools')
-    expect([...toolsInject]).toEqual(['tools', 'routerCollaboration'])
+    expect([...toolsInject]).toEqual(['tools', 'routerCollaboration', 'subagents'])
     expect(typeof toolsConfig).toBe('function')
     expect(() => toolsConfig({})).not.toThrow()
   })
 
-  it('registers exactly seven tools in fixed order via routerCollaboration stores', () => {
+  it('registers exactly eight tools in fixed order via routerCollaboration stores', () => {
     const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-tools-test' })
     const { tools, registered } = recordingTools()
     const dispose = toolsApply({ tools, routerCollaboration: runtime })
     expect(registered.map((r) => r.name)).toEqual([...COLLABORATION_TOOL_NAMES])
-    expect(registered).toHaveLength(7)
+    expect(registered).toHaveLength(8)
     expect(typeof dispose).toBe('function')
   })
 
@@ -183,11 +183,11 @@ describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
     entryApply(first.ctx, { dataDir: dir })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     const names = (await first.face().roles.list()).map((r) => r.name)
-    expect(names).toEqual(['主管', '执行者', '调研员', '评审员'])
+    expect(names).toEqual(['主管', '执行者', '评审员', '调研员'])
     const second = makeCtx()
     entryApply(second.ctx, { dataDir: dir })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     const again = (await second.face().roles.list()).map((r) => r.name)
-    expect(again).toEqual(['主管', '执行者', '调研员', '评审员'])
+    expect(again).toEqual(['主管', '执行者', '评审员', '调研员'])
   })
 })

@@ -14,6 +14,7 @@ import { apply as contextApply, Config as contextConfig } from '../../src/contex
 import { createCollaborationRuntime } from '../../src/collaboration/runtime.ts'
 
 const TOOL_NAMES = [
+  'router_dispatch',
   'router_record_create',
   'router_record_read',
   'router_record_list',

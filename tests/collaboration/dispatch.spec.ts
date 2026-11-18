@@ -1,0 +1,196 @@
+/**
+ * 派发工具 router_dispatch 测试（全自动注入）。
+ *
+ * brief 命名断言：
+ *  - dispatch_composes_duty：初始指令 = 职责说明 + 任务 + 根会话 + 报告链要点，
+ *    代码拼装、不依赖模型自觉。
+ *  - dispatch_spawns_and_records：spawn/fork 经 subagents.startActivation（provider、
+ *    prompt、parent、maxDepth 2、delivery parent），成功后自动登记分工记录
+ *    （关联 childId 会话、待处理标签、正文 = 拼装指令）。
+ *  - dispatch_failure_edges：角色不存在/无调用方/无子代理服务 → 拒绝且不创建子会话；
+ *    spawn 失败 → 不落记录；spawn 成功但记录失败 → 返回 childId + recordError 不抛。
+ *  - dispatch_bad_args：空任务/非法方式 → INVALID_INPUT。
+ */
+
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+
+import { buildDispatchTool, composeDispatchInstruction, type SubagentsFace } from '../../src/collaboration/dispatch.ts'
+import type { ToolDefinition } from '../../src/collaboration/tools.ts'
+import { createRecordStore } from '../../src/collaboration/records.ts'
+import { createRoleStore } from '../../src/collaboration/roles.ts'
+
+const roots: string[] = []
+afterAll(async () => {
+  await Promise.all(roots.map((r) => rm(r, { recursive: true, force: true })))
+})
+
+interface Started {
+  provider: string
+  label: string | undefined
+  promptText: string
+  parent: unknown
+  maxDepth: number | undefined
+  delivery: string
+}
+
+function fakeSubagents(childId = 'child-1'): { face: SubagentsFace; started: () => Started | undefined; failWith?: (e: Error) => void; setFail(e: Error | undefined): void } {
+  let captured: Started | undefined
+  let fail: Error | undefined
+  const face: SubagentsFace = {
+    async startActivation(request) {
+      if (fail !== undefined) throw fail
+      captured = {
+        provider: request.provider,
+        label: request.label,
+        promptText: (request.request.prompt[0] as { text: string }).text,
+        parent: request.request.parent,
+        maxDepth: (request.request as { maxDepth?: number }).maxDepth,
+        delivery: request.delivery,
+      }
+      return { childId }
+    },
+  }
+  return { face, started: () => captured, setFail: (e) => { fail = e } }
+}
+
+async function makeDeps(): Promise<{ records: ReturnType<typeof createRecordStore>; roles: ReturnType<typeof createRoleStore>; dir: string }> {
+  const dir = await mkdtemp(join(tmpdir(), 'router-dispatch-'))
+  roots.push(dir)
+  return { records: createRecordStore(dir), roles: createRoleStore(dir), dir }
+}
+
+const EXEC = { agent: { session: 'parent-session-1' } }
+
+/** 建一条任务说明记录，返回其 taskId（分工必须引用已存在的任务记录）。 */
+async function makeTask(records: ReturnType<typeof createRecordStore>): Promise<string> {
+  const saved = await records.create('root-1', { kind: 'task', title: '登录改造', body: '目标' })
+  return saved.record.taskId
+}
+
+const BASE_ARGS = { rootSessionId: 'root-1', taskId: 'PLACEHOLDER', role: '主管', task: '改造登录模块', mode: 'spawn' }
+
+async function run(tool: ToolDefinition, args: unknown, exec: unknown = EXEC): Promise<unknown> {
+  return tool.execute(args, exec)
+}
+
+describe('dispatch_composes_duty — 代码拼装初始指令', () => {
+  it('职责说明 + 任务 + 根会话 + 报告链要点都在指令里', () => {
+    const text = composeDispatchInstruction({
+      role: { name: '执行者', description: '接受分工后独立完成具体工作。' },
+      task: '改造登录模块',
+      rootSessionId: 'root-1',
+    })
+    expect(text).toContain('执行者')
+    expect(text).toContain('接受分工后独立完成具体工作。')
+    expect(text).toContain('改造登录模块')
+    expect(text).toContain('root-1')
+    expect(text).toContain('报告')
+  })
+})
+
+describe('dispatch_spawns_and_records — 创建子会话并登记分工记录', () => {
+  it('spawn：startActivation 收到 provider/prompt/parent/maxDepth/delivery；分工记录带 childId 会话与待处理标签', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: '拆解并汇总。' })
+    const taskId = await makeTask(records)
+    const sub = fakeSubagents('child-9')
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    const result = (await run(tool, { ...BASE_ARGS, taskId })) as { childId: string; record: { taskId: string; recordId: string } }
+    expect(result.childId).toBe('child-9')
+    const started = sub.started()!
+    expect(started.provider).toBe('spawn')
+    expect(started.promptText).toContain('拆解并汇总。')
+    expect(started.promptText).toContain('改造登录模块')
+    expect(started.parent).toBe(EXEC.agent)
+    expect(started.maxDepth).toBe(2)
+    expect(started.delivery).toBe('parent')
+    // 分工记录自动登记：关联 childId、工作标签待处理、正文 = 拼装指令。
+    const list = await records.list('root-1', { taskId, kind: 'assignment' })
+    expect(list).toHaveLength(1)
+    const record = list[0]!
+    expect(record.workLabel).toBe('待处理')
+    expect(record.sessions).toEqual([{ sessionId: 'child-9', label: '主管' }])
+    expect(record.body).toContain('拆解并汇总。')
+    expect(result.record.taskId).toBe(taskId)
+    expect(result.record.recordId).toBe(record.id)
+  })
+
+  it('fork：provider 传 fork（带父级上下文的派发方式）', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '调研员', description: '只调研不改动。' })
+    const taskId = await makeTask(records)
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await run(tool, { ...BASE_ARGS, taskId, role: '调研员', mode: 'fork' })
+    expect(sub.started()!.provider).toBe('fork')
+  })
+})
+
+describe('dispatch_failure_edges — 失败边界', () => {
+  it('角色不存在 → NOT_FOUND，不创建子会话', async () => {
+    const { records, roles } = await makeDeps()
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await expect(run(tool, { ...BASE_ARGS, role: '不存在' })).rejects.toMatchObject({ code: 'NOT_FOUND' })
+    expect(sub.started()).toBeUndefined()
+    expect(await records.list('root-1')).toEqual([])
+  })
+
+  it('无调用方（exec.agent 缺席）→ 拒绝且不创建', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await expect(run(tool, BASE_ARGS, {})).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect(sub.started()).toBeUndefined()
+  })
+
+  it('子代理服务缺席 → 明确报错', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const tool = buildDispatchTool({ records, roles })
+    await expect(run(tool, BASE_ARGS)).rejects.toThrow(/subagents/)
+  })
+
+  it('spawn 失败 → 错误上抛，不落分工记录', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const sub = fakeSubagents()
+    sub.setFail(new Error('activation limit'))
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await expect(run(tool, BASE_ARGS)).rejects.toThrow(/activation limit/)
+    expect(await records.list('root-1')).toEqual([])
+  })
+
+  it('spawn 成功但登记记录失败 → 返回 childId 与 recordError，不抛（子会话已存在不能丢）', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const failingRecords = {
+      ...records,
+      async create() {
+        throw new Error('disk full')
+      },
+    }
+    const sub = fakeSubagents('child-77')
+    const tool = buildDispatchTool({ records: failingRecords, roles, subagents: sub.face })
+    const result = (await run(tool, BASE_ARGS)) as { childId: string; recordError: string }
+    expect(result.childId).toBe('child-77')
+    expect(result.recordError).toContain('disk full')
+  })
+})
+
+describe('dispatch_bad_args — 参数校验', () => {
+  it('空任务 / 非法方式 / 空 taskId → INVALID_INPUT', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await expect(run(tool, { ...BASE_ARGS, task: '' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, mode: 'teleport' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, taskId: '' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect(sub.started()).toBeUndefined()
+  })
+})

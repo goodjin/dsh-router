@@ -80,7 +80,6 @@ export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   'tool-fs': { applyPatch: false },
   'tool-result-pruner': { thresholdChars: 8192, headChars: 4096, tailChars: 1024 },
   /* 宿主 schema 必填（r6 实测）；spawn + toolName subagent + maxDepth 2 */
-  'tool-subagent': { provider: 'spawn' },
   /* 本包自己的行：Task 2B 起 tools 行无 config（角色闸退役） */
   'tools': {},
   'router-context': { order: 100 },

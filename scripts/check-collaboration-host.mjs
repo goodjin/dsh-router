@@ -11,7 +11,7 @@
  * 与 check-subrows 的差别（brief Phase B）：check-subrows 只证「行能 import + 过包 Config」。
  * 本 wrapper 额外**只读地**断言候选的组合继承契约（不 import 运行时、不驱动 Agent）：
  *   - 恰好一条用户可选预设 dsh-router/Router，persona complete:true，提示词来自 collaborationPrompt；
- *   - 挂了原生 subagent-control + subagent(provider spawn, toolName subagent, maxDepth 2)；
+ *   - delegation 组只挂 subagent-control；派发统一走 router_dispatch（原生 spawn 工具行已删）；
  *   - 无旧 dsh-router-executor/supervisor/worker 别名、无旧动态服务行。
  * 这些是纯文本/preset 结构断言（Layer3 已用 tests/collaboration/preset.spec.ts 证过运行时组合），
  * 本脚本在**无 vitest** 的裸宿主核查进程里再证一遍候选声明面，不声称跑过真实 Agent 流程。
@@ -74,13 +74,17 @@ function assertCompositionInheritance(candidate, patch) {
     }
   }
 
-  // 原生子代理：subagent-control 裸行 + subagent(provider spawn, toolName subagent, maxDepth 2)。
+  // 原生子代理：只挂 subagent-control（控制与发现）；派发统一走 router_dispatch
+  // （2026-11-18 起原生 spawn 工具行删除——防绕过职责注入；spawn/fork 后端由 base 全局提供）。
   const text = readFileSync(patch, 'utf8')
-  if (!/@deepseek-ai\/dsh-tool-subagent-control/.test(text)) {
+  if (!/@deepseek-ai\/dsh-tool-subagent-control'/.test(text)) {
     problems.push('缺少原生 subagent-control 行')
   }
-  if (!/provider:\s*spawn[\s\S]*?toolName:\s*subagent[\s\S]*?maxDepth:\s*2/.test(text)) {
-    problems.push('subagent 行未声明 provider:spawn / toolName:subagent / maxDepth:2')
+  if (/- id:\s*tool-subagent\n/.test(text)) {
+    problems.push('原生 tool-subagent 派发行必须删除（防绕过 router_dispatch 职责注入）')
+  }
+  if (text.includes('tool-subagent-control/list-agents')) {
+    problems.push('list-agents 子路径行必须删除（桌面 0.2.2 已并入主包）')
   }
 
   // 退役别名不得残留。
@@ -185,7 +189,7 @@ async function main() {
   // 组合继承断言（与宿主无关，先跑）。
   const compositionProblems = assertCompositionInheritance(candidate, patch)
   if (compositionProblems.length === 0) {
-    console.log('  ✓ 组合继承：单预设 dsh-router/Router(complete:true) + 原生 subagent(spawn,maxDepth 2) + 无旧别名/服务行')
+    console.log('  ✓ 组合继承：单预设 dsh-router/Router(complete:true) + delegation 仅 control（派发走 router_dispatch）+ 无旧别名/服务行')
   } else {
     console.log('  ✗ 组合继承：')
     for (const p of compositionProblems) console.log(`       ✗ ${p}`)
