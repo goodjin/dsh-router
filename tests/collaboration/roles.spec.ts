@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 
-import { createRoleStore } from '../../src/collaboration/roles.ts'
+import { createRoleStore, seedPresetRoles } from '../../src/collaboration/roles.ts'
 import type { RoleStore } from '../../src/collaboration/types.ts'
 import { makeCollabFs } from './collab-test-fs.ts'
 
@@ -75,10 +75,13 @@ describe('边角与约束', () => {
     expect((await h.store.list())).toHaveLength(1)
   })
 
-  it('save 带不存在的 id → NOT_FOUND', async () => {
+  it('save 带不合法 id（非 UUID）→ INVALID_INPUT；read 缺失仍 NOT_FOUND', async () => {
     const h = await makeStore()
     await expect(
-      h.store.save({ id: '11111111-1114-4111-8111-111111111111', name: 'X', description: 'Y' }),
+      h.store.save({ id: 'not-a-uuid', name: 'X', description: 'Y' }),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(
+      h.store.read('11111111-1114-4111-8111-111111111111'),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' })
   })
 
@@ -208,5 +211,37 @@ describe('修复2 提交快照与队列入口（角色）', () => {
     await Promise.all([firstP, secondP])
     const final = await h.store.read(role.id)
     expect(final.name).toBe('second') // 最后提交者胜
+  })
+})
+
+describe('seedPresetRoles：预置角色与幂等种入', () => {
+  it('save 带不存在但合法的 id：以该 id 新建（upsert，为幂等种入服务）', async () => {
+    const h = await makeStore()
+    const saved = await h.store.save({ id: '11111111-2222-4311-8111-111111111111', name: '新角色', description: 'd' })
+    expect(saved.id).toBe('11111111-2222-4311-8111-111111111111')
+    expect((await h.store.list()).map((r) => r.name)).toEqual(['新角色'])
+  })
+
+  it('空库种入四个预置角色（主管/执行者/调研员/评审员）；重复调用不增不改', async () => {
+    const h = await makeStore()
+    await seedPresetRoles(h.store)
+    await seedPresetRoles(h.store)
+    const list = await h.store.list()
+    expect(list.map((r) => r.name)).toEqual(['主管', '执行者', '调研员', '评审员'])
+    for (const role of list) {
+      expect(role.description.length).toBeGreaterThan(4)
+      expect(role.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    }
+  })
+
+  it('用户改过的预置角色不被覆盖（按 id 判断；描述保留用户版本）', async () => {
+    const h = await makeStore()
+    await seedPresetRoles(h.store)
+    const seeded = (await h.store.list()).find((r) => r.name === '主管')!
+    await h.store.save({ id: seeded.id, name: '主管', description: '用户改过的说明' })
+    await seedPresetRoles(h.store)
+    const after = await h.store.read(seeded.id)
+    expect(after.description).toBe('用户改过的说明')
+    expect((await h.store.list()).map((r) => r.name)).toEqual(['主管', '执行者', '调研员', '评审员'])
   })
 })

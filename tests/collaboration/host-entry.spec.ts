@@ -10,7 +10,10 @@
  *  - 宿主根服务行：裸包名、提供 routerCollaboration、不再 require 旧宿主服务、不注册旧路由。
  */
 
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
 
 import { apply as entryApply, name as entryName, inject as entryInject } from '../../src/entry.ts'
 import { apply as toolsApply, name as toolsName, inject as toolsInject, Config as toolsConfig } from '../../src/tools.ts'
@@ -152,5 +155,39 @@ describe('host root service — bare package name, provides routerCollaboration,
       if (prev === undefined) delete process.env.DSH_HOME
       else process.env.DSH_HOME = prev
     }
+  })
+})
+
+const seededRoots: string[] = []
+afterAll(async () => {
+  await Promise.all(seededRoots.map((dir) => rm(dir, { recursive: true, force: true })))
+})
+
+describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
+  it('apply 后台种入四个预置角色到 dataDir；重复 apply 不增不改', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'router-entry-seed-'))
+    seededRoots.push(dir)
+    const makeCtx = () => {
+      const provided: Array<[string, unknown]> = []
+      return {
+        ctx: {
+          provide(name: string, value: unknown) { provided.push([name, value]); return () => {} },
+          effect: () => () => {},
+        },
+        face: () => provided.find(([n]) => n === 'routerCollaboration')![1] as {
+          roles: { list(): Promise<Array<{ name: string }>> }
+        },
+      }
+    }
+    const first = makeCtx()
+    entryApply(first.ctx, { dataDir: dir })
+    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    const names = (await first.face().roles.list()).map((r) => r.name)
+    expect(names).toEqual(['主管', '执行者', '调研员', '评审员'])
+    const second = makeCtx()
+    entryApply(second.ctx, { dataDir: dir })
+    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    const again = (await second.face().roles.list()).map((r) => r.name)
+    expect(again).toEqual(['主管', '执行者', '调研员', '评审员'])
   })
 })

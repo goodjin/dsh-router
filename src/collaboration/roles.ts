@@ -185,10 +185,14 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
         let id: string
         let createdAt: number
         if (requestId !== undefined) {
+          // upsert：带 id 优先更新既有；文件不存在则以该 id 新建（幂等种入依赖固定 id）。
           // 已有记录读取在队列内；落盘路径坚持已校验的请求 id，不用盘内可能被改写的 id。
-          const existing = await readRoleFile(requestId)
+          const existing = await readRoleFile(requestId).catch((error: unknown) => {
+            if (error instanceof CollaborationError && error.code === 'NOT_FOUND') return undefined
+            throw error
+          })
           id = requestId
-          createdAt = existing.createdAt
+          createdAt = existing?.createdAt ?? nowMs
         } else {
           id = uuid()
           createdAt = nowMs
@@ -206,5 +210,48 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
         return template
       })
     },
+  }
+}
+
+/** 预置角色模板：固定 id（幂等种入——同 id 重复 save 只覆盖同一路径，不产生重复角色）。 */
+export interface PresetRoleTemplate {
+  id: string
+  name: string
+  description: string
+}
+
+/** 首次启用种入的预置角色（专业类型；职责说明会注入协作上下文）。 */
+export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
+  {
+    id: 'a1b2c3d4-0001-4000-8000-000000000001',
+    name: '主管',
+    description: '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。',
+  },
+  {
+    id: 'a1b2c3d4-0002-4000-8000-000000000002',
+    name: '执行者',
+    description: '接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。',
+  },
+  {
+    id: 'a1b2c3d4-0003-4000-8000-000000000003',
+    name: '调研员',
+    description: '查资料、读源码与文档，产出结论与证据位置供决策参考；只调研不改动。',
+  },
+  {
+    id: 'a1b2c3d4-0004-4000-8000-000000000004',
+    name: '评审员',
+    description: '对照任务说明的验收条件检查交付，给出通过或问题清单；评审不代做修改。',
+  },
+]
+
+/**
+ * 幂等种入预置角色：按固定 id 判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
+ * 缺失则以固定 id 新建。并发双开最坏是同路径同内容覆盖，不产生重复角色。
+ */
+export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save'>): Promise<void> {
+  const existing = new Set((await store.list()).map((role) => role.id))
+  for (const preset of PRESET_ROLE_TEMPLATES) {
+    if (existing.has(preset.id)) continue
+    await store.save({ id: preset.id, name: preset.name, description: preset.description })
   }
 }
