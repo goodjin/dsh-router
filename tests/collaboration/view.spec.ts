@@ -167,14 +167,14 @@ describe('view_renders_tasks_canvas_and_jump — 任务看板 + 会话画布 + �
     await act(async () => { root.render(createElement(CollaborationView, baseProps(store))) })
     await flush()
     // 任务看板：两张任务卡；T2 最近活动更晚排在前面。
-    const cards = container.querySelectorAll('[data-router-collab-task]')
-    expect(cards).toHaveLength(2)
-    expect(cards[0]!.getAttribute('data-router-collab-task')).toBe('T2')
+    const nodes = container.querySelectorAll('[data-router-collab-task-node]')
+    expect(nodes).toHaveLength(2)
+    expect(container.querySelector('[data-router-collab-task-node="T2"]')).toBeTruthy()
     // 选中 T1（默认取第一张前先点 T1）。
-    click(container.querySelector('[data-router-collab-task="T1"]')!)
+    click(container.querySelector('[data-router-collab-task-node="T1"]')!)
     await flush()
     // 进度文本（T1 卡内：进行中 1）。
-    const progress = container.querySelector('[data-router-collab-task="T1"] [data-router-collab-task-progress]')
+    const progress = container.querySelector('[data-router-collab-task-node="T1"] [data-router-collab-task-progress]')
     expect(progress!.textContent).toContain('进行中 1')
     // 说明正文。
     expect(container.querySelector('[data-router-collab-task-brief]')!.textContent).toContain('把登录模块改造为统一认证')
@@ -186,6 +186,7 @@ describe('view_renders_tasks_canvas_and_jump — 任务看板 + 会话画布 + �
     expect(container.querySelector('[data-router-collab-node-label="w1"]')!.textContent).toContain('前端成员')
     expect(container.querySelector('[data-router-collab-node-status="w1"]')!.textContent).toContain('运行中')
     expect(container.querySelector('[data-router-collab-node-worklabel="w1"]')!.textContent).toContain('进行中')
+    expect(container.querySelector('[data-router-collab-node-role="w1"]')!.textContent).toContain('前端成员')
     // 目录按需请求：根与树内节点都请求过。
     expect(refreshProjection).toHaveBeenCalledWith('root-1')
     expect(refreshProjection).toHaveBeenCalledWith('w1')
@@ -196,8 +197,9 @@ describe('view_renders_tasks_canvas_and_jump — 任务看板 + 会话画布 + �
     // 分工与报告列表都在。
     expect(container.querySelector('[data-router-collab-record="T1:r-a1"]')!.textContent).toContain('前端分工')
     expect(container.querySelector('[data-router-collab-record="T1:r-rep1"]')!.textContent).toContain('成员报告')
-    // 角色区在页底。
-    expect(container.querySelector('[data-router-collab-roles-section]')).toBeTruthy()
+    // 角色/任务双标签在页头下方；角色内容切标签后才可见。
+    expect(container.querySelector('[data-router-collab-tab="roles"]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-list]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 })
@@ -274,7 +276,7 @@ describe('view_task_selection — 多任务切换', () => {
     const { root, container } = render(props)
     await act(async () => { root.render(createElement(CollaborationView, props)) })
     await flush()
-    click(container.querySelector('[data-router-collab-task="T2"]')!)
+    click(container.querySelector('[data-router-collab-task-node="T2"]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-task-brief]')!.textContent).toContain('改造支付流程')
     // T2 无关联会话：整树保留（无剪枝），w-other 可见。
@@ -284,7 +286,7 @@ describe('view_task_selection — 多任务切换', () => {
 })
 
 describe('role edit shared manual/model — 视图页保存与模型工具共享同一 RoleStore', () => {
-  it('填表保存角色后出现在模板列表', async () => {
+  it('切到角色标签：左侧列表；新建 → 右侧编辑 → 保存后进入列表并保持选中', async () => {
     const saved: RoleTemplate = { name: '测试工程师', description: '写测试' }
     let roles: RoleTemplate[] = []
     const api: CollaborationApi = {
@@ -298,21 +300,65 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     const { root, container } = render(props)
     await act(async () => { root.render(createElement(CollaborationView, props)) })
     await flush()
-    expect(container.querySelectorAll('[data-router-collab-template]')).toHaveLength(0)
+    // 默认任务标签：角色编辑器不可见。
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-role-item]')).toHaveLength(0)
+    click(container.querySelector('[data-router-collab-role-new]')!)
+    await flush()
+    expect(container.querySelector('[data-router-collab-role-item="__draft__"]')).toBeTruthy()
     const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    const descInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-desc]')!
+    const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
     await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-      setter.call(nameInput, '测试工程师')
+      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      inputSetter.call(nameInput, '测试工程师')
       nameInput.dispatchEvent(new Event('input', { bubbles: true }))
-      setter.call(descInput, '写测试')
+      const areaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      areaSetter.call(descInput, '写测试')
       descInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
+    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
     click(container.querySelector('[data-router-collab-role-save]')!)
     await flush()
     await flush()
-    const templates = container.querySelectorAll('[data-router-collab-template]')
-    expect([...templates].some((t) => t.textContent!.includes('测试工程师'))).toBe(true)
+    const items = container.querySelectorAll('[data-router-collab-role-item]')
+    expect([...items].some((t) => t.textContent!.includes('测试工程师'))).toBe(true)
+    expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('测试工程师')
+    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('编辑既有角色：职责为多行编辑框，保存即更新且未保存标记消失', async () => {
+    let roles: RoleTemplate[] = [{ name: '主管', description: '旧说明' }]
+    const api: CollaborationApi = {
+      listRecords: async () => [],
+      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
+      listRoles: async () => roles,
+      saveRole: async (input) => { roles = [{ name: input.name, description: input.description }]; return { name: input.name, description: input.description } },
+    }
+    const store = startCollaborationStore({ api })
+    const props = baseProps(store)
+    const { root, container } = render(props)
+    await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-role-item="主管"]')!)
+    await flush()
+    const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
+    expect(descInput.value).toBe('旧说明')
+    await act(async () => {
+      const areaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      areaSetter.call(descInput, '第一行：拆解任务\n第二行：汇总结果')
+      descInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
+    click(container.querySelector('[data-router-collab-role-save]')!)
+    await flush()
+    await flush()
+    expect((container.querySelector('[data-router-collab-role-desc]') as HTMLTextAreaElement).value).toContain('第二行：汇总结果')
+    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 
@@ -326,6 +372,10 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     const props = baseProps(store)
     const { root, container } = render(props)
     await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-role-new]')!)
     await flush()
     const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
     await act(async () => {

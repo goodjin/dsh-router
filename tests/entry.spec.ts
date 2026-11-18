@@ -201,13 +201,13 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
 
   it('浏览器面全部组件不再用原生 title 悬浮提示', () => {
     // 只扫**当前存活**的浏览器面文件：ui-kit 基线 + 协作视图页各组件。旧
-    // collaboration-panel/浮窗/设置段已随弹出卡片退役，不再扫描。
+    // collaboration-panel/task-board/roles-section 已随双标签改版退役，不再扫描。
     const files = [
       'ui-kit.tsx',
       'collaboration-view.tsx',
-      'task-board.tsx',
+      'task-canvas.tsx',
       'session-canvas.tsx',
-      'roles-section.tsx',
+      'roles-tab.tsx',
       'record-detail.tsx',
     ]
     for (const file of files) {

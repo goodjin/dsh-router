@@ -17,11 +17,12 @@ import { useEffect, useState, useSyncExternalStore, type CSSProperties, type Rea
 
 import type { CollaborationStore } from './collaboration-store.ts'
 import { RecordDetail } from './record-detail.tsx'
-import { RolesSection } from './roles-section.tsx'
+import { RolesTab } from './roles-tab.tsx'
 import { SessionCanvas } from './session-canvas.tsx'
-import { TaskBoard } from './task-board.tsx'
+import { TaskCanvas } from './task-canvas.tsx'
 import { deriveTasks, type TaskView } from './task-view-model.ts'
-import type { WorkLabel, WorkRecord } from '../collaboration/types.ts'
+import type { SessionLinkage } from './session-tree.ts'
+import type { WorkRecord } from '../collaboration/types.ts'
 
 /** 会话标签行座位（与官方统计页同款挂法）。 */
 export const COLLABORATION_VIEW_SLOT = 'conversation.view'
@@ -204,6 +205,7 @@ function RootBar(props: { store: CollaborationStore }): ReactNode {
 /** 协作视图页。 */
 export function CollaborationView(props: CollaborationViewProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
+  const [activeTab, setActiveTab] = useState<'tasks' | 'roles'>('tasks')
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>(undefined)
   const effective = state.effectiveRootId
   const tasks = deriveTasks(state.records)
@@ -242,8 +244,8 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
   }
   const onOpenSession = (sessionId: string): void => { props.uiWorkspace.openSession(sessionId) }
 
-  // 该任务的关联会话 → 分工工作标签（先分工定标签，再补其余记录的成员关系）。
-  const linked = new Map<string, WorkLabel | undefined>()
+  // 该任务的关联会话 → 角色名/工作标签（先分工定标签，再补其余记录的成员关系）。
+  const linked = new Map<string, SessionLinkage>()
   const taskRecords: WorkRecord[] = selectedTask === undefined
     ? []
     : state.records
@@ -252,12 +254,14 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
   for (const record of taskRecords) {
     if (record.kind !== 'assignment') continue
     for (const session of record.sessions ?? []) {
-      if (!linked.has(session.sessionId)) linked.set(session.sessionId, record.workLabel)
+      if (!linked.has(session.sessionId)) {
+        linked.set(session.sessionId, { roleLabel: session.label, workLabel: record.workLabel })
+      }
     }
   }
   for (const record of taskRecords) {
     for (const session of record.sessions ?? []) {
-      if (!linked.has(session.sessionId)) linked.set(session.sessionId, undefined)
+      if (!linked.has(session.sessionId)) linked.set(session.sessionId, { roleLabel: session.label })
     }
   }
 
@@ -267,6 +271,31 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
   return (
     <div data-router-collab-view style={{ height: '100%', boxSizing: 'border-box', overflow: 'auto', padding: '12px 16px', fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, #1f2126)' }}>
       <RootBar store={props.store} />
+      <div role="tablist" style={{ display: 'flex', gap: 6, marginTop: 10, borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)' }}>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'tasks'}
+          data-router-collab-tab="tasks"
+          style={{ ...TAB_STYLE, ...(activeTab === 'tasks' ? TAB_ACTIVE_STYLE : {}) }}
+          onClick={() => { setActiveTab('tasks') }}
+        >
+          任务{tasks.length > 0 ? `（${tasks.length}）` : ''}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeTab === 'roles'}
+          data-router-collab-tab="roles"
+          style={{ ...TAB_STYLE, ...(activeTab === 'roles' ? TAB_ACTIVE_STYLE : {}) }}
+          onClick={() => { setActiveTab('roles') }}
+        >
+          角色{state.templates.length > 0 ? `（${state.templates.length}）` : ''}
+        </button>
+      </div>
+      {activeTab === 'roles' ? <RolesTab store={props.store} /> : null}
+      {activeTab === 'tasks' ? (
+        <>
       {state.recordsError !== null ? (
         <div data-router-collab-records-error style={{ ...ERROR_STYLE, marginTop: 10 }} role="alert">
           <span style={{ flex: 1 }}>{state.recordsError}</span>
@@ -281,10 +310,13 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
           {effective === undefined ? '请输入根会话 ID 查看记录' : '暂无任务记录'}
         </div>
       ) : null}
+      {tasks.length > 0 ? (
+        <div style={{ marginTop: 12 }}>
+          <TaskCanvas tasks={tasks} rootId={effective} childrenOf={childrenOf} selectedTaskId={selectedTask?.taskId} onSelect={setSelectedTaskId} />
+        </div>
+      ) : null}
       {tasks.length > 0 && selectedTask !== undefined ? (
-        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', marginTop: 12 }}>
-          <TaskBoard tasks={tasks} selectedTaskId={selectedTask.taskId} onSelect={setSelectedTaskId} />
-          <div data-router-collab-task-detail style={{ flex: 1, minWidth: 0 }}>
+        <div data-router-collab-task-detail style={{ marginTop: 12 }}>
             <h3 style={{ margin: '0 0 4px', fontSize: 14 }}>{selectedTask.title}</h3>
             {selectedTask.summaryBody !== undefined && selectedTask.summaryBody !== '' ? (
               <div data-router-collab-task-brief style={BODY_STYLE}>{selectedTask.summaryBody}</div>
@@ -335,11 +367,27 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
                 {reports.length === 0 ? <div style={{ fontSize: 12, color: '#6b7078' }}>暂无报告</div> : null}
               </div>
             </div>
-            <RecordDetail store={props.store} statusOf={statusOf} onOpenSession={onOpenSession} />
-          </div>
+          <RecordDetail store={props.store} statusOf={statusOf} onOpenSession={onOpenSession} />
         </div>
       ) : null}
-      <RolesSection store={props.store} />
+        </>
+      ) : null}
     </div>
   )
+}
+
+const TAB_STYLE: CSSProperties = {
+  padding: '6px 14px',
+  border: 0,
+  borderBottom: '2px solid transparent',
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-secondary, #4a4e57)',
+  cursor: 'pointer',
+  fontSize: 13,
+}
+
+const TAB_ACTIVE_STYLE: CSSProperties = {
+  color: 'var(--dsw-alias-accent-primary, #3b6ef6)',
+  borderBottom: '2px solid var(--dsw-alias-accent-primary, #3b6ef6)',
+  fontWeight: 500,
 }

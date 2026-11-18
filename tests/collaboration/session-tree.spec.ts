@@ -44,7 +44,7 @@ describe('tree_builds_real_edges — 真实父子树与状态映射', () => {
       }),
       statusOf: (id) => (id === 'w1' ? true : id === 'w2' ? false : undefined),
       // w1、w2 都被关联：整树保留（剪枝行为在 tree_prunes_to_linked 单独验证）。
-      linked: new Map([['w1', '进行中'], ['w2', '受阻']]),
+      linked: new Map([['w1', { roleLabel: '前端成员', workLabel: '进行中' }], ['w2', { roleLabel: '后端成员', workLabel: '受阻' }]]),
     }))
     expect(result.root.sessionId).toBe('root-1')
     expect(result.root.label).toBe('根会话')
@@ -53,6 +53,7 @@ describe('tree_builds_real_edges — 真实父子树与状态映射', () => {
     expect(w1.children.map((c) => c.sessionId)).toEqual(['c1'])
     expect(w1.status).toBe('running')
     expect(w1.workLabel).toBe('进行中')
+    expect(w1.roleLabel).toBe('前端成员')
     expect(w1.linked).toBe(true)
     expect(result.root.children[1]!.status).toBe('inactive')
     expect(w1.children[0]!.status).toBe('unknown')
@@ -83,7 +84,7 @@ describe('tree_prunes_to_linked — 有关联时只留关联闭包', () => {
         root: [{ id: 'w1', label: '无关' }, { id: 'w2', label: '有关' }],
         w1: [{ id: 'c1' }],
       }),
-      linked: new Map([['w2', undefined]]),
+      linked: new Map([['w2', {}]]),
     }))
     expect(result.root.children.map((c) => c.sessionId)).toEqual(['w2'])
   })
@@ -95,7 +96,7 @@ describe('tree_prunes_to_linked — 有关联时只留关联闭包', () => {
         root: [{ id: 'w1' }, { id: 'w2' }],
         w1: [{ id: 'c1' }, { id: 'c2' }],
       }),
-      linked: new Map([['w1', '已报告']]),
+      linked: new Map([['w1', { workLabel: '已报告' }]]),
     }))
     const w1 = result.root.children[0]!
     expect(w1.sessionId).toBe('w1')
@@ -113,7 +114,7 @@ describe('tree_prunes_to_linked — 有关联时只留关联闭包', () => {
         w1: [{ id: 'c1' }, { id: 'c2' }],
         c1: [{ id: 'd1' }],
       }),
-      linked: new Map([['c1', '已报告']]),
+      linked: new Map([['c1', { workLabel: '已报告' }]]),
     }))
     const w1 = result.root.children[0]!
     expect(w1.sessionId).toBe('w1')
@@ -141,13 +142,14 @@ describe('tree_orphans_listed — 不在树里的关联会话列为孤儿', () =
     const result = buildSessionTree(makeInput({
       rootId: 'root',
       childrenOf: catalogOf({ root: [{ id: 'w1' }] }),
-      linked: new Map([['w1', '进行中'], ['outside-9', undefined]]),
+      linked: new Map([['w1', { workLabel: '进行中' }], ['outside-9', { roleLabel: '外部会话' }]]),
       titleOf: (id) => (id === 'outside-9' ? '外部会话' : undefined),
     }))
     expect(result.root.children.map((c) => c.sessionId)).toEqual(['w1'])
     expect(result.orphans).toHaveLength(1)
     expect(result.orphans[0]!.sessionId).toBe('outside-9')
     expect(result.orphans[0]!.label).toBe('外部会话')
+    expect(result.orphans[0]!.roleLabel).toBe('外部会话')
     expect(result.orphans[0]!.linked).toBe(true)
     expect(result.orphans[0]!.children).toEqual([])
   })
