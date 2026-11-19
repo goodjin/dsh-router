@@ -250,6 +250,24 @@ describe('seed_upgrade — 历史预置文本的精确升级', () => {
     expect(await h.store.read('主管')).toMatchObject({ description: latest })
   })
 
+  it('主管 v2 文本（加 fork 规则前）升级到最新，最新正文含「一律用 fork」', async () => {
+    const h = await makeStore()
+    const v2Text = PRESET_ROLE_TEMPLATES.find((r) => r.name === '主管')!.description
+    // 预置已是最新；把 store 里的主管改写成 v2 旧文本模拟老安装。
+    const rolesModule = await import('../../src/collaboration/preset-roles.ts')
+    // SUPERVISOR_V2_TEXT 未导出：用历史表里的最新一版作为 v2 文本来源。
+    const history = rolesModule.HISTORICAL_PRESET_DESCRIPTIONS['主管']
+    if (history === undefined || history.length === 0) throw new Error('主管 历史文本表为空')
+    const previous = history[history.length - 1]!
+    await h.store.save({ name: '主管', description: previous })
+    await seedPresetRoles(h.store)
+    const upgraded = await h.store.read('主管')
+    expect(upgraded.description).toBe(v2Text)
+    expect(upgraded.description).toContain('一律用 fork')
+    // v2 文本已登记进历史表（精确升级依据）。
+    expect(history.some((t) => t.includes('一律用 fork'))).toBe(false)
+  })
+
   it('现有内容与任何历史文本都不一致（用户改过）时不动', async () => {
     const h = await makeStore()
     const custom = '我们组自己定义的主管规则，与预置文本不同。'
