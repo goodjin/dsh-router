@@ -14,6 +14,13 @@ var CollaborationError = class extends Error {
 };
 
 //#endregion
+//#region src/collaboration/dispatch.ts
+/** 宿主 dsh-subagent.startActivation 内部第一行就 spec.signal.throwIfAborted()（非可选，
+*  0.2.1 与 0.2.2 皆然），缺 signal 直接 TypeError。优先用调用方 turn 的 exec.signal；
+*  缺席时兜底插件级 controller（同 agent-kernel D2），保证任何宿主下都传真实 AbortSignal。 */
+const dispatchLifetime = new AbortController();
+
+//#endregion
 //#region src/collaboration/tools.ts
 const RECORD_KINDS = [
 	"task",
