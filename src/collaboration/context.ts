@@ -66,7 +66,7 @@ export function buildCollaborationContext(input: CollaborationContextInput): str
   ].join('\n')
 }
 
-/** 角色清单段：注入名称与职责说明 + 用法指引；缺失/为空各自如实说明并指向工具。 */
+/** 角色清单段：注入名称与首行摘要（v2 两层结构）+ 用法指引；缺失/为空各自如实说明并指向工具。 */
 function renderRoles(roles: ReadonlyArray<{ name: string; description: string }> | undefined): string[] {
   const header = '角色模板（专业类型）：派子会话时，把选中角色的职责说明连同任务要求一起写进给子会话的初始指令。'
   if (roles === undefined) {
@@ -77,7 +77,16 @@ function renderRoles(roles: ReadonlyArray<{ name: string; description: string }>
   }
   return [
     header,
-    ...roles.map((role) => `- ${role.name}：${role.description === '' ? '（无职责说明）' : role.description}`),
+    ...roles.map((role) => `- ${role.name}：${dutySummary(role.description) === '' ? '（无职责说明）' : dutySummary(role.description)}`),
     '最新清单与详情用 router_role_list / router_role_read 查询；router_role_save 可新增或修改。',
   ]
+}
+
+/** 职责摘要：取第一个非空行（v2 两层结构的首行；清单只注入摘要，控制上下文体积，全文派发时才用）。 */
+function dutySummary(description: string): string {
+  for (const line of description.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed !== '') return trimmed
+  }
+  return ''
 }

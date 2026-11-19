@@ -135,6 +135,27 @@ describe('buildCollaborationContext — 角色清单注入', () => {
     expect(out).toContain('router_role_save')
   })
 
+  it('多行职责只注入首行摘要，正文不进清单（v2 两层结构）', () => {
+    const out = buildCollaborationContext({
+      sessionId: 'sid', dataDir: '/data/plugin',
+      roles: [
+        { name: '测试工程师', description: '一句话摘要，测试用。\n\n## 详细职责\n这一段正文不应进入上下文清单。' },
+      ],
+    })
+    expect(out).toContain('测试工程师：一句话摘要，测试用。')
+    expect(out).not.toContain('详细职责')
+    expect(out).not.toContain('不应进入上下文清单')
+  })
+
+  it('首行为空行/空白的职责取第一个非空行做摘要', () => {
+    const out = buildCollaborationContext({
+      sessionId: 'sid', dataDir: '/data/plugin',
+      roles: [{ name: '调研员', description: '\n  \n摘要行在前导空白之后。\n正文第二段。' }],
+    })
+    expect(out).toContain('调研员：摘要行在前导空白之后。')
+    expect(out).not.toContain('正文第二段')
+  })
+
   it('未提供（undefined，尚未加载）：显示暂不可用并指向查询工具', () => {
     const out = buildCollaborationContext({ sessionId: 'sid', dataDir: '/data/plugin' })
     expect(out).toContain('暂不可用')
