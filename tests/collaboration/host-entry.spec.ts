@@ -19,7 +19,7 @@ import { apply as entryApply, name as entryName, inject as entryInject } from '.
 import { apply as toolsApply, name as toolsName, inject as toolsInject, Config as toolsConfig } from '../../src/tools.ts'
 import { apply as contextApply, name as contextName, inject as contextInject, Config as contextConfig } from '../../src/context.ts'
 import { COLLABORATION_TOOL_NAMES } from '../../src/collaboration/tools.ts'
-import { PRESET_ROLE_TEMPLATES } from '../../src/collaboration/roles.ts'
+import { PRESET_ROLE_TEMPLATES } from '../../src/collaboration/preset-roles.ts'
 import { createCollaborationRuntime } from '../../src/collaboration/runtime.ts'
 import type { ToolDefinition } from '../../src/collaboration/tools.ts'
 
