@@ -30,7 +30,7 @@ export const collaborationPrompt = [
   '',
   '派发与通知协议（派发只走 router_dispatch；控制与发现用宿主原生工具）：',
   '- 先用 router_record_create 建任务说明（task），再用 router_dispatch 按角色派发：职责说明由代码从角色库读取并注入初始指令，分工记录自动登记（关联子会话、待处理标签）；',
-  '- 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；',
+  '- 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；你的角色职责另有约定时从其约定（如主管派子会话一律用 fork）；',
   '- 成员把进度/问题/结果用 send_message 报给主管，主管把汇总/待决报给 Router，Router 把需用户决定的事项交给用户；',
   '- 用 list_agents 查看可继续的直接子会话及其活跃状态（running/inactive），再决定是否 send_message 续跑；',
   '- 需要中断某个活着的子会话时用 interrupt_agent（按父子邻接授权，不可越权）；',

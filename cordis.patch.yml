@@ -7,9 +7,9 @@
 #   - 一条静态预设行 dsh-router/Router（@deepseek-ai/dsh-agent-preset）：
 #     · persona complete:true，prefix 即 collaborationPrompt 单一来源（生成脚本实际导入）；
 #     · tools 行 @goodjin2/dsh-router/tools 注册八条协作工具（含 router_dispatch；无 role 配置/角色闸）；
-#     · agent-instructions 项目指令、time-context 报时上下文、tool-schedule 定时任务四件套
-#       （Router 会话可自建定时任务；new/new_once 投递会话继承本预设）、tool-bash/fs/fs-search/web/todo/jobs
-#       原生执行、tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
+#     · agent-instructions 项目指令、time-context 报时上下文、tool-schedule 定时任务四件套、
+#       tool-bash/fs/fs-search/web/todo/jobs 原生执行、
+#       tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
 #       （tool-subagent-control 裸行；派发走 router_dispatch，不挂原生 spawn 工具）；
 #     · 无旧 executor/supervisor/worker 别名、无 perrole 插件、无动态预设引擎。
 #
@@ -53,7 +53,7 @@
 
                 派发与通知协议（派发只走 router_dispatch；控制与发现用宿主原生工具）：
                 - 先用 router_record_create 建任务说明（task），再用 router_dispatch 按角色派发：职责说明由代码从角色库读取并注入初始指令，分工记录自动登记（关联子会话、待处理标签）；
-                - 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；
+                - 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；你的角色职责另有约定时从其约定（如主管派子会话一律用 fork）；
                 - 成员把进度/问题/结果用 send_message 报给主管，主管把汇总/待决报给 Router，Router 把需用户决定的事项交给用户；
                 - 用 list_agents 查看可继续的直接子会话及其活跃状态（running/inactive），再决定是否 send_message 续跑；
                 - 需要中断某个活着的子会话时用 interrupt_agent（按父子邻接授权，不可越权）；
