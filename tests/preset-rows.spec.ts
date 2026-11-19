@@ -91,6 +91,10 @@ export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   'ask-user': {},
   'tool-bash': {},
   'tool-jobs': {},
+  /* 定时任务四件套 + 报时上下文（2026-11-19 补挂，与宿主 standard 预设同款、无 config；
+     Router 会话自建定时任务，new/new_once 投递会话继承本预设） */
+  'time-context': {},
+  'tool-schedule': {},
   'delegation': {},
   'tool-subagent-control': {},
   'compaction': {},

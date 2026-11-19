@@ -7,8 +7,9 @@
 #   - 一条静态预设行 dsh-router/Router（@deepseek-ai/dsh-agent-preset）：
 #     · persona complete:true，prefix 即 collaborationPrompt 单一来源（生成脚本实际导入）；
 #     · tools 行 @goodjin2/dsh-router/tools 注册八条协作工具（含 router_dispatch；无 role 配置/角色闸）；
-#     · agent-instructions 项目指令、tool-bash/fs/fs-search/web/todo/jobs 原生执行、
-#       tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
+#     · agent-instructions 项目指令、time-context 报时上下文、tool-schedule 定时任务四件套
+#       （Router 会话可自建定时任务；new/new_once 投递会话继承本预设）、tool-bash/fs/fs-search/web/todo/jobs
+#       原生执行、tool-ask-user 用户提问、compaction 组默认压缩、delegation 组子代理控制
 #       （tool-subagent-control 裸行；派发走 router_dispatch，不挂原生 spawn 工具）；
 #     · 无旧 executor/supervisor/worker 别名、无 perrole 插件、无动态预设引擎。
 #
@@ -98,6 +99,9 @@
             name: '@deepseek-ai/dsh-agent-instructions'
             config:
               maxBytes: 65536
+          # 报时上下文（无歧义时把浏览器时区交给模型，与 standard 预设同款）。
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
           # 原生执行工具。
           - id: tool-bash
             name: '@deepseek-ai/dsh-tool-bash'
@@ -121,6 +125,11 @@
               allowParallelInProgress: true
           - id: tool-jobs
             name: '@deepseek-ai/dsh-tool-jobs'
+          # 定时任务四件套（schedule_create/list/update/delete）。
+          # Router 会话可自建定时任务；投递目标 new/new_once 开出的会话
+          # 复制本会话的组合预设，即 Router。行形状与 standard 预设同款（无 config）。
+          - id: tool-schedule
+            name: '@deepseek-ai/dsh-tool-schedule'
           # 用户提问（宿主原生浮窗）。
           - id: ask-user
             name: '@deepseek-ai/dsh-tool-ask-user'
