@@ -33,6 +33,7 @@ interface Started {
   promptText: string
   parent: unknown
   maxDepth: number | undefined
+  signal: unknown
   delivery: string
 }
 
@@ -48,6 +49,7 @@ function fakeSubagents(childId = 'child-1'): { face: SubagentsFace; started: () 
         promptText: (request.request.prompt[0] as { text: string }).text,
         parent: request.request.parent,
         maxDepth: (request.request as { maxDepth?: number }).maxDepth,
+        signal: request.signal,
         delivery: request.delivery,
       }
       return { childId }
@@ -126,6 +128,31 @@ describe('dispatch_spawns_and_records — 创建子会话并登记分工记录',
     const tool = buildDispatchTool({ records, roles, subagents: sub.face })
     await run(tool, { ...BASE_ARGS, taskId, role: '调研员', mode: 'fork' })
     expect(sub.started()!.provider).toBe('fork')
+  })
+})
+
+describe('dispatch_signal — startActivation 必带真实 AbortSignal', () => {
+  // 宿主 dsh-subagent.startActivation 内部 spec.signal.throwIfAborted() 非可选，
+  // 传 undefined 即「Cannot read properties of undefined (reading 'throwIfAborted')」。
+  it('exec.signal 存在时透传调用方 turn 的 signal', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const taskId = await makeTask(records)
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    const controller = new AbortController()
+    await run(tool, { ...BASE_ARGS, taskId }, { agent: EXEC.agent, signal: controller.signal })
+    expect(sub.started()!.signal).toBe(controller.signal)
+  })
+
+  it('exec.signal 缺席时兜底插件级 AbortSignal（不再传 undefined）', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '主管', description: 'd' })
+    const taskId = await makeTask(records)
+    const sub = fakeSubagents()
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    await run(tool, { ...BASE_ARGS, taskId })
+    expect(sub.started()!.signal).toBeInstanceOf(AbortSignal)
   })
 })
 

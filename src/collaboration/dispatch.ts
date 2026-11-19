@@ -39,11 +39,17 @@ export interface DispatchDeps {
 /** 工具执行上下文的最小面（宿主 execute(args, exec) 的 exec）。 */
 interface DispatchExec {
   agent?: unknown
+  signal?: AbortSignal
 }
 
 /** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次。 */
 const DISPATCH_MODES = ['spawn', 'fork'] as const
 type DispatchMode = (typeof DISPATCH_MODES)[number]
+
+/** 宿主 dsh-subagent.startActivation 内部第一行就 spec.signal.throwIfAborted()（非可选，
+ *  0.2.1 与 0.2.2 皆然），缺 signal 直接 TypeError。优先用调用方 turn 的 exec.signal；
+ *  缺席时兜底插件级 controller（同 agent-kernel D2），保证任何宿主下都传真实 AbortSignal。 */
+const dispatchLifetime = new AbortController()
 
 /** 拼装给子会话的初始指令：职责 + 任务 + 根会话 + 报告链要点（纯函数）。 */
 export function composeDispatchInstruction(input: {
@@ -132,12 +138,16 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       if (parent === undefined) {
         throw new CollaborationError('INVALID_INPUT', 'router_dispatch 需要调用方 agent（exec.agent 缺失）')
       }
+      const execSignal = (exec as DispatchExec | undefined)?.signal
+      const signal = execSignal instanceof AbortSignal ? execSignal : dispatchLifetime.signal
       const instruction = composeDispatchInstruction({ role, task, rootSessionId })
-      // 创建子会话；失败原样上抛（不落记录）。
+      // 创建子会话；失败原样上抛（不落记录）。signal 必传：宿主 startActivation 会
+      // spec.signal.throwIfAborted()，缺席即 TypeError（见 dispatchLifetime 说明）。
       const { childId } = await deps.subagents.startActivation({
         provider,
         label: `${role.name}·${taskId}`,
         request: { prompt: [{ type: 'text', text: instruction }], parent, maxDepth: 2 },
+        signal,
         delivery: 'parent',
       })
       // 登记分工记录；失败不丢 childId（返回 recordError，让模型补记）。

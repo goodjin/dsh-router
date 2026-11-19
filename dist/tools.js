@@ -16,6 +16,10 @@ var CollaborationError = class extends Error {
 //#region src/collaboration/dispatch.ts
 /** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次。 */
 const DISPATCH_MODES = ["spawn", "fork"];
+/** 宿主 dsh-subagent.startActivation 内部第一行就 spec.signal.throwIfAborted()（非可选，
+*  0.2.1 与 0.2.2 皆然），缺 signal 直接 TypeError。优先用调用方 turn 的 exec.signal；
+*  缺席时兜底插件级 controller（同 agent-kernel D2），保证任何宿主下都传真实 AbortSignal。 */
+const dispatchLifetime = new AbortController();
 /** 拼装给子会话的初始指令：职责 + 任务 + 根会话 + 报告链要点（纯函数）。 */
 function composeDispatchInstruction(input) {
 	const duty = input.role.description.trim() === "" ? "（该角色模板未写职责说明）" : input.role.description.trim();
@@ -110,6 +114,8 @@ function buildDispatchTool(deps) {
 			if (deps.subagents === void 0) throw new CollaborationError("IO_ERROR", "subagents 服务不可用：无法创建子会话（检查宿主装载）");
 			const parent = exec?.agent;
 			if (parent === void 0) throw new CollaborationError("INVALID_INPUT", "router_dispatch 需要调用方 agent（exec.agent 缺失）");
+			const execSignal = exec?.signal;
+			const signal = execSignal instanceof AbortSignal ? execSignal : dispatchLifetime.signal;
 			const instruction = composeDispatchInstruction({
 				role,
 				task,
@@ -126,6 +132,7 @@ function buildDispatchTool(deps) {
 					parent,
 					maxDepth: 2
 				},
+				signal,
 				delivery: "parent"
 			});
 			try {
