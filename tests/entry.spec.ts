@@ -205,6 +205,7 @@ describe('ui-kit 导出形状（规格 §9 样式基线，供 C3 设置页复用
     const files = [
       'ui-kit.tsx',
       'collaboration-view.tsx',
+      'task-list.tsx',
       'task-canvas.tsx',
       'session-canvas.tsx',
       'roles-tab.tsx',

@@ -20,6 +20,7 @@ import { RecordDetail } from './record-detail.tsx'
 import { RolesTab } from './roles-tab.tsx'
 import { SessionCanvas } from './session-canvas.tsx'
 import { TaskCanvas } from './task-canvas.tsx'
+import { TaskList } from './task-list.tsx'
 import { deriveTasks, type TaskView } from './task-view-model.ts'
 import type { SessionLinkage } from './session-tree.ts'
 import type { WorkRecord } from '../collaboration/types.ts'
@@ -205,7 +206,7 @@ function RootBar(props: { store: CollaborationStore }): ReactNode {
 /** 协作视图页。 */
 export function CollaborationView(props: CollaborationViewProps): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
-  const [activeTab, setActiveTab] = useState<'tasks' | 'roles'>('tasks')
+  const [activeTab, setActiveTab] = useState<'tasks' | 'graph' | 'roles'>('tasks')
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>(undefined)
   const effective = state.effectiveRootId
   const tasks = deriveTasks(state.records)
@@ -285,6 +286,16 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
         <button
           type="button"
           role="tab"
+          aria-selected={activeTab === 'graph'}
+          data-router-collab-tab="graph"
+          style={{ ...TAB_STYLE, ...(activeTab === 'graph' ? TAB_ACTIVE_STYLE : {}) }}
+          onClick={() => { setActiveTab('graph') }}
+        >
+          任务图
+        </button>
+        <button
+          type="button"
+          role="tab"
           aria-selected={activeTab === 'roles'}
           data-router-collab-tab="roles"
           style={{ ...TAB_STYLE, ...(activeTab === 'roles' ? TAB_ACTIVE_STYLE : {}) }}
@@ -294,6 +305,15 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
         </button>
       </div>
       {activeTab === 'roles' ? <RolesTab store={props.store} /> : null}
+      {activeTab === 'graph' ? (
+        <TaskCanvas
+          tasks={tasks}
+          rootId={effective}
+          childrenOf={childrenOf}
+          selectedTaskId={selectedTask?.taskId}
+          onSelect={(taskId) => { setSelectedTaskId(taskId); setActiveTab('tasks') }}
+        />
+      ) : null}
       {activeTab === 'tasks' ? (
         <>
       {state.recordsError !== null ? (
@@ -310,13 +330,10 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
           {effective === undefined ? '请输入根会话 ID 查看记录' : '暂无任务记录'}
         </div>
       ) : null}
-      {tasks.length > 0 ? (
-        <div style={{ marginTop: 12 }}>
-          <TaskCanvas tasks={tasks} rootId={effective} childrenOf={childrenOf} selectedTaskId={selectedTask?.taskId} onSelect={setSelectedTaskId} />
-        </div>
-      ) : null}
       {tasks.length > 0 && selectedTask !== undefined ? (
-        <div data-router-collab-task-detail style={{ marginTop: 12 }}>
+        <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', marginTop: 12 }}>
+          <TaskList tasks={tasks} selectedTaskId={selectedTask.taskId} onSelect={setSelectedTaskId} />
+          <div data-router-collab-task-detail style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: '0 0 4px', fontSize: 14 }}>{selectedTask.title}</h3>
             {selectedTask.summaryBody !== undefined && selectedTask.summaryBody !== '' ? (
               <div data-router-collab-task-brief style={BODY_STYLE}>{selectedTask.summaryBody}</div>
@@ -367,7 +384,8 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
                 {reports.length === 0 ? <div style={{ fontSize: 12, color: '#6b7078' }}>暂无报告</div> : null}
               </div>
             </div>
-          <RecordDetail store={props.store} statusOf={statusOf} onOpenSession={onOpenSession} />
+            <RecordDetail store={props.store} statusOf={statusOf} onOpenSession={onOpenSession} />
+          </div>
         </div>
       ) : null}
         </>

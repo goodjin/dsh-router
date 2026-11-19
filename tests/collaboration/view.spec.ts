@@ -167,14 +167,21 @@ describe('view_renders_tasks_canvas_and_jump — 任务看板 + 会话画布 + �
     await act(async () => { root.render(createElement(CollaborationView, baseProps(store))) })
     await flush()
     // 任务看板：两张任务卡；T2 最近活动更晚排在前面。
-    const nodes = container.querySelectorAll('[data-router-collab-task-node]')
-    expect(nodes).toHaveLength(2)
-    expect(container.querySelector('[data-router-collab-task-node="T2"]')).toBeTruthy()
+    // 任务标签只列任务列表（画布在「任务图」标签）。
+    const rows = container.querySelectorAll('[data-router-collab-task-item]')
+    expect(rows).toHaveLength(2)
+    expect(container.querySelector('[data-router-collab-task-node="T2"]')).toBeNull()
+    // 切到任务图标签：画布节点可见。
+    click(container.querySelector('[data-router-collab-tab="graph"]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-task-node]')).toHaveLength(2)
     // 选中 T1（默认取第一张前先点 T1）。
-    click(container.querySelector('[data-router-collab-task-node="T1"]')!)
+    click(container.querySelector('[data-router-collab-tab="tasks"]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-task-item="T1"]')!)
     await flush()
     // 进度文本（T1 卡内：进行中 1）。
-    const progress = container.querySelector('[data-router-collab-task-node="T1"] [data-router-collab-task-progress]')
+    const progress = container.querySelector('[data-router-collab-task-item="T1"] [data-router-collab-task-progress]')
     expect(progress!.textContent).toContain('进行中 1')
     // 说明正文。
     expect(container.querySelector('[data-router-collab-task-brief]')!.textContent).toContain('把登录模块改造为统一认证')
@@ -268,7 +275,7 @@ describe('view_distinguishes_facts — 模型标签与宿主运行事实分开',
 })
 
 describe('view_task_selection — 多任务切换', () => {
-  it('点另一张任务卡：详情换为该任务的说明与画布', async () => {
+  it('任务图点节点：跳回任务标签并选中该任务显示详情', async () => {
     const { api } = scriptedApi({ records: [taskRecord, assignmentRecord, reportRecord, otherTaskRecord] })
     const store = startCollaborationStore({ api })
     store.setCurrentSession('root-1')
@@ -276,9 +283,14 @@ describe('view_task_selection — 多任务切换', () => {
     const { root, container } = render(props)
     await act(async () => { root.render(createElement(CollaborationView, props)) })
     await flush()
+    click(container.querySelector('[data-router-collab-tab="graph"]')!)
+    await flush()
     click(container.querySelector('[data-router-collab-task-node="T2"]')!)
     await flush()
+    // 跳回任务标签并显示 T2 详情。
+    expect(container.querySelector('[data-router-collab-tab="tasks"]')!.getAttribute('aria-selected')).toBe('true')
     expect(container.querySelector('[data-router-collab-task-brief]')!.textContent).toContain('改造支付流程')
+    expect(container.querySelector('[data-router-collab-task-node]')).toBeNull()
     // T2 无关联会话：整树保留（无剪枝），w-other 可见。
     expect(container.querySelector('[data-router-collab-node="w-other"]')).toBeTruthy()
     await act(async () => { root.unmount() })
