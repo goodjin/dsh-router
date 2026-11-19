@@ -113,3 +113,21 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).not.toContain('${')
   })
 })
+
+describe('collaborationPrompt — 任务类型速查（角色库 v2）', () => {
+  it('包含八类任务的常用角色组合速查', () => {
+    for (const marker of ['需求理解与PRD', '技术设计', '功能开发', 'bugfix', '测试', 'MR审核', '调研', '归档与发布']) {
+      expect(collaborationPrompt).toContain(marker)
+    }
+  })
+
+  it('速查表点到扩容后的关键角色名', () => {
+    for (const name of ['需求与PRD工程师', '架构设计工程师', '测试工程师', 'MR审核员', '代码评审员', '部署运维工程师']) {
+      expect(collaborationPrompt).toContain(name)
+    }
+  })
+
+  it('保留简单任务单人直达的原则（不硬拉团队）', () => {
+    expect(collaborationPrompt).toContain('简单任务')
+  })
+})

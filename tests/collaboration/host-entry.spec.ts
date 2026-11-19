@@ -19,6 +19,7 @@ import { apply as entryApply, name as entryName, inject as entryInject } from '.
 import { apply as toolsApply, name as toolsName, inject as toolsInject, Config as toolsConfig } from '../../src/tools.ts'
 import { apply as contextApply, name as contextName, inject as contextInject, Config as contextConfig } from '../../src/context.ts'
 import { COLLABORATION_TOOL_NAMES } from '../../src/collaboration/tools.ts'
+import { PRESET_ROLE_TEMPLATES } from '../../src/collaboration/roles.ts'
 import { createCollaborationRuntime } from '../../src/collaboration/runtime.ts'
 import type { ToolDefinition } from '../../src/collaboration/tools.ts'
 
@@ -164,7 +165,7 @@ afterAll(async () => {
 })
 
 describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
-  it('apply 后台种入四个预置角色到 dataDir；重复 apply 不增不改', async () => {
+  it('apply 后台种入全部预置角色（v2 共 16 个）到 dataDir；重复 apply 不增不改', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'router-entry-seed-'))
     seededRoots.push(dir)
     const makeCtx = () => {
@@ -179,15 +180,16 @@ describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
         },
       }
     }
+    const expected = PRESET_ROLE_TEMPLATES.map((r) => r.name).sort()
     const first = makeCtx()
     entryApply(first.ctx, { dataDir: dir })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     const names = (await first.face().roles.list()).map((r) => r.name)
-    expect(names).toEqual(['主管', '执行者', '评审员', '调研员'])
+    expect(names).toEqual(expected)
     const second = makeCtx()
     entryApply(second.ctx, { dataDir: dir })
     await new Promise((resolve) => { setTimeout(resolve, 50) })
     const again = (await second.face().roles.list()).map((r) => r.name)
-    expect(again).toEqual(['主管', '执行者', '评审员', '调研员'])
+    expect(again).toEqual(expected)
   })
 })

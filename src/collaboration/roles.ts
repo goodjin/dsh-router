@@ -194,40 +194,33 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
   }
 }
 
-/** 预置角色模板（专业类型；职责说明随协作上下文注入、随派发拼装进初始指令）。 */
-export interface PresetRoleTemplate {
-  name: string
-  description: string
-}
+/** 预置角色模板（专业类型；职责说明随协作上下文注入摘要、随派发拼装全文）。 */
+export type { PresetRoleTemplate } from './preset-roles.ts'
 
-/** 首次启用种入的预置角色。 */
-export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
-  {
-    name: '主管',
-    description: '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。',
-  },
-  {
-    name: '执行者',
-    description: '接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。',
-  },
-  {
-    name: '调研员',
-    description: '查资料、读源码与文档，产出结论与证据位置供决策参考；只调研不改动。',
-  },
-  {
-    name: '评审员',
-    description: '对照任务说明的验收条件检查交付，给出通过或问题清单；评审不代做修改。',
-  },
-]
+/** 首次启用种入 / 升级到的最新预置角色（v2：16 个专业角色，文本单一来源在 preset-roles.ts）。 */
+export { PRESET_ROLE_TEMPLATES } from './preset-roles.ts'
+
+import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES } from './preset-roles.ts'
 
 /**
- * 幂等种入预置角色：按名判断——已存在（含用户改过的）跳过，不覆盖用户编辑；
- * 缺失则新建同名 md。并发双开最坏是同路径同内容覆盖，不产生重复角色。
+ * 幂等种入预置角色，带「历史文本精确升级」：
+ * - 缺失 → 新建（并发双开最坏是同路径同内容覆盖，不产生重复角色）；
+ * - 现有内容等于最新预置 → 跳过；
+ * - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
+ * - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
  */
 export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save'>): Promise<void> {
-  const existing = new Set((await store.list()).map((role) => role.name))
+  const existing = new Map((await store.list()).map((role) => [role.name, role.description]))
   for (const preset of PRESET_ROLE_TEMPLATES) {
-    if (existing.has(preset.name)) continue
-    await store.save({ name: preset.name, description: preset.description })
+    const current = existing.get(preset.name)
+    if (current === undefined) {
+      await store.save({ name: preset.name, description: preset.description })
+      continue
+    }
+    if (current === preset.description) continue
+    const history = HISTORICAL_PRESET_DESCRIPTIONS[preset.name]
+    if (history !== undefined && history.includes(current)) {
+      await store.save({ name: preset.name, description: preset.description })
+    }
   }
 }

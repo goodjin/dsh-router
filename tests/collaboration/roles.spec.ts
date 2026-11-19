@@ -175,7 +175,7 @@ describe('旧 JSON 角色迁移（md 化）', () => {
 })
 
 describe('seedPresetRoles：预置角色按名幂等种入', () => {
-  it('空库种入四个预置角色；重复调用不增不改', async () => {
+  it('空库种入全部预置角色（v2 共 16 个）；重复调用不增不改', async () => {
     const h = await makeStore()
     await seedPresetRoles(h.store)
     await seedPresetRoles(h.store)
@@ -198,5 +198,79 @@ describe('seedPresetRoles：预置角色按名幂等种入', () => {
     const names = await readdir(h.rolesDir)
     expect(names).toContain('主管.md')
     expect(names).toContain('评审员.md')
+  })
+})
+
+describe('preset_roster_v2 — 专业角色扩容', () => {
+  const EXPECTED_NAMES = [
+    'Python程序员', 'Java程序员', '前端程序员', '交互设计师',
+    '主管', '执行者', '调研员', '评审员',
+    '架构设计工程师', '测试工程师', '部署运维工程师', '文档资料归档工程师',
+    '需求与PRD工程师', 'PRD审核员', 'MR审核员', '代码评审员',
+  ].sort()
+
+  it('预置名单覆盖 16 个角色（4 既有 + 12 新增），不多不少', () => {
+    expect(PRESET_ROLE_TEMPLATES.map((r) => r.name).sort()).toEqual(EXPECTED_NAMES)
+  })
+
+  it('每个角色的职责都是「首行摘要 + 详细正文」两层结构：首行非空且 ≤ 80 字，正文 ≥ 4 行', () => {
+    for (const role of PRESET_ROLE_TEMPLATES) {
+      const lines = role.description.split('\n')
+      expect(lines[0]!.trim().length, `${role.name} 首行摘要`).toBeGreaterThan(6)
+      expect(lines[0]!.length, `${role.name} 首行摘要长度 ≤ 80`).toBeLessThanOrEqual(80)
+      expect(lines.length, `${role.name} 详细正文行数`).toBeGreaterThanOrEqual(4)
+    }
+  })
+
+  it('角色名都是合法文件名：无路径分隔符、长度 ≤ 64、不以点开头', () => {
+    for (const role of PRESET_ROLE_TEMPLATES) {
+      expect(role.name, `${role.name} 含路径分隔符`).not.toMatch(/[/\\]/)
+      expect(role.name.length).toBeLessThanOrEqual(64)
+      expect(role.name.startsWith('.')).toBe(false)
+    }
+  })
+
+  it('主管职责包含八类任务的组织流程标记', () => {
+    const supervisor = PRESET_ROLE_TEMPLATES.find((r) => r.name === '主管')
+    expect(supervisor).toBeDefined()
+    for (const marker of ['需求理解与PRD', '技术设计', '功能开发', 'bugfix', '测试', 'MR审核', '调研', '归档与发布']) {
+      expect(supervisor!.description).toContain(marker)
+    }
+  })
+})
+
+describe('seed_upgrade — 历史预置文本的精确升级', () => {
+  const OLD_SUPERVISOR = '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。'
+
+  it('现有内容等于历史预置文本（用户未改过）时升级到最新', async () => {
+    const h = await makeStore()
+    await h.store.save({ name: '主管', description: OLD_SUPERVISOR })
+    await seedPresetRoles(h.store)
+    const latest = PRESET_ROLE_TEMPLATES.find((r) => r.name === '主管')!.description
+    expect(await h.store.read('主管')).toMatchObject({ description: latest })
+  })
+
+  it('现有内容与任何历史文本都不一致（用户改过）时不动', async () => {
+    const h = await makeStore()
+    const custom = '我们组自己定义的主管规则，与预置文本不同。'
+    await h.store.save({ name: '主管', description: custom })
+    await seedPresetRoles(h.store)
+    expect(await h.store.read('主管')).toMatchObject({ description: custom })
+  })
+
+  it('已是最新文本时幂等（重复种入内容不变）', async () => {
+    const h = await makeStore()
+    await seedPresetRoles(h.store)
+    const once = await h.store.read('主管')
+    await seedPresetRoles(h.store)
+    expect(await h.store.read('主管')).toEqual(once)
+  })
+
+  it('历史文本角色升级的同时，缺失的新角色被种入', async () => {
+    const h = await makeStore()
+    await h.store.save({ name: '主管', description: OLD_SUPERVISOR })
+    await seedPresetRoles(h.store)
+    const names = (await h.store.list()).map((r) => r.name)
+    expect(names).toEqual(PRESET_ROLE_TEMPLATES.map((r) => r.name).sort())
   })
 })
