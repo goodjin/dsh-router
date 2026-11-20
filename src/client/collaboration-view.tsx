@@ -172,6 +172,45 @@ function safeRead<T>(read: () => T): T | undefined {
   }
 }
 
+/** 隐藏输入框的样式规则 id 与标记名（测试断言用）。 */
+export const HIDE_COMPOSER_STYLE_ID = 'router-collab-hide-composer'
+export const ACTIVE_BODY_MARKER = 'data-router-collab-active'
+const HIDE_COMPOSER_CSS = '[data-router-collab-active="1"] [data-composer-dock] { display: none !important; }'
+
+/**
+ * 协作视图打开期间隐藏会话输入框（composer dock）。
+ *
+ * 视图是「一次渲染一个」的 View：本组件挂载即代表协作视图处于激活态——在 body 上
+ * 打标记并注入一条样式规则隐藏宿主的停靠输入框；卸载（切回聊天等其他视图）时撤掉
+ * 两者，输入框原样恢复。样式规则只挂一次（按 id 幂等）；document 缺失/异常时静默
+ * 降级（输入框不隐藏，视图功能不受影响）。
+ */
+function useHideComposerWhileMounted(): void {
+  useEffect(() => {
+    let style: HTMLStyleElement | undefined
+    try {
+      document.body.setAttribute(ACTIVE_BODY_MARKER, '1')
+      style = document.getElementById(HIDE_COMPOSER_STYLE_ID) as HTMLStyleElement | undefined ?? undefined
+      if (style === undefined) {
+        style = document.createElement('style')
+        style.id = HIDE_COMPOSER_STYLE_ID
+        style.textContent = HIDE_COMPOSER_CSS
+        document.head.append(style)
+      }
+    } catch {
+      // 降级：输入框不隐藏，视图照常可用。
+    }
+    return () => {
+      try {
+        document.body.removeAttribute(ACTIVE_BODY_MARKER)
+        style?.remove()
+      } catch {
+        // 清理失败不影响视图卸载。
+      }
+    }
+  }, [])
+}
+
 /** 页头：根会话选择 + 用当前会话 + 刷新 + 预设提示。 */
 function RootBar(props: { store: CollaborationStore }): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
@@ -217,6 +256,9 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
     void props.store.refreshRecords()
     void props.store.refreshRoles()
   }, [props.store, effective])
+
+  // 协作视图激活期间隐藏会话输入框。
+  useHideComposerWhileMounted()
 
   // 会话数据（标准属性，守卫读取；缺失降级为空目录/未知状态）。
   const sessionsState = safeRead(() => props.useSessions?.((value) => value))

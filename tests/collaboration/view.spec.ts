@@ -211,6 +211,24 @@ describe('view_renders_tasks_canvas_and_jump — 任务看板 + 会话画布 + �
   })
 })
 
+describe('composer_hidden_when_view_open — 协作视图打开时隐藏输入框', () => {
+  it('视图挂载：body 打标记并注入隐藏规则；卸载：撤掉标记，输入框恢复', async () => {
+    const { api } = scriptedApi({ records: [taskRecord] })
+    const store = startCollaborationStore({ api })
+    store.setCurrentSession('root-1')
+    const props = baseProps(store)
+    const { root, container } = render(props)
+    await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    expect(document.body.getAttribute('data-router-collab-active')).toBe('1')
+    const style = document.getElementById('router-collab-hide-composer')
+    expect(style).toBeTruthy()
+    expect(style!.textContent).toContain('[data-composer-dock]')
+    await act(async () => { root.unmount() })
+    expect(document.body.getAttribute('data-router-collab-active')).toBeNull()
+  })
+})
+
 describe('view_canvas_orphans_and_prune — 孤儿行与剪枝', () => {
   it('记录关联但不在树内的会话进孤儿行，不臆造父边', async () => {
     const { api } = scriptedApi({ records: [taskRecord, assignmentRecord, reportRecord], record: { record: reportRecord, path: '/p' } })
