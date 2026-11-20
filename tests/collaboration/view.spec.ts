@@ -317,6 +317,9 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelector('[data-router-collab-tab="roles"]')!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-role-item]')).toHaveLength(0)
+    // 默认收起编辑器：未选角色前只有占位引导。
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-editor]')).toBeTruthy()
     click(container.querySelector('[data-router-collab-role-new]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-role-item="__draft__"]')).toBeTruthy()
@@ -360,6 +363,8 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
     expect(descInput.value).toBe('旧说明')
+    // 编辑框高度翻倍（440px）。
+    expect(descInput.style.minHeight).toBe('440px')
     await act(async () => {
       const areaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
       areaSetter.call(descInput, '第一行：拆解任务\n第二行：汇总结果')

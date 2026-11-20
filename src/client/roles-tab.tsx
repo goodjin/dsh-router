@@ -78,7 +78,7 @@ const INPUT_STYLE: CSSProperties = {
 
 const TEXTAREA_STYLE: CSSProperties = {
   ...INPUT_STYLE,
-  minHeight: 220,
+  minHeight: 440,
   resize: 'vertical',
   fontFamily: 'inherit',
   whiteSpace: 'pre-wrap',
@@ -111,7 +111,8 @@ const NEW_SELECTION = '__new__'
 /** 角色标签页：左列表右编辑，保存才生效。 */
 export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
-  const [selected, setSelected] = useState<string | undefined>(state.templates[0]?.name)
+  // 默认收起编辑器：进入页面/切到本标签时不选中任何角色，右侧只显示引导占位。
+  const [selected, setSelected] = useState<string | undefined>(undefined)
   const [draftName, setDraftName] = useState('')
   const [draftDesc, setDraftDesc] = useState('')
   const [dirty, setDirty] = useState(false)
