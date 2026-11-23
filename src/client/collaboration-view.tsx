@@ -1,29 +1,18 @@
 /**
  * 协作视图页（会话标签行 conversation.view 的「协作」页）。
  *
- * 取代旧「头部按钮 + 弹出卡片」：整页显示在会话界面里，从上到下——
- *  - 页头：根会话选择（留空默认当前会话）+ 用当前会话 + 刷新 + 预设提示；
- *  - 主区左：任务看板（按任务分组、四态进度）；
- *  - 主区右：任务详情（任务说明、会话画布、分工列表、报告列表、选中记录详情）；
- *  - 页底：角色模板区（查看 + 新建/编辑，与模型共享同一 RoleStore）。
- *
- * 会话树数据来自页面标准属性 useSessions（subagentCatalog 投影 / byId 摘要）与
- * useSessionStatus（实时运行状态），按需经 face.refreshProjection（sessions.refreshProjections）
- * 加载；全部守卫读取，缺失降级（无树/未知状态），不炸视图。
+ * 任务页显示可折叠任务树、任务内容与结果；独立任务图复用同一棵树。
  * 组件绝不收 ctx：业务面经 registration 的 inject 工厂下发（face）。
  */
 
-import { useEffect, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react'
 
 import type { CollaborationStore } from './collaboration-store.ts'
-import { RecordDetail } from './record-detail.tsx'
 import { RolesTab } from './roles-tab.tsx'
-import { SessionCanvas } from './session-canvas.tsx'
+import { deriveTaskGraph } from './task-graph.ts'
 import { TaskCanvas } from './task-canvas.tsx'
 import { TaskList } from './task-list.tsx'
 import { deriveTasks, type TaskView } from './task-view-model.ts'
-import type { SessionLinkage } from './session-tree.ts'
-import type { WorkRecord } from '../collaboration/types.ts'
 
 /** 会话标签行座位（与官方统计页同款挂法）。 */
 export const COLLABORATION_VIEW_SLOT = 'conversation.view'
@@ -135,34 +124,6 @@ const BODY_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
-const RECORD_ITEM_STYLE: CSSProperties = {
-  display: 'block',
-  width: '100%',
-  textAlign: 'start',
-  padding: '8px 10px',
-  marginBottom: 6,
-  borderRadius: 8,
-  border: '0.5px solid var(--dsw-alias-border-l2, #e4e7ec)',
-  background: 'var(--dsw-alias-bg-layer-2, #fff)',
-  color: 'var(--dsw-alias-label-primary, inherit)',
-  cursor: 'pointer',
-  fontSize: 12,
-  boxShadow: 'var(--dsw-elevation-stroke, 0 1px 2px rgba(0,0,0,0.04))',
-}
-
-const SUBSECTION_STYLE: CSSProperties = {
-  marginTop: 14,
-  paddingTop: 10,
-  borderTop: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
-}
-
-const KIND_LABEL: Record<WorkRecord['kind'], string> = {
-  task: '任务说明',
-  assignment: '分工记录',
-  report: '工作报告',
-  summary: '汇总报告',
-}
-
 /** 守卫读取：访问可能抛错的属性/调用时返回 undefined，绝不外抛。 */
 function safeRead<T>(read: () => T): T | undefined {
   try {
@@ -263,53 +224,32 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
   // 会话数据（标准属性，守卫读取；缺失降级为空目录/未知状态）。
   const sessionsState = safeRead(() => props.useSessions?.((value) => value))
   const projections = safeRead(() => (sessionsState as SessionsStateLike | undefined)?.projectionsBySession) ?? {}
-  const byId = safeRead(() => (sessionsState as SessionsStateLike | undefined)?.byId) ?? {}
-  const statuses = safeRead(() => props.useSessionStatus?.((value) => value))
-
   const childrenOf = (sessionId: string): Array<{ id: string; label?: string }> => {
     const catalog = safeRead(() => projections[sessionId]?.values?.subagentCatalog)
     if (!Array.isArray(catalog)) return []
     return catalog.filter((entry): entry is CatalogEntryLike => entry !== null && typeof entry === 'object' && typeof entry.id === 'string')
   }
-  const statusOf = (sessionId: string): boolean | undefined => {
-    const fromStatus = safeRead(() => statuses?.get(sessionId)?.running)
-    if (typeof fromStatus === 'boolean') return fromStatus
-    const fromSummary = safeRead(() => byId[sessionId]?.running)
-    return typeof fromSummary === 'boolean' ? fromSummary : undefined
-  }
-  const titleOf = (sessionId: string): string | undefined => safeRead(() => byId[sessionId]?.title)
-  const onRequestChildren = (sessionId: string): void => {
-    try {
-      props.refreshProjection?.(sessionId)
-    } catch {
-      // 降级：请求失败即目录缺省（画布显示未知/无子层），不炸视图。
-    }
-  }
-  const onOpenSession = (sessionId: string): void => { props.uiWorkspace.openSession(sessionId) }
-
-  // 该任务的关联会话 → 角色名/工作标签（先分工定标签，再补其余记录的成员关系）。
-  const linked = new Map<string, SessionLinkage>()
-  const taskRecords: WorkRecord[] = selectedTask === undefined
-    ? []
-    : state.records
-        .filter((record) => record.taskId === selectedTask.taskId)
-        .sort((a, b) => (a.createdAt !== b.createdAt ? a.createdAt - b.createdAt : a.id < b.id ? -1 : 1))
-  for (const record of taskRecords) {
-    if (record.kind !== 'assignment') continue
-    for (const session of record.sessions ?? []) {
-      if (!linked.has(session.sessionId)) {
-        linked.set(session.sessionId, { roleLabel: session.label, workLabel: record.workLabel })
+  const graph = deriveTaskGraph({tasks, rootId: effective, childrenOf})
+  const requested = useRef(new Set<string>())
+  useEffect(() => { requested.current.clear() }, [effective])
+  useEffect(() => {
+    if (!effective || !props.refreshProjection) return
+    const seen = new Set<string>()
+    const queue = [effective]
+    for (let i = 0; i < queue.length; i++) {
+      const id = queue[i]!
+      if (seen.has(id)) continue
+      seen.add(id)
+      if (!requested.current.has(id)) {
+        requested.current.add(id)
+        try { props.refreshProjection(id) } catch { /* 目录不可用时独立展示 */ }
       }
+      for (const child of childrenOf(id)) queue.push(child.id)
     }
-  }
-  for (const record of taskRecords) {
-    for (const session of record.sessions ?? []) {
-      if (!linked.has(session.sessionId)) linked.set(session.sessionId, { roleLabel: session.label })
-    }
-  }
-
-  const assignments = taskRecords.filter((record) => record.kind === 'assignment')
-  const reports = taskRecords.filter((record) => record.kind === 'report' || record.kind === 'summary')
+  }, [effective, projections, props.refreshProjection])
+  const records = state.records.filter(r => r.taskId === selectedTask?.taskId)
+  const summary = records.filter(r => r.kind === 'summary').sort((a,b) => b.updatedAt - a.updatedAt || b.id.localeCompare(a.id))[0]
+  const results = summary ? [summary] : records.filter(r => r.kind === 'report').sort((a,b) => a.createdAt - b.createdAt)
 
   return (
     <div data-router-collab-view style={{ height: '100%', boxSizing: 'border-box', overflow: 'auto', padding: '12px 16px', fontSize: 13, lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, #1f2126)' }}>
@@ -349,9 +289,7 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
       {activeTab === 'roles' ? <RolesTab store={props.store} /> : null}
       {activeTab === 'graph' ? (
         <TaskCanvas
-          tasks={tasks}
-          rootId={effective}
-          childrenOf={childrenOf}
+          graph={graph}
           selectedTaskId={selectedTask?.taskId}
           onSelect={(taskId) => { setSelectedTaskId(taskId); setActiveTab('tasks') }}
         />
@@ -374,59 +312,17 @@ export function CollaborationView(props: CollaborationViewProps): ReactNode {
       ) : null}
       {tasks.length > 0 && selectedTask !== undefined ? (
         <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', marginTop: 12 }}>
-          <TaskList tasks={tasks} selectedTaskId={selectedTask.taskId} onSelect={setSelectedTaskId} />
+          <TaskList key={effective} roots={graph.root.children} selectedTaskId={selectedTask.taskId} onSelect={setSelectedTaskId} />
           <div data-router-collab-task-detail style={{ flex: 1, minWidth: 0 }}>
             <h3 style={{ margin: '0 0 4px', fontSize: 14 }}>{selectedTask.title}</h3>
-            {selectedTask.summaryBody !== undefined && selectedTask.summaryBody !== '' ? (
-              <div data-router-collab-task-brief style={BODY_STYLE}>{selectedTask.summaryBody}</div>
-            ) : null}
-            <SessionCanvas
-              rootId={effective}
-              linked={linked}
-              childrenOf={childrenOf}
-              statusOf={statusOf}
-              titleOf={titleOf}
-              onRequestChildren={onRequestChildren}
-              onOpenSession={onOpenSession}
-            />
-            <div style={SUBSECTION_STYLE}>
-              <strong>分工（{assignments.length}）</strong>
-              <div data-router-collab-records style={{ marginTop: 6 }}>
-                {assignments.map((record) => (
-                  <button
-                    key={`${record.taskId}:${record.id}`}
-                    type="button"
-                    data-router-collab-record={`${record.taskId}:${record.id}`}
-                    style={RECORD_ITEM_STYLE}
-                    onClick={() => { void props.store.selectRecord(record.taskId, record.id) }}
-                  >
-                    <span>{record.title}</span>
-                    {record.workLabel !== undefined ? <span style={{ color: '#4a4e57' }}> · {record.workLabel}</span> : null}
-                  </button>
-                ))}
-                {assignments.length === 0 ? <div style={{ fontSize: 12, color: '#6b7078' }}>暂无分工记录</div> : null}
-              </div>
-            </div>
-            <div style={SUBSECTION_STYLE}>
-              <strong>报告（{reports.length}）</strong>
-              <div style={{ marginTop: 6 }}>
-                {reports.map((record) => (
-                  <button
-                    key={`${record.taskId}:${record.id}`}
-                    type="button"
-                    data-router-collab-record={`${record.taskId}:${record.id}`}
-                    style={RECORD_ITEM_STYLE}
-                    onClick={() => { void props.store.selectRecord(record.taskId, record.id) }}
-                  >
-                    <span style={{ color: '#6b7078' }}>{KIND_LABEL[record.kind]}</span>
-                    {' '}
-                    <span>{record.title}</span>
-                  </button>
-                ))}
-                {reports.length === 0 ? <div style={{ fontSize: 12, color: '#6b7078' }}>暂无报告</div> : null}
-              </div>
-            </div>
-            <RecordDetail store={props.store} statusOf={statusOf} onOpenSession={onOpenSession} />
+            <h4>任务内容</h4>
+            <div data-router-collab-task-brief style={BODY_STYLE}>{selectedTask.summaryBody || '暂无任务内容'}</div>
+            <h4>任务结果</h4>
+            {results.length === 0 ? <p>暂无结果</p> : results.map(r => <article key={r.id}>
+              <strong>{r.title}</strong>
+              <div style={BODY_STYLE}>{r.body}</div>
+              {r.artifacts?.map((artifact, i) => <div key={i}>{artifact.label}：{artifact.location}</div>)}
+            </article>)}
           </div>
         </div>
       ) : null}

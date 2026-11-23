@@ -36,6 +36,8 @@ export interface TaskView {
   lastReportAt: number | undefined
   /** 该任务全部记录的关联会话（去重、首现顺序）。 */
   sessionIds: string[]
+  /** 已派发成员或明确关联主任务的根会话；报告里的引用不能建立派发关系。 */
+  ownerSessionIds: string[]
   /** 该任务全部记录 id（输入顺序）。 */
   recordIds: string[]
 }
@@ -64,6 +66,7 @@ interface TaskBucket {
   lastReportAt: number | undefined
   lastActivityAt: number
   sessionIds: string[]
+  ownerSessions: Set<string>
   seenSessions: Set<string>
   recordIds: string[]
 }
@@ -83,6 +86,7 @@ export function deriveTasks(records: WorkRecord[]): TaskView[] {
         lastReportAt: undefined,
         lastActivityAt: record.updatedAt,
         sessionIds: [],
+        ownerSessions: new Set(),
         seenSessions: new Set<string>(),
         recordIds: [],
       }
@@ -99,6 +103,7 @@ export function deriveTasks(records: WorkRecord[]): TaskView[] {
       bucket.lastReportAt = bucket.lastReportAt === undefined ? record.updatedAt : Math.max(bucket.lastReportAt, record.updatedAt)
     }
     for (const session of record.sessions ?? []) {
+      if (record.kind === 'assignment' || (record.kind === 'task' && session.sessionId === record.rootSessionId)) bucket.ownerSessions.add(session.sessionId)
       if (!bucket.seenSessions.has(session.sessionId)) {
         bucket.seenSessions.add(session.sessionId)
         bucket.sessionIds.push(session.sessionId)
@@ -114,6 +119,7 @@ export function deriveTasks(records: WorkRecord[]): TaskView[] {
       progress: bucket.progress,
       lastReportAt: bucket.lastReportAt,
       sessionIds: bucket.sessionIds,
+      ownerSessionIds: [...bucket.ownerSessions],
       recordIds: bucket.recordIds,
     }))
 }
