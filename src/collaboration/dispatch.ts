@@ -44,8 +44,7 @@ interface DispatchExec {
 }
 
 /** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次。 */
-const DISPATCH_MODES = ['spawn', 'fork'] as const
-type DispatchMode = (typeof DISPATCH_MODES)[number]
+const DISPATCH_MODES = ['spawn', 'fork', 'continue'] as const
 
 /** 宿主 dsh-subagent.startActivation 内部第一行就 spec.signal.throwIfAborted()（非可选，
  *  0.2.1 与 0.2.2 皆然），缺 signal 直接 TypeError。优先用调用方 turn 的 exec.signal；
@@ -98,7 +97,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       '按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；' +
       '创建成功自动登记一条分工记录（关联子会话、待处理标签）。spawn=轻装新建（默认，材料自足）；' +
       'fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高，确需任务背景时才用）。' +
-      '主管使用主任务 taskId：首次必填 teamAdvice；后续发往原主管，不另建团队。rootSessionId 必须显式传入。',
+      '主管使用主任务 taskId：首次必填 teamAdvice；续派只能用 mode=continue 和 expectedChildId，只投递不新建。rootSessionId 必须显式传入。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -117,10 +116,11 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
               } } },
           },
         },
+        expectedChildId: { type: 'string', description: '仅 continue 必填：从原主管分工记录取得的确切子会话 ID' },
         mode: {
           type: 'string',
           enum: [...DISPATCH_MODES],
-          description: '派发方式：spawn=轻装新建（默认）；fork=带父级已完成轮次（成本更高，确需背景才用）',
+          description: 'spawn/fork 仅新建；continue 仅向核实的原主管投递，失败不换模式',
         },
       },
       required: ['rootSessionId', 'taskId', 'role', 'task', 'mode'],
@@ -150,14 +150,15 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       const a = args as Record<string, unknown>
       const rootSessionId = nonEmpty(a.rootSessionId, 'rootSessionId')
       const taskId = nonEmpty(a.taskId, 'taskId')
-      const roleName = nonEmpty(a.role, 'role')
+      const roleName = nonEmpty(a.role, 'role').trim()
       const task = nonEmpty(a.task, 'task')
       const mode = a.mode
-      if (typeof mode !== 'string' || !(DISPATCH_MODES as readonly string[]).includes(mode)) {
+      if (mode !== 'spawn' && mode !== 'fork' && mode !== 'continue') {
         throw new CollaborationError('INVALID_INPUT', `mode 必须是 ${DISPATCH_MODES.join(' 或 ')}`)
       }
-      const provider: DispatchMode = mode as DispatchMode
-      // 职责来自角色库（代码读取，不依赖模型转述）。
+      if (mode === 'continue' && roleName !== '主管') throw new CollaborationError('INVALID_INPUT', 'continue 仅用于续派原主管')
+      if (mode !== 'continue' && a.expectedChildId !== undefined) throw new CollaborationError('INVALID_INPUT', '指定原主管只能用 continue，不能新建')
+      const expected = mode === 'continue' ? nonEmpty(a.expectedChildId, 'expectedChildId') : undefined
       if (deps.subagents === undefined) {
         throw new CollaborationError('IO_ERROR', 'subagents 服务不可用：无法创建子会话（检查宿主装载）')
       }
@@ -172,29 +173,38 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       if (key) creatingSupervisor.add(key)
       try {
         let taskBrief = task
+        const supervisors = new Set<string>()
         if (key) {
           const rows = await deps.records.list(rootSessionId, { taskId, kind: 'assignment' })
-          const supervisors = new Set(rows.flatMap(row => (row.sessions ?? []).filter(link => link.label === '主管').map(link => link.sessionId)))
-          if (supervisors.size > 1) throw new CollaborationError('INVALID_INPUT', '存在多个主管会话，请用户确认原主管后用 send_message 续派，不要新建主管')
-          const [childId] = supervisors
-          const advice = a.teamAdvice !== undefined || !childId ? formatTeamAdvice(a.teamAdvice) : ''
-          taskBrief = [`主任务 taskId：${taskId}`, task, advice].filter(Boolean).join('\n\n')
-          if (childId) {
-            try {
-              if (!deps.subagents.sendMessage) throw new Error('宿主缺少 sendMessage')
-              const messageId = await deps.subagents.sendMessage(parent, childId, [{type:'text', text:`同一任务追加要求，优先续用原成员，由你决定是否补人。\n${taskBrief}`}], {signal})
-              return {childId, messageId}
-            } catch (error) {
-              throw new CollaborationError('IO_ERROR', `向原主管 ${childId} 投递未获回执：${String(error)}。核对状态，确实无法继续时请用户确认交接，不要新建团队。`)
-            }
+          for (const row of rows) for (const link of row.sessions ?? []) {
+            if (link.label === '主管') supervisors.add(link.sessionId)
           }
+          if (supervisors.size > 1) throw new CollaborationError('INVALID_INPUT', '存在多个主管，已停止。请核对并消除分工归属冲突；不会创建或投递。')
+        }
+        if (mode === 'continue') {
+          const [childId] = supervisors
+          if (!childId || childId !== expected) throw new CollaborationError('INVALID_INPUT', '没有唯一且匹配 expectedChildId 的主管分工，已停止；不得改为新建。')
+          const advice = a.teamAdvice !== undefined ? formatTeamAdvice(a.teamAdvice) : ''
+          const text = [`同一任务追加要求，优先续用原成员，由你决定是否补人。`, `主任务 taskId：${taskId}`, task, advice].filter(Boolean).join('\n\n')
+          try {
+            if (!deps.subagents.sendMessage) throw new Error('宿主缺少主管投递能力')
+            const messageId = await deps.subagents.sendMessage(parent, childId, [{type:'text', text}], {signal})
+            if (typeof messageId !== 'string' || !messageId.trim()) throw new Error('宿主未返回消息编号')
+            return {childId, messageId}
+          } catch (error) {
+            throw new CollaborationError('IO_ERROR', `向原主管 ${childId} 投递未获回执：${String(error)}。核对状态，确实无法继续时请用户确认交接，不要新建团队。`)
+          }
+        }
+        if (key) {
+          if (supervisors.size) throw new CollaborationError('INVALID_INPUT', '已登记主管，不能新建；续派必须使用 continue 并指定 expectedChildId。')
+          taskBrief = [`主任务 taskId：${taskId}`, task, formatTeamAdvice(a.teamAdvice)].join('\n\n')
         }
         const role = await deps.roles.read(roleName)
         const instruction = composeDispatchInstruction({ role, task: taskBrief, rootSessionId })
         // 创建子会话；失败原样上抛（不落记录）。signal 必传：宿主 startActivation 会
         // spec.signal.throwIfAborted()，缺席即 TypeError（见 dispatchLifetime 说明）。
         const { childId } = await deps.subagents.startActivation({
-          provider,
+          provider: mode,
           label: `${role.name}·${taskId}`,
           request: { prompt: [{ type: 'text', text: instruction }], parent, maxDepth: 2 },
           signal,
