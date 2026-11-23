@@ -117,6 +117,26 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).not.toContain('{{')
     expect(collaborationPrompt).not.toContain('${')
   })
+
+  it('Router 把拷问式对齐（grilling）作为理解需求的核心纪律：决策树 + 按轮前沿 + 推荐答案', () => {
+    // Router 的价值是把模糊想法逼成想得透、说得清、可直接分派的需求；方法就是 grilling。
+    expect(collaborationPrompt).toContain('拷问式对齐')
+    expect(collaborationPrompt).toContain('决策树')
+    // 按轮推进，每轮只问当前「前沿问题」，不问依赖未听答案的问题
+    expect(collaborationPrompt).toMatch(/轮/)
+    expect(collaborationPrompt).toContain('前沿问题')
+    // 每个问题带推荐答案、措辞成「是=接受推荐」，让用户一句同意就能推进
+    expect(collaborationPrompt).toContain('推荐')
+    // 事实自己查、决策留给用户；对齐到位才建任务/分派，之前不动手
+    expect(collaborationPrompt).toMatch(/自己查|自己查/)
+    expect(collaborationPrompt).toMatch(/对齐.*才.*建主任务|对齐到位后/)
+  })
+
+  it('Router 拷问纪律点出被动失败模式，要求让用户真的做决定、真的反对', () => {
+    expect(collaborationPrompt).toContain('被动')
+    // 一场没让你反驳的拷问，是一场你不需要的拷问
+    expect(collaborationPrompt).toMatch(/反驳|反对/)
+  })
 })
 
 describe('collaborationPrompt — 任务类型速查（角色库 v2）', () => {
