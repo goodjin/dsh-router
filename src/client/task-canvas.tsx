@@ -8,9 +8,8 @@
 
 import type { CSSProperties, ReactNode } from 'react'
 
-import { deriveTaskGraph, TASK_GRAPH_ROOT_KEY } from './task-graph.ts'
+import { type TaskGraphResult, TASK_GRAPH_ROOT_KEY } from './task-graph.ts'
 import { layoutKeyTree } from './session-tree.ts'
-import type { TaskView } from './task-view-model.ts'
 
 const NODE_WIDTH = 210
 const NODE_HEIGHT = 72
@@ -64,31 +63,31 @@ const SEGMENT_COLORS = {
 
 /** 任务画布入口属性。 */
 export interface TaskCanvasProps {
-  tasks: TaskView[]
-  rootId: string | undefined
-  childrenOf(sessionId: string): Array<{ id: string; label?: string }>
+  graph: TaskGraphResult
   selectedTaskId: string | undefined
   onSelect(taskId: string): void
 }
 
 /** 任务画布：派生连线 + 任务节点卡。 */
 export function TaskCanvas(props: TaskCanvasProps): ReactNode {
-  if (props.tasks.length === 0) return null
-  const graph = deriveTaskGraph({ tasks: props.tasks, rootId: props.rootId, childrenOf: props.childrenOf })
+  const graph = props.graph
+  if (!graph.nodes.length) return <p>暂无任务记录</p>
   const layout = layoutKeyTree(graph.root, { columnWidth: NODE_WIDTH + GAP_X, rowHeight: NODE_HEIGHT + GAP_Y })
   const taskByKey = new Map(graph.nodes.map((entry) => [entry.taskId, entry.task]))
-  const nodeByKey = new Map(layout.nodes.map((entry) => [entry.node.key, entry]))
+  // 虚拟根不显示，也不占一列，主任务从画布左边开始。
+  const column = NODE_WIDTH + GAP_X
+  const width = layout.width - column
 
   return (
     <div data-router-collab-task-canvas style={CANVAS_STYLE}>
-      <div style={{ position: 'relative', width: layout.width, height: layout.height }}>
-        <svg width={layout.width} height={layout.height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} aria-hidden>
+      <div style={{ position: 'relative', width, height: layout.height }}>
+        <svg width={width} height={layout.height} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} aria-hidden>
           {layout.edges
             .filter((edge) => edge.from !== TASK_GRAPH_ROOT_KEY)
             .map((edge) => (
               <path
                 key={`${edge.from}:${edge.to}`}
-                d={`M ${edge.x1 + NODE_WIDTH} ${edge.y1 + NODE_HEIGHT / 2} C ${edge.x1 + NODE_WIDTH + GAP_X / 2} ${edge.y1 + NODE_HEIGHT / 2}, ${edge.x2 - GAP_X / 2} ${edge.y2 + NODE_HEIGHT / 2}, ${edge.x2} ${edge.y2 + NODE_HEIGHT / 2}`}
+                d={`M ${edge.x1 - column + NODE_WIDTH} ${edge.y1 + NODE_HEIGHT / 2} C ${edge.x1 - column + NODE_WIDTH + GAP_X / 2} ${edge.y1 + NODE_HEIGHT / 2}, ${edge.x2 - column - GAP_X / 2} ${edge.y2 + NODE_HEIGHT / 2}, ${edge.x2 - column} ${edge.y2 + NODE_HEIGHT / 2}`}
                 fill="none"
                 stroke="var(--dsw-alias-accent-primary, #3b6ef6)"
                 strokeWidth={1.5}
@@ -108,7 +107,7 @@ export function TaskCanvas(props: TaskCanvasProps): ReactNode {
               key={node.key}
               type="button"
               data-router-collab-task-node={node.key}
-              style={{ ...(node.key === props.selectedTaskId ? NODE_SELECTED_STYLE : NODE_STYLE), left: x, top: y }}
+              style={{ ...(node.key === props.selectedTaskId ? NODE_SELECTED_STYLE : NODE_STYLE), left: x - column, top: y }}
               onClick={() => { props.onSelect(node.key) }}
             >
               <span data-router-collab-task-title={node.key} style={{ display: 'block', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

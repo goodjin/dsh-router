@@ -13,6 +13,11 @@ import { describe, expect, it } from 'vitest'
 import { collaborationPrompt } from '../../src/collaboration/prompt.ts'
 
 describe('collaborationPrompt — common three-role rule text', () => {
+  it('records the user’s main task before splitting, including standalone tasks', () => {
+    expect(collaborationPrompt).toMatch(/先.*主任务.*task 记录.*根会话.*不拆分/)
+    expect(collaborationPrompt).toMatch(/汇总.*主任务.*summary/)
+  })
+
   it('is a non-empty static string', () => {
     expect(typeof collaborationPrompt).toBe('string')
     expect(collaborationPrompt.length).toBeGreaterThan(100)

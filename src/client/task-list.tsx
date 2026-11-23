@@ -7,7 +7,8 @@
 
 import type { CSSProperties, ReactNode } from 'react'
 
-import type { TaskView } from './task-view-model.ts'
+import { useState } from 'react'
+import type { TaskGraphNode } from './task-graph.ts'
 
 const ROW_STYLE: CSSProperties = {
   display: 'block',
@@ -56,23 +57,28 @@ function formatTime(timestamp: number | undefined): string {
 
 /** 任务列表入口属性。 */
 export interface TaskListProps {
-  tasks: TaskView[]
+  roots: TaskGraphNode[]
   selectedTaskId: string | undefined
   onSelect(taskId: string): void
 }
 
 /** 任务列表：纯列表行，选中态高亮。 */
 export function TaskList(props: TaskListProps): ReactNode {
-  return (
-    <nav data-router-collab-task-list style={{ width: 280, flexShrink: 0 }}>
-      {props.tasks.map((task) => {
+  const [closed, setClosed] = useState<Set<string>>(() => new Set())
+  const branch = (node: TaskGraphNode): ReactNode => {
+        const task = node.task!
+        const expanded = !closed.has(node.key)
         const { progress } = task
         const counts = `待处理 ${progress.pending} · 进行中 ${progress.active} · 受阻 ${progress.blocked} · 已报告 ${progress.reported}`
           + (progress.unlabeled > 0 ? ` · 未标注 ${progress.unlabeled}` : '')
         const lastReport = formatTime(task.lastReportAt)
         return (
-          <button
-            key={task.taskId}
+          <li key={node.key} data-task-branch={node.key}>
+          <div style={{display:'flex', alignItems:'baseline',gap:3}}>
+          {node.children.length > 0 && <button type="button" aria-expanded={expanded} aria-label={`${expanded ? '收起' : '展开'}${task.title}`} onClick={() => setClosed(prev => {
+            const next = new Set(prev); if (next.has(node.key)) next.delete(node.key); else next.add(node.key); return next
+          })}>{expanded ? '▾' : '▸'}</button>}
+          <button aria-current={task.taskId === props.selectedTaskId ? 'true' : undefined}
             type="button"
             data-router-collab-task-item={task.taskId}
             style={task.taskId === props.selectedTaskId ? ROW_SELECTED_STYLE : ROW_STYLE}
@@ -92,9 +98,12 @@ export function TaskList(props: TaskListProps): ReactNode {
                 : null}
             </span>
             {lastReport !== '' ? <span style={{ display: 'block', marginTop: 4, color: '#6b7078' }}>最近报告 {lastReport}</span> : null}
-          </button>
+          </button></div>
+          {expanded && node.children.length > 0 && <ul style={{listStyle:'none',paddingInlineStart:16,margin:0}}>{node.children.map(branch)}</ul>}
+          </li>
         )
-      })}
-    </nav>
-  )
+  }
+  return <nav aria-label="任务树" data-router-collab-task-list style={{width:280,maxWidth:'45%',flexShrink:0}}>
+    <ul style={{listStyle:'none',padding:0,margin:0}}>{props.roots.map(branch)}</ul>
+  </nav>
 }

@@ -21,6 +21,7 @@ function task(taskId: string, sessionIds: string[]): TaskView {
     progress: { pending: 0, active: 0, blocked: 0, reported: 0, unlabeled: 0, total: 0 },
     lastReportAt: undefined,
     sessionIds,
+    ownerSessionIds: sessionIds,
     recordIds: [],
   }
 }
@@ -80,4 +81,13 @@ describe('taskgraph_edges_from_sessions — 派生边来自会话父子', () => 
     const rootChildren = graph.root.children.map((c) => c.taskId).sort()
     expect(rootChildren).toEqual(['A', 'B', 'C'])
   })
+})
+
+it('多级派发保留，归属冲突、多个父任务和循环均不硬挂', () => {
+  const children: Record<string,string[]> = { r:['a','p','x'], a:['b','m'], b:['c'], p:['n'], x:['y'] }
+  const build = (tasks:TaskView[]) => deriveTaskGraph({tasks,rootId:'r',childrenOf:id=>(children[id]??[]).map(id=>({id}))})
+  const g=build([task('A',['a']),task('B',['b']),task('C',['c']),task('P',['p']),task('M',['m','n']),task('X',['x']),task('Z',['x']),task('Y',['y'])])
+  expect(g.root.children.map(n=>n.key)).toEqual(['A','P','M','X','Z','Y'])
+  expect(g.root.children[0]?.children[0]?.children[0]?.key).toBe('C')
+  expect(build([task('A',['a','c']),task('B',['b'])]).root.children.map(n=>n.key)).toEqual(['A','B'])
 })
