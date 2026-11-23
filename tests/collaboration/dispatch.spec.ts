@@ -15,7 +15,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 
 import { buildDispatchTool, composeDispatchInstruction, type SubagentsFace } from '../../src/collaboration/dispatch.ts'
 import type { ToolDefinition } from '../../src/collaboration/tools.ts'
@@ -72,7 +72,7 @@ async function makeTask(records: ReturnType<typeof createRecordStore>): Promise<
   return saved.record.taskId
 }
 
-const BASE_ARGS = { rootSessionId: 'root-1', taskId: 'PLACEHOLDER', role: '主管', task: '改造登录模块', mode: 'spawn' }
+const BASE_ARGS = { rootSessionId: 'root-1', taskId: '11111111-1111-4111-8111-111111111111', teamAdvice: { assessment: '两个页面可并行，联动验收', roles: [{role: '前端程序员', count: 2, reason: '两个页面可独立实现'}] }, role: '主管', task: '改造登录模块', mode: 'spawn' }
 
 async function run(tool: ToolDefinition, args: unknown, exec: unknown = EXEC): Promise<unknown> {
   return tool.execute(args, exec)
@@ -220,4 +220,41 @@ describe('dispatch_bad_args — 参数校验', () => {
     await expect(run(tool, { ...BASE_ARGS, taskId: '' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
     expect(sub.started()).toBeUndefined()
   })
+})
+
+it('首次建议进入主管指令；同一任务后续直接交原主管，投递失败不换队', async () => {
+  const {records, roles} = await makeDeps()
+  await roles.save({name:'主管', description:'负责组织团队'})
+  const taskId = await makeTask(records)
+  const sub = fakeSubagents('original')
+  const startActivation = vi.fn(sub.face.startActivation)
+  const sendMessage = vi.fn(async (..._args: unknown[]) => 'receipt')
+  const tool = buildDispatchTool({records,roles,subagents:{startActivation,sendMessage}})
+  const args = {...BASE_ARGS,taskId}
+  await expect(run(tool,{...args,teamAdvice:undefined})).rejects.toThrow(/组队建议/)
+  await expect(run(tool,{...args,teamAdvice:{assessment:'小',roles:[{role:'前端程序员',count:0,reason:'小'}]}})).rejects.toThrow()
+  await run(tool,args)
+  expect(sub.started()?.promptText).toContain('前端程序员 × 2：两个页面可独立实现')
+  expect(sub.started()?.promptText).toContain('由主管自行决定')
+  const follow = {...args, task:'新增导出：验收 CSV 文件', teamAdvice:undefined}
+  await expect(run(tool,follow)).resolves.toMatchObject({childId:'original',messageId:'receipt'})
+  expect(sendMessage).toHaveBeenCalledWith(EXEC.agent,'original',expect.arrayContaining([{type:'text',text:expect.stringContaining(follow.task)}]),expect.anything())
+  sendMessage.mockRejectedValueOnce(new Error('offline'))
+  await expect(run(tool,follow)).rejects.toThrow(/交接/)
+  expect(startActivation).toHaveBeenCalledTimes(1)
+  expect(await records.list('root-1',{taskId,kind:'assignment'})).toHaveLength(1)
+})
+
+it('不同任务各派主管；同任务有多个历史主管先确认，不猜一个', async () => {
+  const { records, roles } = await makeDeps()
+  await roles.save({ name: '主管', description: '组织团队' })
+  const first = await makeTask(records)
+  const second = await makeTask(records)
+  const startActivation = vi.fn().mockResolvedValueOnce({childId:'a'}).mockResolvedValueOnce({childId:'b'})
+  const sendMessage = vi.fn()
+  const tool = buildDispatchTool({records, roles, subagents:{startActivation, sendMessage}})
+  await run(tool,{...BASE_ARGS,taskId:first}); await run(tool,{...BASE_ARGS,taskId:second})
+  await records.create('root-1',{kind:'assignment',taskId:first,title:'旧主管',body:'',sessions:[{label:'主管',sessionId:'c'}]})
+  await expect(run(tool,{...BASE_ARGS,taskId:first})).rejects.toThrow(/多个主管/)
+  expect(startActivation).toHaveBeenCalledTimes(2); expect(sendMessage).not.toHaveBeenCalled()
 })
