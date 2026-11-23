@@ -236,9 +236,17 @@ it('首次建议进入主管指令；同一任务后续直接交原主管，投�
   await run(tool,args)
   expect(sub.started()?.promptText).toContain('前端程序员 × 2：两个页面可独立实现')
   expect(sub.started()?.promptText).toContain('由主管自行决定')
-  const follow = {...args, task:'新增导出：验收 CSV 文件', teamAdvice:undefined}
+  const follow = {...args, mode:'continue', expectedChildId:'original', task:'新增导出：验收 CSV 文件', teamAdvice:undefined}
+  // 原事故调用形状：已有主管，再用 spawn/fork 时不得自动创建或发消息。
+  for (const mode of ['spawn','fork']) await expect(run(tool,{...args,mode})).rejects.toThrow(/continue/)
+  for (const bad of [{expectedChildId:undefined}, {expectedChildId:'another'}, {role:'执行者'}, {mode:'spawn'}, {rootSessionId:'other-root'}, {taskId:await makeTask(records)}]) {
+    await expect(run(tool,{...follow,...bad})).rejects.toThrow()
+  }
+  expect(sendMessage).not.toHaveBeenCalled()
   await expect(run(tool,follow)).resolves.toMatchObject({childId:'original',messageId:'receipt'})
   expect(sendMessage).toHaveBeenCalledWith(EXEC.agent,'original',expect.arrayContaining([{type:'text',text:expect.stringContaining(follow.task)}]),expect.anything())
+  sendMessage.mockResolvedValueOnce('')
+  await expect(run(tool,follow)).rejects.toThrow(/回执/)
   sendMessage.mockRejectedValueOnce(new Error('offline'))
   await expect(run(tool,follow)).rejects.toThrow(/交接/)
   expect(startActivation).toHaveBeenCalledTimes(1)
@@ -256,5 +264,6 @@ it('不同任务各派主管；同任务有多个历史主管先确认，不猜�
   await run(tool,{...BASE_ARGS,taskId:first}); await run(tool,{...BASE_ARGS,taskId:second})
   await records.create('root-1',{kind:'assignment',taskId:first,title:'旧主管',body:'',sessions:[{label:'主管',sessionId:'c'}]})
   await expect(run(tool,{...BASE_ARGS,taskId:first})).rejects.toThrow(/多个主管/)
+  await expect(run(tool,{...BASE_ARGS,taskId:first,mode:'continue',expectedChildId:'a'})).rejects.toThrow(/多个主管/)
   expect(startActivation).toHaveBeenCalledTimes(2); expect(sendMessage).not.toHaveBeenCalled()
 })
