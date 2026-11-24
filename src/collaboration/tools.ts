@@ -152,8 +152,20 @@ export const COLLABORATION_TOOL_NAMES = [
  * （base 全局提供，缺席时派发工具明确报错、其余七条不受影响）。rootSessionId
  * 始终显式传入；存储为字段校验的最终权威，本层只拦包装层坏值。
  */
-export function buildCollaborationTools(deps: { records: RecordStore; roles: RoleStore; subagents?: SubagentsFace }): ToolDefinition[] {
+/** 写记录成功后的回调（刷新活跃任务视图缓存，让上下文段零滞后）；缺席时不调。 */
+export type AfterRecordWrite = (rootSessionId: string) => Promise<void>
+
+export function buildCollaborationTools(deps: { records: RecordStore; roles: RoleStore; subagents?: SubagentsFace; afterWrite?: AfterRecordWrite }): ToolDefinition[] {
   const { records, roles } = deps
+  // 写后刷新：失败只告警，绝不把一次成功的写入变成失败（缓存下一拍会自愈）。
+  const afterWrite = async (rootSessionId: string): Promise<void> => {
+    if (deps.afterWrite === undefined) return
+    try {
+      await deps.afterWrite(rootSessionId)
+    } catch (error) {
+      console.warn('[dsh-router] active-task view refresh failed:', error instanceof Error ? error.message : String(error))
+    }
+  }
   return [
     buildDispatchTool(deps),
     {
@@ -194,7 +206,9 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
         const a = asObject(args, '参数')
         const rootSessionId = asNonEmptyString(a.rootSessionId, 'rootSessionId')
         const input = asObject(a.input, 'input')
-        return records.create(rootSessionId, input as unknown as RecordDraft)
+        const saved = await records.create(rootSessionId, input as unknown as RecordDraft)
+        await afterWrite(rootSessionId)
+        return saved
       },
     },
     {
@@ -283,7 +297,9 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
         const taskId = asNonEmptyString(a.taskId, 'taskId')
         const recordId = asNonEmptyString(a.recordId, 'recordId')
         const patch = asObject(a.patch, 'patch')
-        return records.update(rootSessionId, taskId, recordId, patch as unknown as RecordPatch)
+        const saved = await records.update(rootSessionId, taskId, recordId, patch as unknown as RecordPatch)
+        await afterWrite(rootSessionId)
+        return saved
       },
     },
     {

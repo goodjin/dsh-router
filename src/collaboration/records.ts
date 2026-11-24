@@ -304,7 +304,13 @@ export function createRecordStore(dataDir: string, deps: RecordStoreDeps = {}): 
       return enqueue(async () => {
         // 读/检查/写全部从调用入口排队，按提交顺序执行。
         if (kind !== 'task') await requireTask(rootSessionId, taskId)
-        if (parentRecordId !== undefined) await requireParent(rootSessionId, taskId, parentRecordId)
+        // parentRecordId 的语义按种类分：任务的父只能是另一个任务（跨任务层级，
+        // 如派发时自动建的子任务挂在主任务下）→ 核父任务存在；非任务记录的父是
+        // 同任务内的记录（如报告挂在分工下）→ 核同任务记录存在。
+        if (parentRecordId !== undefined) {
+          if (kind === 'task') await requireTask(rootSessionId, parentRecordId)
+          else await requireParent(rootSessionId, taskId, parentRecordId)
+        }
         const record: WorkRecord = {
           kind,
           taskId,

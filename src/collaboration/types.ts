@@ -80,6 +80,11 @@ export interface RoleStore {
   list(): Promise<RoleTemplate[]>
   read(name: string): Promise<RoleTemplate>
   save(input: { name: string; description: string }): Promise<RoleTemplate>
+  /**
+   * 按名删除角色模板文件；不存在时静默返回 false。只给「退役预置角色」用：
+   * 内容仍等于某版预置文本（= 用户没改过）才删，用户改过的永不动。
+   */
+  remove(name: string): Promise<boolean>
   /** 一次性把旧版 <uuid>.json 角色迁成 <name>.md；原 json 保留不删，坏文件跳过。 */
   migrateLegacyJson(): Promise<void>
 }

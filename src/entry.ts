@@ -23,6 +23,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { createCollaborationRuntime } from './collaboration/runtime.ts'
 import { registerCollaborationRoutes, type CollaborationRouteContext } from './collaboration/routes.ts'
 import { seedPresetRoles } from './collaboration/roles.ts'
+import { createActiveTaskCache, type ActiveTaskCache } from './collaboration/active-tasks.ts'
 
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router'
@@ -44,6 +45,8 @@ export interface RouterCollaborationFace {
   records: ReturnType<typeof createCollaborationRuntime>['records']
   roles: ReturnType<typeof createCollaborationRuntime>['roles']
   dataDir: string
+  /** 活跃任务视图缓存：tools/dispatch 行写后刷新，context 行同步读（见 active-tasks.ts）。 */
+  activeTasks: ActiveTaskCache
 }
 
 /** apply 收到的 ctx 最小面：provide 必需；root 用于全局服务发布；inject 机会式。 */
@@ -65,6 +68,7 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
     records: runtime.records,
     roles: runtime.roles,
     dataDir: runtime.dataDir,
+    activeTasks: createActiveTaskCache(runtime.records),
   }
   // 服务必须发布到根作用域：预设内部插件（tools/context 行）经 isolate 符号解析服务，
   // 只有根级 provide 才能让所有子上下文（含预设 realm）看见。ctx.provide 只发布到

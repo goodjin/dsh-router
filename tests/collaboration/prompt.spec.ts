@@ -69,15 +69,38 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).not.toMatch(/完成必须走完成协议/)
   })
 
-  it('R1: reporting chain worker → 主管 → Router → 用户; cross-member via 主管, cross-team via Router', () => {
-    // worker 的进度/问题/结果报给主管，不越级直接找用户
-    expect(collaborationPrompt).toMatch(/worker[\s\S]*主管/)
-    expect(collaborationPrompt).not.toMatch(/worker[\s\S]*向用户提问/)
-    // 主管报 Router，Router 把需用户决定的事项交给用户
-    expect(collaborationPrompt).toMatch(/主管[\s\S]*Router[\s\S]*用户/)
-    // 跨成员由主管转达，跨团队由 Router 协调
-    expect(collaborationPrompt).toMatch(/跨成员[\s\S]*主管转达/)
-    expect(collaborationPrompt).toMatch(/跨团队[\s\S]*Router/)
+  it('R1（两级模型）: reporting chain worker → Router → 用户; Router 直接担任主管，跨成员与跨团队都由 Router 转达/协调', () => {
+    // Router 主会话直接担任主管：不再有可派发的「主管」层
+    expect(collaborationPrompt).toContain('Router 主会话直接担任主管')
+    expect(collaborationPrompt).not.toMatch(/派主管|派给主管|报给主管/)
+    // worker 的进度/问题/结果报给 Router，不越级直接找用户
+    expect(collaborationPrompt).toMatch(/worker[\s\S]*报给 Router/)
+    expect(collaborationPrompt).toMatch(/不要越级直接找用户/)
+    // Router 把需用户决定的事项交给用户
+    expect(collaborationPrompt).toMatch(/Router[\s\S]*需用户决定的事项交给用户/)
+    // 跨成员与跨团队都由 Router 承担
+    expect(collaborationPrompt).toMatch(/跨成员沟通由 Router 转达/)
+    expect(collaborationPrompt).toMatch(/跨团队协调由 Router 协调/)
+  })
+
+  it('两级模型的派发契约：taskId 可选（省略即自动建任务）、continue 泛化到任意子会话、追加要求自动拼进任务描述', () => {
+    expect(collaborationPrompt).toMatch(/省略 taskId[\s\S]*自动新建一条任务/)
+    expect(collaborationPrompt).toContain('parentTaskId')
+    // 追加需求：先用 router_record_list 查该任务的分工记录拿子会话，再 continue
+    expect(collaborationPrompt).toMatch(/router_record_list\(taskId=归属任务, kind=assignment\)/)
+    expect(collaborationPrompt).toMatch(/mode=continue, expectedChildId=/)
+    // 追加要求自动拼进任务描述，不要再手动重复更新
+    expect(collaborationPrompt).toMatch(/自动拼进该任务的描述/)
+    // Router 自己组队：吸收了原主管的组织纪律
+    expect(collaborationPrompt).toContain('你自己组队')
+    expect(collaborationPrompt).toContain('## 按任务类型组队（八类）')
+    expect(collaborationPrompt).toContain('## 复杂度分级参考')
+  })
+
+  it('上下文与压缩由插件代劳：活跃任务完整描述每步注入、子会话结束自动压缩', () => {
+    expect(collaborationPrompt).toContain('## 上下文与压缩')
+    expect(collaborationPrompt).toMatch(/活跃任务[\s\S]*完整描述/)
+    expect(collaborationPrompt).toMatch(/子会话结束时[\s\S]*自动压缩/)
   })
 
   it('R1: fact sources separated — work materials by records, runtime facts by DSH (model reports not system-certified)', () => {

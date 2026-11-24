@@ -12,6 +12,7 @@ import { join } from 'node:path'
 
 import { CollaborationError } from './types.ts'
 import { COLLABORATION_TOOL_NAMES } from './tools.ts'
+import type { ActiveTaskView } from './active-tasks.ts'
 
 /** 协作目录名（与 RecordStore/RoleStore 的命名空间一致；只拼一次）。 */
 const COLLABORATION_DIR = 'collaboration'
@@ -26,6 +27,11 @@ export interface CollaborationContextInput {
    * 空数组 = 库里没有角色（指引新建）。纯函数不取数，由调用方喂入。
    */
   roles?: ReadonlyArray<{ name: string; description: string }>
+  /**
+   * 当前会话的活跃任务视图（完整描述 + 子会话）：undefined = 尚未加载（渲染「加载中」）；
+   * 空数组 = 没有活跃任务。纯函数不取数，由调用方喂入（见 active-tasks.ts）。
+   */
+  tasks?: readonly ActiveTaskView[]
 }
 
 /** 非空字符串校验（坏入参直接拒绝，不产出误导文本）。 */
@@ -62,8 +68,36 @@ export function buildCollaborationContext(input: CollaborationContextInput): str
     '可用的协作工具（共 ' + String(COLLABORATION_TOOL_NAMES.length) + ' 个）：' + toolList,
     '记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。',
     '',
+    ...renderTasks(input.tasks),
     ...renderRoles(input.roles),
   ].join('\n')
+}
+
+/**
+ * 活跃任务段：每步重渲染、原地替换、不进历史。注入**完整描述**（用户选择）与子会话，
+ * 让「现在要做什么」「追加需求该发给谁」始终在眼前；写清任务描述就是给未来的自己留状态。
+ */
+function renderTasks(tasks: readonly ActiveTaskView[] | undefined): string[] {
+  const header = '## 活跃任务（每步重渲染，不占历史；任务描述是「现在要做什么」的权威来源，写清楚它）'
+  if (tasks === undefined) {
+    return [header, '活跃任务视图加载中；需要立刻核对用 router_record_list(kind=task)。', '']
+  }
+  if (tasks.length === 0) {
+    return [header, '当前没有活跃任务。', '']
+  }
+  const lines: string[] = [header]
+  for (const task of tasks) {
+    lines.push(`### [${task.workLabel}] ${task.title}（taskId：${task.taskId}）`)
+    lines.push(task.body.trim() === '' ? '（无描述）' : task.body)
+    if (task.sessions.length === 0) {
+      lines.push('子会话：尚未派发（用 router_dispatch 派发；省略 taskId 会新建任务，给 taskId 就挂在本任务下）。')
+    } else {
+      lines.push('子会话（追加/修改需求用 router_dispatch(mode=continue, expectedChildId=…)）：')
+      for (const link of task.sessions) lines.push(`- ${link.label}：${link.sessionId}`)
+    }
+    lines.push('')
+  }
+  return lines
 }
 
 /** 角色清单段：注入名称与首行摘要（v2 两层结构）+ 用法指引；缺失/为空各自如实说明并指向工具。 */

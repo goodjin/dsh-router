@@ -83,6 +83,8 @@ export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 本包自己的行：Task 2B 起 tools 行无 config（角色闸退役） */
   'tools': {},
   'router-context': { order: 100 },
+  /* 两级模型新增：子会话结束→自动压缩触发器（挂在 compaction isolate 组内，无 config） */
+  'router-compaction-trigger': {},
   /* 无必填 config 的行：空登记（完整性守卫） */
   'dsh-router-client': {},
   'dsh-router-preset': {},

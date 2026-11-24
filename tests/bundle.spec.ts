@@ -123,11 +123,30 @@ describe('宿主产物的官方包装载必须经宿主基座解析', () => {
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context、./compaction-trigger', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
     const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
-    expect(subpathRows.sort()).toEqual(['context', 'tools'])
+    expect(subpathRows.sort()).toEqual(['compaction-trigger', 'context', 'tools'])
+  })
+
+  it('compaction-trigger 行挂在 compaction isolate 组内（组外解析不到 ctx.compaction）', () => {
+    // compaction 组（isolate compaction:true）与触发器行都按行定位；触发器必须在组之后，
+    // 且两者之间没有出现与组同缩进的新兄弟行（= 触发器仍在组内，没有跑到组外）。
+    const lines = PATCH_TEXT.split('\n')
+    const groupIdx = lines.findIndex((l, i) =>
+      /- id: compaction$/.test(l) && /name: cordis:group/.test(lines[i + 1] ?? '') && /compaction: true/.test(lines.slice(i, i + 6).join('\n')))
+    expect(groupIdx, 'compaction isolate 组不存在').toBeGreaterThan(-1)
+    const groupIndent = lines[groupIdx]!.length - lines[groupIdx]!.trimStart().length
+    const triggerIdx = lines.findIndex((l) => /- id: router-compaction-trigger$/.test(l))
+    expect(triggerIdx, '触发器行不存在').toBeGreaterThan(groupIdx)
+    for (let i = groupIdx + 1; i < triggerIdx; i++) {
+      const line = lines[i]!
+      const indent = line.length - line.trimStart().length
+      expect(!(indent === groupIndent && /^- id:/.test(line.trimStart())), `触发器跑到了 compaction 组外（第 ${i + 1} 行出现了同缩进兄弟行）`).toBe(true)
+    }
+    expect(lines[triggerIdx + 1]).toMatch(/name: '@goodjin2\/dsh-router\/compaction-trigger'/)
+    expect(lines[triggerIdx - 1]).not.toMatch(/^- id:/)
   })
 
   it('静态预设行只有一条：dsh-router/Router（完整=true；无旧 executor/supervisor/worker 别名）', () => {

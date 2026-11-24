@@ -31,6 +31,8 @@ interface ToolsContext {
   routerCollaboration: {
     records: Parameters<typeof buildCollaborationTools>[0]['records']
     roles: Parameters<typeof buildCollaborationTools>[0]['roles']
+    /** 活跃任务视图缓存（共享单实例）；缺席时写后不刷新，上下文段靠后台刷新自愈。 */
+    activeTasks?: { refresh(rootSessionId: string): Promise<unknown> }
   }
   subagents?: Parameters<typeof buildCollaborationTools>[0]['subagents']
 }
@@ -41,6 +43,12 @@ export function apply(ctx: ToolsContext): () => void {
     records: ctx.routerCollaboration.records,
     roles: ctx.routerCollaboration.roles,
     subagents: ctx.subagents,
+    // 写记录后同步刷新活跃任务视图：下一步装配上下文段时已是最新（零滞后）。
+    afterWrite: ctx.routerCollaboration.activeTasks === undefined
+      ? undefined
+      : async (rootSessionId) => {
+          await ctx.routerCollaboration.activeTasks!.refresh(rootSessionId)
+        },
   })
   const disposers = definitions.map((definition) => ctx.tools.register(definition))
   return () => {

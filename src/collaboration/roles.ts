@@ -154,6 +154,26 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       })
     },
 
+    async remove(name: string): Promise<boolean> {
+      const validated = validateRoleName(name)
+      return enqueue(async () => {
+        const path = rolePath(validated)
+        await guard.assertDirChain(path)
+        try {
+          await fs.lstat(path)
+        } catch (error) {
+          if (isEnoent(error)) return false
+          throw new CollaborationError('IO_ERROR', `角色模板删除前校验失败: ${path}`, { cause: error })
+        }
+        try {
+          await fs.remove(path)
+        } catch (error) {
+          throw new CollaborationError('IO_ERROR', `角色模板删除失败: ${path}`, { cause: error })
+        }
+        return true
+      })
+    },
+
     async migrateLegacyJson(): Promise<void> {
       let names: string[]
       try {
@@ -200,7 +220,7 @@ export type { PresetRoleTemplate } from './preset-roles.ts'
 /** 首次启用种入 / 升级到的最新预置角色（v2：16 个专业角色，文本单一来源在 preset-roles.ts）。 */
 export { PRESET_ROLE_TEMPLATES } from './preset-roles.ts'
 
-import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES } from './preset-roles.ts'
+import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES, RETIRED_PRESET_ROLES } from './preset-roles.ts'
 
 /**
  * 幂等种入预置角色，带「历史文本精确升级」：
@@ -208,9 +228,20 @@ import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES } from './preset-
  * - 现有内容等于最新预置 → 跳过；
  * - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
  * - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
+ *
+ * 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：磁盘内容等于它任一版历史
+ * 文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
  */
-export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save'>): Promise<void> {
+export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save' | 'remove'>): Promise<void> {
   const existing = new Map((await store.list()).map((role) => [role.name, role.description]))
+  for (const [name, texts] of Object.entries(RETIRED_PRESET_ROLES)) {
+    const current = existing.get(name)
+    if (current === undefined) continue
+    if (texts.includes(current)) {
+      await store.remove(name)
+      existing.delete(name)
+    }
+  }
   for (const preset of PRESET_ROLE_TEMPLATES) {
     const current = existing.get(preset.name)
     if (current === undefined) {

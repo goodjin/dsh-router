@@ -1,5 +1,5 @@
 /**
- * 预置角色模板文本（角色库 v2：4 既有 + 12 新增 = 16 个专业角色）。
+ * 预置角色模板文本（角色库 v3：15 个专业角色；「主管」已退役，见 RETIRED_PRESET_ROLES）。
  *
  * 职责文案为「首行摘要 + 详细正文」两层结构：首行一句话摘要进每个会话的协作
  * 上下文清单（context.ts 只取首行，控制注入体积）；完整正文只在派发时拼进
@@ -10,6 +10,11 @@
  * HISTORICAL_PRESET_DESCRIPTIONS 登记每版被替换的历史预置文本：种入升级时
  * 只有现有内容与某版历史文本完全一致（= 用户没改过）才覆盖到最新，用户改过
  * 的（与任何历史文本都不一致）永远不动——这是「不覆盖用户编辑」的精确兑现。
+ *
+ * RETIRED_PRESET_ROLES 登记已退役的预置角色及其全部历史文本（v3 起：主管——
+ * Router 主会话直接担任主管，两级模型，不再有可派发的主管角色）。种入时若磁盘上
+ * 的内容仍等于某版历史文本（= 用户没改过）就删掉；用户改过的永远不动（宁可留一个
+ * 孤立角色，也不删用户的东西）。
  */
 
 /** 预置角色模板（专业类型；职责说明随协作上下文注入摘要、随派发拼装全文）。 */
@@ -18,8 +23,7 @@ export interface PresetRoleTemplate {
   description: string
 }
 
-/** 首次启用种入 / 升级到的最新预置角色。 */
-/** 主管 v2 文本（2026-11-20 加入「派子会话一律 fork」前的版本；历史升级比对用）。 */
+/** 主管 v2 文本（2026-11-20 加入「派子会话一律 fork」前的版本；退役比对用）。 */
 const SUPERVISOR_V2_TEXT = [
       '按任务类型与复杂度组织团队、分工排期、跟进汇审；不亲自执行具体工作。',
       '',
@@ -46,10 +50,8 @@ const SUPERVISOR_V2_TEXT = [
       '- 复杂（跨模块、跨栈、需要需求/设计制品）：完整组队，按上面类型流程走。',
 ].join('\n')
 
-export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
-  {
-    name: '主管',
-    description: [
+/** 主管 v3 文本（含「派子会话一律 fork」；v3 起退役，这是它最后的一版预置文本）。 */
+const SUPERVISOR_V3_TEXT = [
       '按任务类型与复杂度组织团队、分工排期、跟进汇审；不亲自执行具体工作。',
       '',
       '## 组织总则',
@@ -75,8 +77,22 @@ export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
       '- 简单（单点、低风险、单角色可完成）：单角色直达。',
       '- 中等（多步骤或涉及共享模块）：单角色 + 独立测试 + 独立评审。',
       '- 复杂（跨模块、跨栈、需要需求/设计制品）：完整组队，按上面类型流程走。',
-    ].join('\n'),
-  },
+].join('\n')
+
+/**
+ * 已退役的预置角色 → 它曾用过的全部预置文本（v1 摘要 + 各版全文）。
+ * 种入时：磁盘内容等于其中任一版（= 用户没改过）→ 删除；与任何一版都不一致 → 不动。
+ */
+export const RETIRED_PRESET_ROLES: Readonly<Record<string, readonly string[]>> = {
+  主管: [
+    '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。',
+    SUPERVISOR_V2_TEXT,
+    SUPERVISOR_V3_TEXT,
+  ],
+}
+
+/** 首次启用种入 / 升级到的最新预置角色。 */
+export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
   {
     name: '执行者',
     description: [
@@ -406,10 +422,6 @@ export const PRESET_ROLE_TEMPLATES: readonly PresetRoleTemplate[] = [
  * 种入升级只在这些文本与现有文件内容完全一致时才覆盖（用户没改过的精确判定）。
  */
 export const HISTORICAL_PRESET_DESCRIPTIONS: Readonly<Record<string, readonly string[]>> = {
-  主管: [
-    '把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。',
-    SUPERVISOR_V2_TEXT,
-  ],
   执行者: [
     '接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。',
   ],

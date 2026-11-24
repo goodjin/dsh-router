@@ -18,6 +18,10 @@
       "types": "./src/context.ts",
       "default": "./dist/context.js"
     },
+    "./compaction-trigger": {
+      "types": "./src/compaction-trigger.ts",
+      "default": "./dist/compaction-trigger.js"
+    },
     "./client": {
       "types": "./src/client/index.ts",
       "default": "./lib/client.js"

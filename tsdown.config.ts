@@ -36,11 +36,13 @@ const externals = new Set([
   '@deepseek-ai/dsh-client-ui-primitives',
 ])
 
-/** 宿主入口（package.json exports 的宿主子路径）。prompt-section/compaction 已退役（Task 2B）。 */
+/** 宿主入口（package.json exports 的宿主子路径）。prompt-section/compaction 已退役（Task 2B）；
+ *  compaction-trigger 是两级模型新增的「子会话结束→自动压缩」触发器（挂在 compaction isolate 组内）。 */
 const hostEntries = {
   entry: 'src/entry.ts',
   tools: 'src/tools.ts',
   context: 'src/context.ts',
+  'compaction-trigger': 'src/compaction-trigger.ts',
 } as const
 
 const clientConfig = defineConfig({

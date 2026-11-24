@@ -177,8 +177,38 @@ function buildCollaborationContext(input) {
 		"可用的协作工具（共 " + String(COLLABORATION_TOOL_NAMES.length) + " 个）：" + toolList,
 		"记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。",
 		"",
+		...renderTasks(input.tasks),
 		...renderRoles(input.roles)
 	].join("\n");
+}
+/**
+* 活跃任务段：每步重渲染、原地替换、不进历史。注入**完整描述**（用户选择）与子会话，
+* 让「现在要做什么」「追加需求该发给谁」始终在眼前；写清任务描述就是给未来的自己留状态。
+*/
+function renderTasks(tasks) {
+	const header = "## 活跃任务（每步重渲染，不占历史；任务描述是「现在要做什么」的权威来源，写清楚它）";
+	if (tasks === void 0) return [
+		header,
+		"活跃任务视图加载中；需要立刻核对用 router_record_list(kind=task)。",
+		""
+	];
+	if (tasks.length === 0) return [
+		header,
+		"当前没有活跃任务。",
+		""
+	];
+	const lines = [header];
+	for (const task of tasks) {
+		lines.push(`### [${task.workLabel}] ${task.title}（taskId：${task.taskId}）`);
+		lines.push(task.body.trim() === "" ? "（无描述）" : task.body);
+		if (task.sessions.length === 0) lines.push("子会话：尚未派发（用 router_dispatch 派发；省略 taskId 会新建任务，给 taskId 就挂在本任务下）。");
+		else {
+			lines.push("子会话（追加/修改需求用 router_dispatch(mode=continue, expectedChildId=…)）：");
+			for (const link of task.sessions) lines.push(`- ${link.label}：${link.sessionId}`);
+		}
+		lines.push("");
+	}
+	return lines;
 }
 /** 角色清单段：注入名称与首行摘要（v2 两层结构）+ 用法指引；缺失/为空各自如实说明并指向工具。 */
 function renderRoles(roles) {
@@ -264,10 +294,18 @@ function apply(ctx, config) {
 			kickIfStale();
 			const sessionId = currentSessionId(assembly);
 			if (sessionId === void 0) return diagnosticText(dataDir);
+			let tasks;
+			try {
+				tasks = ctx.routerCollaboration.activeTasks?.get(sessionId);
+				if (tasks === void 0 && ctx.routerCollaboration.activeTasks !== void 0) ctx.routerCollaboration.activeTasks.refresh(sessionId).catch(() => {});
+			} catch {
+				tasks = void 0;
+			}
 			return buildCollaborationContext({
 				sessionId,
 				dataDir,
-				roles: cache.value
+				roles: cache.value,
+				tasks
 			});
 		}
 	});

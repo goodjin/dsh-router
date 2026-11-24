@@ -14,7 +14,7 @@ var CollaborationError = class extends Error {
 
 //#endregion
 //#region src/collaboration/dispatch.ts
-/** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次。 */
+/** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次 / continue 向既有子会话追加。 */
 const DISPATCH_MODES = [
 	"spawn",
 	"fork",
@@ -24,7 +24,9 @@ const DISPATCH_MODES = [
 *  0.2.1 与 0.2.2 皆然），缺 signal 直接 TypeError。优先用调用方 turn 的 exec.signal；
 *  缺席时兜底插件级 controller（同 agent-kernel D2），保证任何宿主下都传真实 AbortSignal。 */
 const dispatchLifetime = new AbortController();
-/** 拼装给子会话的初始指令：职责 + 任务 + 根会话 + 报告链要点（纯函数）。 */
+/** continue 追加要求时拼进任务描述的分隔标记（便于人读、也便于测试断言）。 */
+const APPEND_MARKER = "[追加要求]";
+/** 拼装给子会话的初始指令：职责 + 任务 + 任务/根会话 + 报告链要点（纯函数）。 */
 function composeDispatchInstruction(input) {
 	const duty = input.role.description.trim() === "" ? "（该角色模板未写职责说明）" : input.role.description.trim();
 	return [
@@ -36,29 +38,17 @@ function composeDispatchInstruction(input) {
 		"本次任务：",
 		input.task,
 		"",
+		`本任务 taskId：${input.taskId}——你的分工记录与工作报告都挂在这个任务下。`,
 		`根会话（rootSessionId）：${input.rootSessionId}——之后每次保存工作记录都必须显式带上它，不要用你自己的会话 ID 充当。`,
-		"工作资料用记录工具保存（task/assignment/report/summary）；进度、问题与结果按报告链报给上级（worker→主管→Router→用户）。",
+		"工作资料用记录工具保存（task/assignment/report/summary）；进度、问题与结果按报告链报给上级（worker→Router→用户）。",
 		"完成后保存报告记录（标注工作标签），并把结果与产物位置写清楚；不要等待额外系统确认。"
-	].join("\n");
-}
-const creatingSupervisor = /* @__PURE__ */ new Set();
-function formatTeamAdvice(value) {
-	const advice = value;
-	if (!advice || !Array.isArray(advice.roles) || advice.roles.length === 0) throw new CollaborationError("INVALID_INPUT", "首次派主管必须提供组队建议 teamAdvice（规模与复杂度、角色、人数、理由）");
-	return [
-		"Router 的组队建议（实际阵容由主管自行决定）：",
-		nonEmpty(advice.assessment, "任务规模与复杂度"),
-		...advice.roles.map((item) => {
-			if (!item || !Number.isSafeInteger(item.count) || item.count < 1) throw new CollaborationError("INVALID_INPUT", "建议人数须为正整数");
-			return `- ${nonEmpty(item.role, "建议角色")} × ${item.count}：${nonEmpty(item.reason, "配置理由")}`;
-		})
 	].join("\n");
 }
 /** 构造 router_dispatch 工具定义。 */
 function buildDispatchTool(deps) {
 	return {
 		name: "router_dispatch",
-		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高，确需任务背景时才用）。主管使用主任务 taskId：首次必填 teamAdvice；续派只能用 mode=continue 和 expectedChildId，只投递不新建。rootSessionId 必须显式传入。",
+		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。rootSessionId 必须显式传入。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -67,67 +57,38 @@ function buildDispatchTool(deps) {
 					type: "string",
 					description: "根会话 ID（显式传入，不可推断）"
 				},
-				taskId: {
-					type: "string",
-					description: "归属任务的记录 ID（先用 router_record_create 建任务说明）"
-				},
 				role: {
 					type: "string",
-					description: "角色名（角色库中的名称，如 主管/执行者/调研员/评审员）"
+					description: "角色名（角色库中的名称，如 执行者/调研员/评审员）"
 				},
 				task: {
 					type: "string",
 					description: "给该角色的任务内容（目标、约束、验收条件、材料位置）"
 				},
-				teamAdvice: {
-					type: "object",
-					description: "首次派主管必填；角色与人数只是建议，由主管自行决定。",
-					additionalProperties: false,
-					required: ["assessment", "roles"],
-					properties: {
-						assessment: {
-							type: "string",
-							description: "任务规模、复杂度、风险、可并行工作与依赖"
-						},
-						roles: {
-							type: "array",
-							minItems: 1,
-							items: {
-								type: "object",
-								additionalProperties: false,
-								required: [
-									"role",
-									"count",
-									"reason"
-								],
-								properties: {
-									role: { type: "string" },
-									count: {
-										type: "integer",
-										minimum: 1
-									},
-									reason: {
-										type: "string",
-										description: "为何需要该角色及这个人数"
-									}
-								}
-							}
-						}
-					}
-				},
-				expectedChildId: {
-					type: "string",
-					description: "仅 continue 必填：从原主管分工记录取得的确切子会话 ID"
-				},
 				mode: {
 					type: "string",
 					enum: [...DISPATCH_MODES],
-					description: "spawn/fork 仅新建；continue 仅向核实的原主管投递，失败不换模式"
+					description: "spawn/fork 新建子会话；continue 向 expectedChildId 指定的既有子会话追加要求，失败不换模式"
+				},
+				taskId: {
+					type: "string",
+					description: "归属任务的记录 ID（给了就在该任务下派发；省略则自动新建任务）"
+				},
+				taskTitle: {
+					type: "string",
+					description: "省略 taskId 时必填：自动新建的任务标题"
+				},
+				parentTaskId: {
+					type: "string",
+					description: "省略 taskId 时可选：新任务挂在这个父任务下（通常传主任务）"
+				},
+				expectedChildId: {
+					type: "string",
+					description: "仅 continue 必填：从归属任务的分工记录（assignment.sessions）取得的确切子会话 ID"
 				}
 			},
 			required: [
 				"rootSessionId",
-				"taskId",
 				"role",
 				"task",
 				"mode"
@@ -139,6 +100,14 @@ function buildDispatchTool(deps) {
 				additionalProperties: false,
 				properties: {
 					childId: { type: "string" },
+					taskId: {
+						type: "string",
+						description: "本次派发归属（或自动新建）的任务 ID"
+					},
+					createdTask: {
+						type: "boolean",
+						description: "本次是否自动新建了任务"
+					},
 					record: {
 						type: "object",
 						additionalProperties: false,
@@ -150,7 +119,7 @@ function buildDispatchTool(deps) {
 					},
 					messageId: {
 						type: "string",
-						description: "追加任务已投递到原主管的宿主回执"
+						description: "continue：追加要求已投递到既有子会话的宿主回执"
 					},
 					recordError: { type: "string" }
 				},
@@ -165,114 +134,123 @@ function buildDispatchTool(deps) {
 			if (typeof args !== "object" || args === null || Array.isArray(args)) throw new CollaborationError("INVALID_INPUT", "参数必须是对象");
 			const a = args;
 			const rootSessionId = nonEmpty(a.rootSessionId, "rootSessionId");
-			const taskId = nonEmpty(a.taskId, "taskId");
 			const roleName = nonEmpty(a.role, "role").trim();
 			const task = nonEmpty(a.task, "task");
 			const mode = a.mode;
 			if (mode !== "spawn" && mode !== "fork" && mode !== "continue") throw new CollaborationError("INVALID_INPUT", `mode 必须是 ${DISPATCH_MODES.join(" 或 ")}`);
-			if (mode === "continue" && roleName !== "主管") throw new CollaborationError("INVALID_INPUT", "continue 仅用于续派原主管");
-			if (mode !== "continue" && a.expectedChildId !== void 0) throw new CollaborationError("INVALID_INPUT", "指定原主管只能用 continue，不能新建");
-			const expected = mode === "continue" ? nonEmpty(a.expectedChildId, "expectedChildId") : void 0;
+			if (mode !== "continue" && a.expectedChildId !== void 0) throw new CollaborationError("INVALID_INPUT", "expectedChildId 只能配合 continue 使用，新建不需要");
 			if (deps.subagents === void 0) throw new CollaborationError("IO_ERROR", "subagents 服务不可用：无法创建子会话（检查宿主装载）");
 			const parent = exec?.agent;
 			if (parent === void 0) throw new CollaborationError("INVALID_INPUT", "router_dispatch 需要调用方 agent（exec.agent 缺失）");
 			const execSignal = exec?.signal;
 			const signal = execSignal instanceof AbortSignal ? execSignal : dispatchLifetime.signal;
-			const key = roleName === "主管" ? JSON.stringify([rootSessionId, taskId]) : void 0;
-			if (key && creatingSupervisor.has(key)) throw new CollaborationError("INVALID_INPUT", "该任务正在派发主管，请等待派发结果再继续");
-			if (key) creatingSupervisor.add(key);
-			try {
-				let taskBrief = task;
-				const supervisors = /* @__PURE__ */ new Set();
-				if (key) {
-					const rows = await deps.records.list(rootSessionId, {
-						taskId,
-						kind: "assignment"
-					});
-					for (const row of rows) for (const link of row.sessions ?? []) if (link.label === "主管") supervisors.add(link.sessionId);
-					if (supervisors.size > 1) throw new CollaborationError("INVALID_INPUT", "存在多个主管，已停止。请核对并消除分工归属冲突；不会创建或投递。");
-				}
-				if (mode === "continue") {
-					const [childId$1] = supervisors;
-					if (!childId$1 || childId$1 !== expected) throw new CollaborationError("INVALID_INPUT", "没有唯一且匹配 expectedChildId 的主管分工，已停止；不得改为新建。");
-					const advice = a.teamAdvice !== void 0 ? formatTeamAdvice(a.teamAdvice) : "";
-					const text = [
-						`同一任务追加要求，优先续用原成员，由你决定是否补人。`,
-						`主任务 taskId：${taskId}`,
-						task,
-						advice
-					].filter(Boolean).join("\n\n");
-					try {
-						if (!deps.subagents.sendMessage) throw new Error("宿主缺少主管投递能力");
-						const messageId = await deps.subagents.sendMessage(parent, childId$1, [{
-							type: "text",
-							text
-						}], { signal });
-						if (typeof messageId !== "string" || !messageId.trim()) throw new Error("宿主未返回消息编号");
-						return {
-							childId: childId$1,
-							messageId
-						};
-					} catch (error) {
-						throw new CollaborationError("IO_ERROR", `向原主管 ${childId$1} 投递未获回执：${String(error)}。核对状态，确实无法继续时请用户确认交接，不要新建团队。`);
-					}
-				}
-				if (key) {
-					if (supervisors.size) throw new CollaborationError("INVALID_INPUT", "已登记主管，不能新建；续派必须使用 continue 并指定 expectedChildId。");
-					taskBrief = [
-						`主任务 taskId：${taskId}`,
-						task,
-						formatTeamAdvice(a.teamAdvice)
-					].join("\n\n");
-				}
-				const role = await deps.roles.read(roleName);
-				const instruction = composeDispatchInstruction({
-					role,
-					task: taskBrief,
-					rootSessionId
-				});
-				const { childId } = await deps.subagents.startActivation({
-					provider: mode,
-					label: `${role.name}·${taskId}`,
-					request: {
-						prompt: [{
-							type: "text",
-							text: instruction
-						}],
-						parent,
-						maxDepth: 2
-					},
-					signal,
-					delivery: "parent"
-				});
+			const afterWrite = async () => {
+				if (deps.afterWrite === void 0) return;
 				try {
-					const saved = await deps.records.create(rootSessionId, {
-						kind: "assignment",
-						taskId,
-						title: `${role.name}：${task.slice(0, 40)}`,
-						body: instruction,
-						workLabel: "待处理",
-						sessions: [{
-							sessionId: childId,
-							label: role.name
-						}]
-					});
+					await deps.afterWrite(rootSessionId);
+				} catch (error) {
+					console.warn("[dsh-router] active-task view refresh failed after dispatch:", error instanceof Error ? error.message : String(error));
+				}
+			};
+			if (mode === "continue") {
+				const childId$1 = nonEmpty(a.expectedChildId, "expectedChildId");
+				const owners = (await deps.records.list(rootSessionId, { kind: "assignment" })).filter((row) => (row.sessions ?? []).some((link) => link.sessionId === childId$1));
+				if (owners.length === 0) throw new CollaborationError("INVALID_INPUT", `没有登记子会话 ${childId$1} 的分工记录，已停止；用 router_record_list(kind=assignment) 核对 expectedChildId，不得臆造。`);
+				if (owners.length > 1) throw new CollaborationError("INVALID_INPUT", `子会话 ${childId$1} 登记在多个分工下（${owners.map((r) => r.taskId).join("、")}），归属不唯一，已停止；请先核对并消除冲突。`);
+				const taskId$1 = owners[0].taskId;
+				const appended = `${(await deps.records.read(rootSessionId, taskId$1, taskId$1)).record.body}\n\n${APPEND_MARKER}\n${task}`;
+				await deps.records.update(rootSessionId, taskId$1, taskId$1, { body: appended });
+				await afterWrite();
+				const text = [
+					"同一任务追加要求（已同步进该任务描述），优先续用你已有的上下文；需要补人由 Router 决定。",
+					`任务 taskId：${taskId$1}`,
+					task
+				].join("\n\n");
+				try {
+					if (!deps.subagents.sendMessage) throw new Error("宿主缺少向子会话投递的能力");
+					const messageId = await deps.subagents.sendMessage(parent, childId$1, [{
+						type: "text",
+						text
+					}], { signal });
+					if (typeof messageId !== "string" || !messageId.trim()) throw new Error("宿主未返回消息编号");
 					return {
-						childId,
-						record: {
-							taskId: saved.record.taskId,
-							recordId: saved.record.id,
-							path: saved.path
-						}
+						childId: childId$1,
+						taskId: taskId$1,
+						messageId
 					};
 				} catch (error) {
-					return {
-						childId,
-						recordError: `子会话已创建（${childId}），但分工记录登记失败：${error instanceof Error ? error.message : String(error)}——请用 router_record_create 补记并关联该子会话`
-					};
+					throw new CollaborationError("IO_ERROR", `向子会话 ${childId$1} 投递未获回执：${String(error)}。核对状态，确实无法继续时请用户确认交接。`);
 				}
-			} finally {
-				if (key) creatingSupervisor.delete(key);
+			}
+			const role = await deps.roles.read(roleName);
+			let taskId;
+			let createdTask = false;
+			if (a.taskId !== void 0) {
+				taskId = nonEmpty(a.taskId, "taskId");
+				await deps.records.read(rootSessionId, taskId, taskId);
+			} else {
+				const title = nonEmpty(a.taskTitle, "taskTitle（省略 taskId 时必填）");
+				const parentTaskId = a.parentTaskId === void 0 ? void 0 : nonEmpty(a.parentTaskId, "parentTaskId");
+				taskId = (await deps.records.create(rootSessionId, {
+					kind: "task",
+					parentRecordId: parentTaskId,
+					title,
+					body: task,
+					workLabel: "待处理"
+				})).record.taskId;
+				createdTask = true;
+			}
+			const instruction = composeDispatchInstruction({
+				role,
+				task,
+				taskId,
+				rootSessionId
+			});
+			const { childId } = await deps.subagents.startActivation({
+				provider: mode,
+				label: `${role.name}·${taskId}`,
+				request: {
+					prompt: [{
+						type: "text",
+						text: instruction
+					}],
+					parent,
+					maxDepth: 2
+				},
+				signal,
+				delivery: "parent"
+			});
+			try {
+				const saved = await deps.records.create(rootSessionId, {
+					kind: "assignment",
+					taskId,
+					title: `${role.name}：${task.slice(0, 40)}`,
+					body: instruction,
+					workLabel: "待处理",
+					sessions: [{
+						sessionId: childId,
+						label: role.name
+					}]
+				});
+				await afterWrite();
+				return {
+					childId,
+					taskId,
+					createdTask,
+					record: {
+						taskId: saved.record.taskId,
+						recordId: saved.record.id,
+						path: saved.path
+					}
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					childId,
+					taskId,
+					createdTask,
+					recordError: `子会话已创建（${childId}），但分工记录登记失败：${message}——请用 router_record_create 补记并关联该子会话`
+				};
 			}
 		}
 	};
@@ -448,13 +426,16 @@ function jsonRender(_args, value) {
 		text: JSON.stringify(value)
 	}];
 }
-/**
-* 构建团队协作工具集。records/roles 为存储单实例，subagents 为宿主子代理服务
-* （base 全局提供，缺席时派发工具明确报错、其余七条不受影响）。rootSessionId
-* 始终显式传入；存储为字段校验的最终权威，本层只拦包装层坏值。
-*/
 function buildCollaborationTools(deps) {
 	const { records, roles } = deps;
+	const afterWrite = async (rootSessionId) => {
+		if (deps.afterWrite === void 0) return;
+		try {
+			await deps.afterWrite(rootSessionId);
+		} catch (error) {
+			console.warn("[dsh-router] active-task view refresh failed:", error instanceof Error ? error.message : String(error));
+		}
+	};
 	return [
 		buildDispatchTool(deps),
 		{
@@ -527,7 +508,9 @@ function buildCollaborationTools(deps) {
 				const a = asObject(args, "参数");
 				const rootSessionId = asNonEmptyString(a.rootSessionId, "rootSessionId");
 				const input = asObject(a.input, "input");
-				return records.create(rootSessionId, input);
+				const saved = await records.create(rootSessionId, input);
+				await afterWrite(rootSessionId);
+				return saved;
 			}
 		},
 		{
@@ -679,7 +662,9 @@ function buildCollaborationTools(deps) {
 				const taskId = asNonEmptyString(a.taskId, "taskId");
 				const recordId = asNonEmptyString(a.recordId, "recordId");
 				const patch = asObject(a.patch, "patch");
-				return records.update(rootSessionId, taskId, recordId, patch);
+				const saved = await records.update(rootSessionId, taskId, recordId, patch);
+				await afterWrite(rootSessionId);
+				return saved;
 			}
 		},
 		{
@@ -778,7 +763,10 @@ function apply(ctx) {
 	const disposers = buildCollaborationTools({
 		records: ctx.routerCollaboration.records,
 		roles: ctx.routerCollaboration.roles,
-		subagents: ctx.subagents
+		subagents: ctx.subagents,
+		afterWrite: ctx.routerCollaboration.activeTasks === void 0 ? void 0 : async (rootSessionId) => {
+			await ctx.routerCollaboration.activeTasks.refresh(rootSessionId);
+		}
 	}).map((definition) => ctx.tools.register(definition));
 	return () => {
 		for (const dispose of disposers) dispose?.();

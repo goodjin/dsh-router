@@ -121,6 +121,7 @@ function makeFakeStores(): {
     list: role('list', [roleTemplate]),
     read: role('read', roleTemplate),
     save: role('save', roleTemplate),
+    remove: async () => false,
     migrateLegacyJson: async () => {},
   }
   return { records, roles, calls }
@@ -339,6 +340,9 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
       },
     } as RecordStore
     const roles = {
+      remove: async () => {
+        throw err
+      },
       list: async () => {
         throw err
       },

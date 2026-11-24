@@ -435,3 +435,42 @@ describe('修复3 list 的 readdir 前目录链守卫（空 symlink 目录不再
     await expect(readFile(join(h.dir, 'collaboration'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
+
+describe('parentRecordId 的语义按种类分（两级模型 2026-11-24）', () => {
+  it('任务（kind=task）的 parentRecordId 是父任务：可跨任务挂层级（子任务挂在主任务下）', async () => {
+    const { store } = await makeStore()
+    const main = await store.create('root-1', { kind: 'task', title: '主任务', body: '' })
+    const sub = await store.create('root-1', { kind: 'task', parentRecordId: main.record.taskId, title: '子任务', body: '' })
+    expect(sub.record.taskId).toBe(sub.record.id) // 任务自身的 taskId = 自己的 id
+    expect(sub.record.parentRecordId).toBe(main.record.taskId)
+    // 读回来层级仍在
+    const read = await store.read('root-1', sub.record.taskId, sub.record.id)
+    expect(read.record.parentRecordId).toBe(main.record.taskId)
+  })
+
+  it('任务的 parentRecordId 指向不存在的任务 → NOT_FOUND，不落记录', async () => {
+    const { store } = await makeStore()
+    await expect(store.create('root-1', { kind: 'task', parentRecordId: '11111111-1111-4111-8111-111111111111', title: '孤儿', body: '' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
+    expect(await store.list('root-1')).toEqual([])
+  })
+
+  it('任务的 parentRecordId 指向非任务记录（如分工）→ 仍按任务核验，NOT_FOUND', async () => {
+    const { store } = await makeStore()
+    const main = await store.create('root-1', { kind: 'task', title: '主任务', body: '' })
+    const asg = await store.create('root-1', { kind: 'assignment', taskId: main.record.taskId, title: 'a', body: '' })
+    await expect(store.create('root-1', { kind: 'task', parentRecordId: asg.record.id, title: 'x', body: '' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+
+  it('非任务记录的 parentRecordId 仍是同任务内记录（报告挂在分工下），语义不变', async () => {
+    const { store } = await makeStore()
+    const main = await store.create('root-1', { kind: 'task', title: '主任务', body: '' })
+    const asg = await store.create('root-1', { kind: 'assignment', taskId: main.record.taskId, title: 'a', body: '' })
+    const rep = await store.create('root-1', { kind: 'report', taskId: main.record.taskId, parentRecordId: asg.record.id, title: 'r', body: '' })
+    expect(rep.record.parentRecordId).toBe(asg.record.id)
+    // 同任务里不存在的父记录仍然拒绝
+    await expect(store.create('root-1', { kind: 'report', taskId: main.record.taskId, parentRecordId: '11111111-1111-4111-8111-111111111111', title: 'r2', body: '' }))
+      .rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+})

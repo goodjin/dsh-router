@@ -1,12 +1,14 @@
 # dsh-router
 
-DSH Router：**由模型主导的团队协作插件**——一个 Router 入口接任务，Router 用宿主原生子会话
-组建主管、主管组建成员；模型决定拆分、派发、补做、汇总，用户决定最终交付是否满足要求。
+DSH Router：**由模型主导的团队协作插件**——一个 Router 入口接任务，Router 主会话**直接担任主管**
+（两级模型，2026-11-24 起）：先拷问式对齐把模糊想法逼清，再用宿主原生子会话组建成员、分工、跟进、
+汇审；模型决定拆分、派发、补做、汇总，用户决定最终交付是否满足要求。
 DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保存工作记录、提供协作规则、展示资料。
 
-> **设计与需求权威**：轻量协作设计见
-> [`docs/superpowers/specs/2026-11-16-router-lightweight-design.md`](docs/superpowers/specs/2026-11-16-router-lightweight-design.md)。
-> 本 README 描述的是**当前轻量设计**；`docs/requirements.md` 已同步为同一设计。
+> **设计与需求权威**：两级模型设计见
+> [`docs/superpowers/specs/2026-11-24-router-two-level-supervisor-design.md`](docs/superpowers/specs/2026-11-24-router-two-level-supervisor-design.md)
+> （取代 11-16 轻量设计中的角色/模板/工具三节，其余章节仍有效）。
+> 本 README 描述的是**当前两级设计**；`docs/requirements.md` 已同步为同一设计。
 > 历史上的 executor/dynamic/aliases/三层记忆/状态机/收编等旧方案见 `docs/superpowers/specs/`
 > 与 `docs/superpowers/plans/` 的历史决策记录，**旧用户数据与历史分支不删、不兼容、不迁移**。
 
@@ -17,10 +19,20 @@ DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保�
 
 ## 设计要点
 
-- **单一入口**：用户只需一个 Router preset（`dsh-router` / 显示名 `Router`）。主管与成员不出现在
-  preset 列表；它们继承同一基础组合，靠每次派发消息里的初始任务说明明确角色。
+- **单一入口、两级模型**：用户只需一个 Router preset（`dsh-router` / 显示名 `Router`）。Router 主会话
+  直接担任主管（「主管」角色已退役，不可派发）；成员不出现在 preset 列表，继承同一基础组合，靠每次
+  派发消息里的初始任务说明明确角色。报告链：用户↔Router↔成员。
+- **先对齐再分派**：Router 收到任务先做拷问式对齐（决策树 + 按轮前沿问题 + 推荐答案 + 事实自己查、
+  决策留给用户），对齐到位才建主任务、才派发。
 - **模型决策，DSH 通信**：创建/查询/发送消息/继续/停止直接用 DSH 原生子会话能力（`spawn`，
   `maxDepth=2`）。插件不建第二套通信系统、不做投递队列、不做业务授权矩阵。
+- **每次派发可建任务并挂子会话**：`router_dispatch` 的 `taskId` 可选——给了在该任务下派发，省略则自动
+  建任务（挂主任务下）；分工记录把子会话挂到任务上，追加需求时 `router_record_list` 查得到该发给谁，
+  `mode=continue` 只投递并把追加要求拼进任务描述。
+- **任务完成自动压缩**：子会话结束（`subagent-settled`）后，插件在 Router 回合停下时调用宿主
+  `compactNow`；同一轮去重，失败只告警。
+- **任务描述驱动上下文**：活跃任务的完整描述每步注入系统上下文段（重渲染、原地替换、不进历史），
+  写后零滞后刷新；压缩丢了细节，任务描述不丢。
 - **角色是提示规则**：Router/主管/成员职责写进统一协作提示词（`complete:true`），不是安全边界，
   不修改系统提示词。
 - **工作记录是共享资料**：任务说明、分工记录、工作报告、汇总记录各存一份独立 JSON，落在插件
@@ -37,17 +49,19 @@ DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保�
 
 | 模块 | 职责 |
 | --- | --- |
-| 入口与规则 | `src/entry.ts` 装配一个 preset、统一协作提示词、七条记录工具、原生子会话工具 |
+| 入口与规则 | `src/entry.ts` 装配一个 preset、统一协作提示词、七条记录工具、原生子会话工具、活跃任务视图缓存 |
 | 工作记录 | `src/collaboration/{records,roles}.ts` 任务/分工/报告/角色模板的读写与会话关联 |
 | 工作台 | `src/client/collaboration-{api,store}.ts`、`collaboration-panel.tsx`：列表/详情/报告/成果链接/会话跳转/模板编辑（只读任务资料） |
 | DSH 接入 | `src/collaboration/{tools,context,routes,runtime}.ts` 用现有子会话工具、只读运行事实 |
+| 两级模型新增 | `src/collaboration/dispatch.ts` 可选 taskId 自动建任务 + continue 泛化；`src/collaboration/active-tasks.ts` 活跃任务视图缓存；`src/compaction-trigger.ts` 子会话结束→自动压缩触发器（挂 compaction isolate 组内） |
 
 第一版不新增：执行代理、SQLite 业务库、消息箱、预算熔断、任务图调度、自动修复服务、旧会话迁移、
 业务授权引擎、独立投递状态机、自动成功判断、自动补做/换人、跨任务异步排空。
 
 ## 现在装上会发生什么
 
-- 预设选择器出现「Router」一条可选预设。
+- 预设选择器出现「Router」一条可选预设；「主管」不再是可派发角色（已种入且未改过的 `主管.md` 会
+  被自动删除，改过的保留）。
 - Router 会话里提供七条协作工具（记录 CRUD + 角色模板）与原生子会话工具；上下文行说明当前
   会话 ID、协作目录与工具用法。
 - 侧栏出现「协作工作台」入口：浏览任务资料、查看报告、跳转宿主会话、编辑角色模板；显示具体
@@ -95,12 +109,13 @@ import/export）；`.` 入口指向宿主侧入口 `dist/entry.js`，浏览器�
 ## 布局
 
 ```
-src/entry.ts              宿主侧入口（装配单 preset + 协作记录服务 + 路由 + 上下文/工具行）→ dist/entry.js
+src/entry.ts              宿主侧入口（装配单 preset + 协作记录服务 + 活跃任务缓存 + 路由 + 上下文/工具行）→ dist/entry.js
 src/tools.ts              七条协作工具行（@goodjin2/dsh-router/tools）→ dist/tools.js
 src/context.ts            协作上下文行（@goodjin2/dsh-router/context）→ dist/context.js
+src/compaction-trigger.ts 子会话结束→自动压缩触发器（@goodjin2/dsh-router/compaction-trigger）→ dist/compaction-trigger.js
 src/client/               浏览器半边（协作工作台面板 + 资料 API + 状态 store + ui-kit 基线）→ lib/client.js
-src/collaboration/        轻量协作核心：records/roles 存储、tools/prompt/context/runtime、routes
-cordis.patch.yml          装载行（裸包名根服务行 + 一条静态 Router 预设行 + 原生执行/提问/指令/压缩/子会话工具行）
+src/collaboration/        两级协作核心：records/roles 存储、dispatch（可选 taskId / continue）、active-tasks、tools/prompt/context/runtime、routes
+cordis.patch.yml          装载行（裸包名根服务行 + 一条静态 Router 预设行 + 原生执行/提问/指令/压缩（含 compaction-trigger）/子会话工具行）
 tests/                    collaboration/* 单元测试 + bundle/entry/tracked-install/preset-rows/validate-row 装载接线
 scripts/                  check-subrows / check-collaboration-host / check-collaboration-client 候选核查
 ```

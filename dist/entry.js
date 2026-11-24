@@ -293,7 +293,8 @@ function createRecordStore(dataDir, deps = {}) {
 			const path = recordPath(rootSessionId, taskId, recordId);
 			return enqueue(async () => {
 				if (kind !== "task") await requireTask(rootSessionId, taskId);
-				if (parentRecordId !== void 0) await requireParent(rootSessionId, taskId, parentRecordId);
+				if (parentRecordId !== void 0) if (kind === "task") await requireTask(rootSessionId, parentRecordId);
+				else await requireParent(rootSessionId, taskId, parentRecordId);
 				const record = {
 					kind,
 					taskId,
@@ -421,8 +422,7 @@ function createRecordStore(dataDir, deps = {}) {
 
 //#endregion
 //#region src/collaboration/preset-roles.ts
-/** 首次启用种入 / 升级到的最新预置角色。 */
-/** 主管 v2 文本（2026-11-20 加入「派子会话一律 fork」前的版本；历史升级比对用）。 */
+/** 主管 v2 文本（2026-11-20 加入「派子会话一律 fork」前的版本；退役比对用）。 */
 const SUPERVISOR_V2_TEXT = [
 	"按任务类型与复杂度组织团队、分工排期、跟进汇审；不亲自执行具体工作。",
 	"",
@@ -448,36 +448,44 @@ const SUPERVISOR_V2_TEXT = [
 	"- 中等（多步骤或涉及共享模块）：单角色 + 独立测试 + 独立评审。",
 	"- 复杂（跨模块、跨栈、需要需求/设计制品）：完整组队，按上面类型流程走。"
 ].join("\n");
+/** 主管 v3 文本（含「派子会话一律 fork」；v3 起退役，这是它最后的一版预置文本）。 */
+const SUPERVISOR_V3_TEXT = [
+	"按任务类型与复杂度组织团队、分工排期、跟进汇审；不亲自执行具体工作。",
+	"",
+	"## 组织总则",
+	"- 先判定任务类型和复杂度，再决定组队：单步可完成、低风险的简单任务直接派一个对口角色，不硬拉团队；跨模块、多步骤、需要中间制品（需求→设计→实现→测试→审查）的任务才组队。",
+	"- 每条分工材料自足：目标、约束、验收条件、材料位置写清楚；能并行的并行，有依赖的排先后。",
+	"- 派子会话一律用 fork 方式（router_dispatch 的 mode=fork），子会话直接继承你的对话背景；  分工材料仍保持自足，fork 不替代材料。",
+	"- 只在关键节点设门禁：需求就绪、设计就绪、测试通过、审查通过；其余靠成员自检与报告。",
+	"- 发现需求或设计有缺口，退回对应角色补齐，不在分工里静默扩大范围；实际复杂度显著超出最初判断时，停下来重新确认范围再推进。",
+	"- 汇总时给结论：完成了什么、证据在哪、残余风险与未验证项；验收、发布、扩大范围这类用户决定的事如实上报，不替用户拍板。",
+	"",
+	"## 按任务类型组织（八类）",
+	"1. 需求理解与PRD：派「需求与PRD工程师」澄清并撰写 PRD；完稿后派「PRD审核员」做覆盖回扫与场景走查（需要用户视角时加派「交互设计师」），差异/漏洞清单转回撰写者修复，最多三轮，仍不过判失败上报；PRD 定稿后再决定是否进入开发。",
+	"2. 技术设计：事实不清先派「调研员」补现状证据；派「架构设计工程师」出最小可实施方案；方案需要把关时请「代码评审员」或「评审员」审方案。设计就绪后拆实现分工。",
+	"3. 功能开发：复杂任务先过设计；再按技术栈派「Python程序员 / Java程序员 / 前端程序员」并行实现（一任务一分支一工作区、最小完整改动）；完成后「测试工程师」补测试跑回归；「代码评审员」只读评审；需要上线时「部署运维工程师」执行发布（要有明确授权）。",
+	"4. bugfix：先派「调研员」或「测试工程师」只读复现、定位根因并分类（产品缺陷 / 测试问题 / 环境问题 / 偶发）；产品缺陷交对应程序员修复——共享函数上的问题修在所有调用都经过的位置，不只修报错那条路径；修复后「测试工程师」回归、「代码评审员」复审。纯测试或环境问题不改产品行为。",
+	"5. 测试：派「测试工程师」按验收设计用例并执行，收尾做覆盖回扫；需要交付验收时派「评审员」对照验收条件逐条检查，结论汇总给主管。",
+	"6. MR审核：派「MR审核员」独立审核（门禁全绿、范围一致、证据真实、按类型分流合并策略）；需要深入代码质量时加派「代码评审员」。实现者不审自己的改动。",
+	"7. 调研：派「调研员」只读调查，产出带位置证据、区分事实与推断的结论；结论供决策，不直接转成代码改动。",
+	"8. 归档与发布：派「文档资料归档工程师」收口归档、同步受影响的文档；需要构建部署时派「部署运维工程师」，发布与回滚要明确授权。",
+	"",
+	"## 复杂度分级参考",
+	"- 简单（单点、低风险、单角色可完成）：单角色直达。",
+	"- 中等（多步骤或涉及共享模块）：单角色 + 独立测试 + 独立评审。",
+	"- 复杂（跨模块、跨栈、需要需求/设计制品）：完整组队，按上面类型流程走。"
+].join("\n");
+/**
+* 已退役的预置角色 → 它曾用过的全部预置文本（v1 摘要 + 各版全文）。
+* 种入时：磁盘内容等于其中任一版（= 用户没改过）→ 删除；与任何一版都不一致 → 不动。
+*/
+const RETIRED_PRESET_ROLES = { 主管: [
+	"把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。",
+	SUPERVISOR_V2_TEXT,
+	SUPERVISOR_V3_TEXT
+] };
+/** 首次启用种入 / 升级到的最新预置角色。 */
 const PRESET_ROLE_TEMPLATES = [
-	{
-		name: "主管",
-		description: [
-			"按任务类型与复杂度组织团队、分工排期、跟进汇审；不亲自执行具体工作。",
-			"",
-			"## 组织总则",
-			"- 先判定任务类型和复杂度，再决定组队：单步可完成、低风险的简单任务直接派一个对口角色，不硬拉团队；跨模块、多步骤、需要中间制品（需求→设计→实现→测试→审查）的任务才组队。",
-			"- 每条分工材料自足：目标、约束、验收条件、材料位置写清楚；能并行的并行，有依赖的排先后。",
-			"- 派子会话一律用 fork 方式（router_dispatch 的 mode=fork），子会话直接继承你的对话背景；  分工材料仍保持自足，fork 不替代材料。",
-			"- 只在关键节点设门禁：需求就绪、设计就绪、测试通过、审查通过；其余靠成员自检与报告。",
-			"- 发现需求或设计有缺口，退回对应角色补齐，不在分工里静默扩大范围；实际复杂度显著超出最初判断时，停下来重新确认范围再推进。",
-			"- 汇总时给结论：完成了什么、证据在哪、残余风险与未验证项；验收、发布、扩大范围这类用户决定的事如实上报，不替用户拍板。",
-			"",
-			"## 按任务类型组织（八类）",
-			"1. 需求理解与PRD：派「需求与PRD工程师」澄清并撰写 PRD；完稿后派「PRD审核员」做覆盖回扫与场景走查（需要用户视角时加派「交互设计师」），差异/漏洞清单转回撰写者修复，最多三轮，仍不过判失败上报；PRD 定稿后再决定是否进入开发。",
-			"2. 技术设计：事实不清先派「调研员」补现状证据；派「架构设计工程师」出最小可实施方案；方案需要把关时请「代码评审员」或「评审员」审方案。设计就绪后拆实现分工。",
-			"3. 功能开发：复杂任务先过设计；再按技术栈派「Python程序员 / Java程序员 / 前端程序员」并行实现（一任务一分支一工作区、最小完整改动）；完成后「测试工程师」补测试跑回归；「代码评审员」只读评审；需要上线时「部署运维工程师」执行发布（要有明确授权）。",
-			"4. bugfix：先派「调研员」或「测试工程师」只读复现、定位根因并分类（产品缺陷 / 测试问题 / 环境问题 / 偶发）；产品缺陷交对应程序员修复——共享函数上的问题修在所有调用都经过的位置，不只修报错那条路径；修复后「测试工程师」回归、「代码评审员」复审。纯测试或环境问题不改产品行为。",
-			"5. 测试：派「测试工程师」按验收设计用例并执行，收尾做覆盖回扫；需要交付验收时派「评审员」对照验收条件逐条检查，结论汇总给主管。",
-			"6. MR审核：派「MR审核员」独立审核（门禁全绿、范围一致、证据真实、按类型分流合并策略）；需要深入代码质量时加派「代码评审员」。实现者不审自己的改动。",
-			"7. 调研：派「调研员」只读调查，产出带位置证据、区分事实与推断的结论；结论供决策，不直接转成代码改动。",
-			"8. 归档与发布：派「文档资料归档工程师」收口归档、同步受影响的文档；需要构建部署时派「部署运维工程师」，发布与回滚要明确授权。",
-			"",
-			"## 复杂度分级参考",
-			"- 简单（单点、低风险、单角色可完成）：单角色直达。",
-			"- 中等（多步骤或涉及共享模块）：单角色 + 独立测试 + 独立评审。",
-			"- 复杂（跨模块、跨栈、需要需求/设计制品）：完整组队，按上面类型流程走。"
-		].join("\n")
-	},
 	{
 		name: "执行者",
 		description: [
@@ -806,7 +814,6 @@ const PRESET_ROLE_TEMPLATES = [
 * 种入升级只在这些文本与现有文件内容完全一致时才覆盖（用户没改过的精确判定）。
 */
 const HISTORICAL_PRESET_DESCRIPTIONS = {
-	主管: ["把任务拆成可独立执行的分工，派给合适的成员，跟进进度并汇总结果向上报告；不亲自执行具体工作。", SUPERVISOR_V2_TEXT],
 	执行者: ["接受分工后独立完成具体工作（编码、修改、验证），自检通过后把结果与产物位置报告上级。"],
 	调研员: ["查资料、读源码与文档，产出结论与证据位置供决策参考；只调研不改动。"],
 	评审员: ["对照任务说明的验收条件检查交付，给出通过或问题清单；评审不代做修改。"]
@@ -931,6 +938,25 @@ function createRoleStore(dataDir, deps = {}) {
 				};
 			});
 		},
+		async remove(name$1) {
+			const validated = validateRoleName(name$1);
+			return enqueue(async () => {
+				const path = rolePath(validated);
+				await guard.assertDirChain(path);
+				try {
+					await fs.lstat(path);
+				} catch (error) {
+					if (isEnoent(error)) return false;
+					throw new CollaborationError("IO_ERROR", `角色模板删除前校验失败: ${path}`, { cause: error });
+				}
+				try {
+					await fs.remove(path);
+				} catch (error) {
+					throw new CollaborationError("IO_ERROR", `角色模板删除失败: ${path}`, { cause: error });
+				}
+				return true;
+			});
+		},
 		async migrateLegacyJson() {
 			let names;
 			try {
@@ -975,9 +1001,20 @@ function createRoleStore(dataDir, deps = {}) {
 * - 现有内容等于最新预置 → 跳过；
 * - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
 * - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
+*
+* 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：磁盘内容等于它任一版历史
+* 文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
 */
 async function seedPresetRoles(store) {
 	const existing = new Map((await store.list()).map((role) => [role.name, role.description]));
+	for (const [name$1, texts] of Object.entries(RETIRED_PRESET_ROLES)) {
+		const current = existing.get(name$1);
+		if (current === void 0) continue;
+		if (texts.includes(current)) {
+			await store.remove(name$1);
+			existing.delete(name$1);
+		}
+	}
 	for (const preset of PRESET_ROLE_TEMPLATES) {
 		const current = existing.get(preset.name);
 		if (current === void 0) {
@@ -1201,6 +1238,46 @@ function registerCollaborationRoutes(ctx, deps) {
 }
 
 //#endregion
+//#region src/collaboration/active-tasks.ts
+/** 「已报告」之外都算活跃。 */
+const REPORTED = "已报告";
+const DEFAULT_MAX_ACTIVE_TASKS = 5;
+function createActiveTaskCache(records, options = {}) {
+	const maxTasks = Number.isSafeInteger(options.maxTasks) && options.maxTasks > 0 ? options.maxTasks : DEFAULT_MAX_ACTIVE_TASKS;
+	const cache = /* @__PURE__ */ new Map();
+	async function refresh(rootSessionId) {
+		const tasks = (await records.list(rootSessionId, { kind: "task" })).filter((task) => task.workLabel !== REPORTED).sort((left, right) => left.createdAt - right.createdAt).slice(0, maxTasks);
+		const views = [];
+		for (const task of tasks) {
+			const assignments = await records.list(rootSessionId, {
+				taskId: task.taskId,
+				kind: "assignment"
+			});
+			const sessions = [];
+			for (const row of assignments) for (const link of row.sessions ?? []) sessions.push({
+				sessionId: link.sessionId,
+				label: link.label
+			});
+			views.push({
+				taskId: task.taskId,
+				title: task.title,
+				body: task.body,
+				workLabel: task.workLabel ?? "未标注",
+				sessions
+			});
+		}
+		cache.set(rootSessionId, views);
+		return views;
+	}
+	return {
+		get(rootSessionId) {
+			return cache.get(rootSessionId);
+		},
+		refresh
+	};
+}
+
+//#endregion
 //#region src/entry.ts
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 const name = "@goodjin2/dsh-router";
@@ -1222,7 +1299,8 @@ function apply(ctx, rawConfig) {
 	const face = {
 		records: runtime.records,
 		roles: runtime.roles,
-		dataDir: runtime.dataDir
+		dataDir: runtime.dataDir,
+		activeTasks: createActiveTaskCache(runtime.records)
 	};
 	(!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
 	runtime.roles.migrateLegacyJson().then(() => seedPresetRoles(runtime.roles)).catch((error) => {

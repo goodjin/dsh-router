@@ -1,10 +1,11 @@
 # dsh-router 仓库纪律
 
-DSH Router：**由模型主导的团队协作插件**（Router 接任务、主管组队、成员执行；模型决策、DSH 通信、
-插件保存资料）。归属映射：**会话任务编排（拆分、派发、追踪、汇总）→ 本仓 `dsh-router`**。
-当前架构的唯一权威是轻量协作设计
-[`docs/superpowers/specs/2026-11-16-router-lightweight-design.md`](docs/superpowers/specs/2026-11-16-router-lightweight-design.md)
-与 [`docs/requirements.md`](docs/requirements.md)。
+DSH Router：**由模型主导的团队协作插件**（两级模型：Router 主会话直接担任主管——接任务、拷问式
+对齐、组队、派发、汇审；成员执行；模型决策、DSH 通信、插件保存资料）。归属映射：**会话任务编排
+（拆分、派发、追踪、汇总）→ 本仓 `dsh-router`**。
+当前架构的唯一权威是两级模型设计
+[`docs/superpowers/specs/2026-11-24-router-two-level-supervisor-design.md`](docs/superpowers/specs/2026-11-24-router-two-level-supervisor-design.md)
+（取代 11-16 轻量设计的角色/模板/工具三节）与 [`docs/requirements.md`](docs/requirements.md)。
 
 ## 门禁
 
@@ -18,7 +19,7 @@ npm run build       # tsc -p tsconfig.json && tsdown
 
 ## 产物必须重建
 
-`dist/entry.js`、`dist/tools.js`、`dist/context.js`（宿主入口产物）与 `lib/client.js`（浏览器产物）
+`dist/entry.js`、`dist/tools.js`、`dist/context.js`、`dist/compaction-trigger.js`（宿主入口产物）与 `lib/client.js`（浏览器产物）
 **入库**，tsc 中间产物（`dist/client/`、`*.d.ts*`）不入库。改了 `src/` 之后光提交源码不够——宿主加载
 的是 `dist/*.js`、页面加载的是 `lib/client.js`，**必须 `npm run build` 重建并把产物一起提交**，
 否则本地看着改好了、装上去的还是旧产物，表现与「功能消失」一模一样。
@@ -49,14 +50,20 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # �
 
 patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
 persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 八条协作工具行（含派发工具
-`router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork，自动登记分工记录）+
-协作上下文行（含角色清单注入）+ DSH 原生执行/用户提问/项目指令/默认压缩/子代理控制
-（仅 `tool-subagent-control`；原生 spawn 工具行已删，防绕过职责注入；spawn/fork 后端由 base 全局提供）。
+`router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork/continue，自动登记分工记录；
+`taskId` 可选，省略即自动建任务）+ 协作上下文行（角色清单 + **活跃任务完整描述**注入）+ DSH 原生
+执行/用户提问/项目指令/默认压缩/子代理控制（仅 `tool-subagent-control`；原生 spawn 工具行已删，
+防绕过职责注入；spawn/fork 后端由 base 全局提供）。
+**`router-compaction-trigger` 行（`@goodjin2/dsh-router/compaction-trigger`）必须挂在 compaction
+isolate 组内**：`ctx.compaction` 是那个组的入口局部 realm，组外的行解析不到（拿到 undefined），
+挪出去就是「子会话结束→自动压缩」静默失效。它监听 `agent/inbox/inserted`（`subagent-settled`）
+标记、`agent/turn-stopping` 调 `compactNow`，失败一律吞掉（serial 模式穿透会卡回合）。
 Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
 预设与旧动态服务已退役，不恢复。角色模板是一个角色一个 md 文件（文件名=角色名、正文=职责说明），
-首次启用幂等种入 16 个预置角色（v2：4 既有 + 12 新增专业角色，职责为「首行摘要 + 详细正文」
+首次启用幂等种入 15 个预置角色（v3：「主管」退役，其余专业角色职责为「首行摘要 + 详细正文」
 两层结构——上下文清单只注入首行摘要，全文随派发注入）、历史预置文本精确升级（内容与某版
-历史文本一致才覆盖，用户改过的永不动）、旧 JSON 自动迁移。改行先跑核查再提交。
+历史文本一致才覆盖，用户改过的永不动）、**退役预置角色精确删除**（`RETIRED_PRESET_ROLES`：内容
+等于任一版历史文本才删，用户改过的保留）、旧 JSON 自动迁移。改行先跑核查再提交。
 
 ## 工作方式
 

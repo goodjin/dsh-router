@@ -16,6 +16,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { buildCollaborationContext } from './collaboration/context.ts'
+import type { ActiveTaskCache, ActiveTaskView } from './collaboration/active-tasks.ts'
 
 /** 本入口的插件名（诊断显示用）。 */
 export const name = 'router-context'
@@ -57,6 +58,8 @@ interface RouterCollaborationFace {
   dataDir: string
   /** 角色模板存储（共享单实例）；缺席或不可调用时角色段降级为「暂不可用」。 */
   roles?: { list(): Promise<Array<{ name: string; description: string }>> }
+  /** 活跃任务视图缓存（共享单实例）；缺席时任务段降级为「加载中」。 */
+  activeTasks?: ActiveTaskCache
 }
 
 /** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
@@ -123,7 +126,18 @@ export function apply(ctx: ContextHost, config: RouterContextConfig): () => void
       kickIfStale()
       const sessionId = currentSessionId(assembly)
       if (sessionId === undefined) return diagnosticText(dataDir)
-      return buildCollaborationContext({ sessionId, dataDir, roles: cache.value })
+      // 活跃任务视图：同步读缓存；写操作后由 tools/dispatch 行刷新过，通常已是最新。
+      // 缓存没有（刚启动/首次装配）就后台刷一次（fire-and-forget 就地兜底），本轮渲染「加载中」。
+      let tasks: readonly ActiveTaskView[] | undefined
+      try {
+        tasks = ctx.routerCollaboration.activeTasks?.get(sessionId)
+        if (tasks === undefined && ctx.routerCollaboration.activeTasks !== undefined) {
+          ctx.routerCollaboration.activeTasks.refresh(sessionId).catch(() => {})
+        }
+      } catch {
+        tasks = undefined // 读缓存失败按「加载中」渲染，绝不穿透组装路径
+      }
+      return buildCollaborationContext({ sessionId, dataDir, roles: cache.value, tasks })
     },
   })
   return () => {

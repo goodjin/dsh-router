@@ -7,7 +7,7 @@
  * 无 DB/文件系统/宿主/时间戳/动态账本/推断归属访问。
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { buildCollaborationContext } from '../../src/collaboration/context.ts'
 import { apply as contextApply, Config as contextConfig } from '../../src/context.ts'
@@ -166,7 +166,7 @@ describe('buildCollaborationContext — 角色清单注入', () => {
 describe('context row apply — 角色清单缓存与后台刷新', () => {
   interface CapturedEntry { name: string; order: number; text(assembly?: unknown): string }
 
-  function registerRow(face: { dataDir: string; roles: { list(): Promise<Array<{ name: string; description: string }>> } }, config?: Record<string, unknown>): { entry: CapturedEntry; dispose: () => void } {
+  function registerRow(face: { dataDir: string; roles: { list(): Promise<Array<{ name: string; description: string }>> }; activeTasks?: { get(rootSessionId: string): unknown; refresh(rootSessionId: string): Promise<unknown> } }, config?: Record<string, unknown>): { entry: CapturedEntry; dispose: () => void } {
     let captured: CapturedEntry | undefined
     const dispose = contextApply(
       { systemPrompt: { context: (e: CapturedEntry) => { captured = e } }, routerCollaboration: face as never },
@@ -204,5 +204,94 @@ describe('context row apply — 角色清单缓存与后台刷新', () => {
     expect(() => row.entry.text({ agent: { id: 'sid' } })).not.toThrow()
     expect(row.entry.text({ agent: { id: 'sid' } })).toContain('暂不可用')
     row.dispose()
+  })
+})
+
+describe('buildCollaborationContext — 活跃任务注入（完整描述 + 子会话）', () => {
+  it('undefined（尚未加载）：显示加载中并指向 router_record_list', () => {
+    const text = buildCollaborationContext({ sessionId: 'sid', dataDir: '/tmp/x', tasks: undefined })
+    expect(text).toContain('## 活跃任务')
+    expect(text).toContain('加载中')
+    expect(text).toContain('router_record_list')
+  })
+
+  it('空数组：明确说没有活跃任务', () => {
+    const text = buildCollaborationContext({ sessionId: 'sid', dataDir: '/tmp/x', tasks: [] })
+    expect(text).toContain('当前没有活跃任务')
+  })
+
+  it('有任务：标题 + 标签 + taskId + 完整描述正文（不是摘要）+ 子会话清单与 continue 指引', () => {
+    const body = '目标：改造登录\n约束：不改动注册流程\n验收：三条用例全过\n（很长也很完整）'
+    const text = buildCollaborationContext({
+      sessionId: 'sid', dataDir: '/tmp/x',
+      tasks: [
+        { taskId: 't-1', title: '改造登录', body, workLabel: '进行中', sessions: [{ sessionId: 'c-1', label: '执行者' }, { sessionId: 'c-2', label: '测试工程师' }] },
+        { taskId: 't-2', title: '尚无分工', body: '', workLabel: '待处理', sessions: [] },
+      ],
+    })
+    expect(text).toContain('### [进行中] 改造登录（taskId：t-1）')
+    expect(text).toContain(body) // 完整描述逐字注入
+    expect(text).toContain('- 执行者：c-1')
+    expect(text).toContain('- 测试工程师：c-2')
+    expect(text).toContain('mode=continue, expectedChildId=')
+    expect(text).toContain('### [待处理] 尚无分工（taskId：t-2）')
+    expect(text).toContain('（无描述）')
+    expect(text).toContain('尚未派发')
+    // 任务段出现在角色段之前（先知道在做什么，再挑角色）
+    expect(text.indexOf('## 活跃任务')).toBeLessThan(text.indexOf('角色模板（专业类型）'))
+  })
+
+  it('确定性：相同入参逐字相同', () => {
+    const tasks = [{ taskId: 't-1', title: 'A', body: 'b', workLabel: '待处理' as const, sessions: [] }]
+    const a = buildCollaborationContext({ sessionId: 'sid', dataDir: '/tmp/x', tasks })
+    const b = buildCollaborationContext({ sessionId: 'sid', dataDir: '/tmp/x', tasks })
+    expect(a).toBe(b)
+  })
+})
+
+describe('context row apply — 活跃任务视图缓存接线', () => {
+  interface CapturedEntry { name: string; order: number; text(assembly?: unknown): string }
+
+  it('缓存有值时 text() 同步带上任务；缓存没有时后台 refresh 一次并渲染加载中；refresh 抛错不穿透', async () => {
+    let cached: unknown = undefined
+    const refresh = vi.fn(async (root: string) => { cached = [{ taskId: root, title: 'A', body: 'b', workLabel: '待处理', sessions: [] }]; return cached })
+    let captured: CapturedEntry | undefined
+    const dispose = contextApply(
+      {
+        systemPrompt: { context: (e: CapturedEntry) => { captured = e } },
+        routerCollaboration: { dataDir: '/tmp/x', roles: { list: async () => [] }, activeTasks: { get: () => cached, refresh } } as never,
+      },
+      { order: 100 } as never,
+    )
+    const entry = captured!
+    expect(entry.text({ agent: { id: 'sid' } })).toContain('加载中')
+    expect(refresh).toHaveBeenCalledWith('sid')
+    await Promise.resolve(); await Promise.resolve()
+    expect(entry.text({ agent: { id: 'sid' } })).toContain('### [待处理] A（taskId：sid）')
+    expect(entry.text({ agent: { id: 'sid' } })).toContain('b')
+    dispose()
+    // refresh 抛错：吞掉，不穿透
+    let captured2: CapturedEntry | undefined
+    const dispose2 = contextApply(
+      {
+        systemPrompt: { context: (e: CapturedEntry) => { captured2 = e } },
+        routerCollaboration: { dataDir: '/tmp/x', roles: { list: async () => [] }, activeTasks: { get: () => undefined, refresh: async () => { throw new Error('io') } } } as never,
+      },
+      { order: 100 } as never,
+    )
+    expect(() => captured2!.text({ agent: { id: 'sid' } })).not.toThrow()
+    expect(captured2!.text({ agent: { id: 'sid' } })).toContain('加载中')
+    dispose2()
+  })
+
+  it('activeTasks 面缺席：任务段按加载中渲染，不抛', () => {
+    let captured: CapturedEntry | undefined
+    const dispose = contextApply(
+      { systemPrompt: { context: (e: CapturedEntry) => { captured = e } }, routerCollaboration: { dataDir: '/tmp/x', roles: { list: async () => [] } } as never },
+      { order: 100 } as never,
+    )
+    expect(() => captured!.text({ agent: { id: 'sid' } })).not.toThrow()
+    expect(captured!.text({ agent: { id: 'sid' } })).toContain('加载中')
+    dispose()
   })
 })

@@ -159,13 +159,23 @@ describe('host root service — bare package name, provides routerCollaboration,
   })
 })
 
+/** 后台种入是 fire-and-forget：轮询到角色数达标（上限 1.5s），避免整套跑时的定时抖动。 */
+async function waitUntil(predicate: () => Promise<boolean>, timeoutMs = 1500): Promise<void> {
+  const until = Date.now() + timeoutMs
+  while (Date.now() < until) {
+    if (await predicate()) return
+    await new Promise((resolve) => { setTimeout(resolve, 10) })
+  }
+  throw new Error('waitUntil: 超时未满足')
+}
+
 const seededRoots: string[] = []
 afterAll(async () => {
   await Promise.all(seededRoots.map((dir) => rm(dir, { recursive: true, force: true })))
 })
 
 describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
-  it('apply 后台种入全部预置角色（v2 共 16 个）到 dataDir；重复 apply 不增不改', async () => {
+  it('apply 后台种入全部预置角色（v3 共 15 个，主管已退役）到 dataDir；重复 apply 不增不改', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'router-entry-seed-'))
     seededRoots.push(dir)
     const makeCtx = () => {
@@ -183,7 +193,7 @@ describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
     const expected = PRESET_ROLE_TEMPLATES.map((r) => r.name).sort()
     const first = makeCtx()
     entryApply(first.ctx, { dataDir: dir })
-    await new Promise((resolve) => { setTimeout(resolve, 50) })
+    await waitUntil(async () => (await first.face().roles.list()).length >= PRESET_ROLE_TEMPLATES.length)
     const names = (await first.face().roles.list()).map((r) => r.name)
     expect(names).toEqual(expected)
     const second = makeCtx()
