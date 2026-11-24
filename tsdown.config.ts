@@ -37,12 +37,11 @@ const externals = new Set([
 ])
 
 /** 宿主入口（package.json exports 的宿主子路径）。prompt-section/compaction 已退役（Task 2B）；
- *  compaction-trigger 是两级模型新增的「子会话结束→自动压缩」触发器（挂在 compaction isolate 组内）。 */
+ *  自动压缩触发器行也已退役（2026-11-24 改为模型主动调 router_compact 工具，住在 tools 行里）。 */
 const hostEntries = {
   entry: 'src/entry.ts',
   tools: 'src/tools.ts',
   context: 'src/context.ts',
-  'compaction-trigger': 'src/compaction-trigger.ts',
 } as const
 
 const clientConfig = defineConfig({

@@ -97,10 +97,16 @@ describe('collaborationPrompt — common three-role rule text', () => {
     expect(collaborationPrompt).toContain('## 复杂度分级参考')
   })
 
-  it('上下文与压缩由插件代劳：活跃任务完整描述每步注入、子会话结束自动压缩', () => {
+  it('上下文与压缩：活跃任务完整描述每步注入；压缩由模型用 router_compact 主动做（不再自动）', () => {
     expect(collaborationPrompt).toContain('## 上下文与压缩')
     expect(collaborationPrompt).toMatch(/活跃任务[\s\S]*完整描述/)
-    expect(collaborationPrompt).toMatch(/子会话结束时[\s\S]*自动压缩/)
+    expect(collaborationPrompt).not.toContain('自动压缩')
+    expect(collaborationPrompt).toContain('router_compact')
+    expect(collaborationPrompt).toContain('任务列表检查点')
+    expect(collaborationPrompt).toMatch(/上一次压缩以来/)
+    expect(collaborationPrompt).toMatch(/什么时候压/)
+    expect(collaborationPrompt).toMatch(/压之前先把关键决策写进任务描述/)
+    expect(collaborationPrompt).toContain('compacted:false')
   })
 
   it('R1: fact sources separated — work materials by records, runtime facts by DSH (model reports not system-certified)', () => {

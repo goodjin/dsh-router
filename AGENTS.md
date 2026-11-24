@@ -19,7 +19,7 @@ npm run build       # tsc -p tsconfig.json && tsdown
 
 ## 产物必须重建
 
-`dist/entry.js`、`dist/tools.js`、`dist/context.js`、`dist/compaction-trigger.js`（宿主入口产物）与 `lib/client.js`（浏览器产物）
+`dist/entry.js`、`dist/tools.js`、`dist/context.js`（宿主入口产物）与 `lib/client.js`（浏览器产物）
 **入库**，tsc 中间产物（`dist/client/`、`*.d.ts*`）不入库。改了 `src/` 之后光提交源码不够——宿主加载
 的是 `dist/*.js`、页面加载的是 `lib/client.js`，**必须 `npm run build` 重建并把产物一起提交**，
 否则本地看着改好了、装上去的还是旧产物，表现与「功能消失」一模一样。
@@ -49,15 +49,16 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # �
 ```
 
 patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
-persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 八条协作工具行（含派发工具
+persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 九条协作工具行（含派发工具
 `router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork/continue，自动登记分工记录；
-`taskId` 可选，省略即自动建任务）+ 协作上下文行（角色清单 + **活跃任务完整描述**注入）+ DSH 原生
+`taskId` 可选，省略即自动建任务；含压缩工具 `router_compact`：只压上次检查点以来的已闭合回合、原位取代成
+任务列表检查点，走 `session.append(surfaceOp:replace)` 公开 API，**不自动压**）+ 协作上下文行（角色清单 + **活跃任务完整描述**注入）+ DSH 原生
 执行/用户提问/项目指令/默认压缩/子代理控制（仅 `tool-subagent-control`；原生 spawn 工具行已删，
 防绕过职责注入；spawn/fork 后端由 base 全局提供）。
-**`router-compaction-trigger` 行（`@goodjin2/dsh-router/compaction-trigger`）必须挂在 compaction
-isolate 组内**：`ctx.compaction` 是那个组的入口局部 realm，组外的行解析不到（拿到 undefined），
-挪出去就是「子会话结束→自动压缩」静默失效。它监听 `agent/inbox/inserted`（`subagent-settled`）
-标记、`agent/turn-stopping` 调 `compactNow`，失败一律吞掉（serial 模式穿透会卡回合）。
+**压缩不走宿主摘要器**：宿主 `compactNow` 是累积的（每次从 surface 头重选、合并 PRIOR checkpoint），摘要器
+指令写死无注入口——做不出「只压上次以来」「任务列表」。`router_compact` 自己选范围、从记录生成检查点、
+按压缩事务协议写 `compaction/start → user/message(replace) → compaction/end`；它 import
+`@deepseek-ai/dsh-compaction`、`/checkpoint`、`@deepseek-ai/dsh-llm`（宿主侧，build 外置、devDeps 只为类型）。
 Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
 预设与旧动态服务已退役，不恢复。角色模板是一个角色一个 md 文件（文件名=角色名、正文=职责说明），
 首次启用幂等种入 15 个预置角色（v3：「主管」退役，其余专业角色职责为「首行摘要 + 详细正文」

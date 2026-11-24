@@ -42,7 +42,7 @@ describe('buildCollaborationContext — pure deterministic text', () => {
     expect(out).toContain('/data/plugin/collaboration')
   })
 
-  it('lists all seven tool names', () => {
+  it('lists all collaboration tool names (incl. router_compact)', () => {
     const out = buildCollaborationContext({ sessionId: 'sid', dataDir: '/data/plugin' })
     for (const name of TOOL_NAMES) expect(out).toContain(name)
   })

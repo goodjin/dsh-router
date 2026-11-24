@@ -16,7 +16,7 @@
 
 1. 每次派任务给子会话都能**新建任务并把子会话关联到任务**——派新任务时建新子会话，追加或修改
    需求时知道该发给哪些子会话；
-2. 每个任务完成时主会话**自动压缩**；
+2. 主会话能**压缩**历史（原诉求是「任务完成时自动压缩」；实现后用户改为「模型主动调工具、只压上次压缩以来、用任务列表表示」，见 §4）；
 3. **任务描述驱动上下文**：每次派发都要求主会话更新任务描述，插件据此更新主会话的上下文。
 
 ## 2. 决策（用户已拍板）
@@ -25,7 +25,7 @@
 |---|---|---|
 | 「主管」角色去留 | **退役**，不再可派发；组织纪律并进 Router 提示词 | `prompt.ts`「按任务类型组队（八类）」「复杂度分级参考」；`RETIRED_PRESET_ROLES` |
 | 派发建任务的形式 | `taskId` **可选**：给了在该任务下派发；省略则自动建任务（`taskTitle` 必填，`parentTaskId` 可选→挂父任务下） | `dispatch.ts` |
-| 自动压缩触发信号 | **子会话 settle**（DSH 运行时事实 `subagent-settled`），同一轮去重，在 `agent/turn-stopping` 执行 | `compaction-trigger.ts` |
+| 压缩怎么做 | **不自动压**：给主会话一个 `router_compact` 工具，行为规则引导何时压；只压**上一次压缩以来**的已闭合回合，检查点是**任务列表** | `compact.ts`（住在 tools 行） |
 | 任务描述驱动上下文 | **注入活跃任务的完整描述**（不是摘要）+ 子会话；每步重渲染、原地替换；配合自动压缩 | `active-tasks.ts`、`context.ts` |
 
 ## 3. 派发契约（`router_dispatch`）
@@ -48,22 +48,39 @@
 语义上「一个子会话一条任务」就省略 `taskId`；「一个需求多条分工共用一条任务」就给 `taskId`。
 追加需求时先用 `router_record_list(taskId, kind=assignment)` 查出子会话，再 `continue`。
 
-## 4. 自动压缩（`@goodjin2/dsh-router/compaction-trigger`）
+## 4. 压缩：模型主动调 `router_compact`（不自动）
 
-宿主 `ctx.compaction.compactNow(agent, signal)` 可编程触发压缩，但**要求 agent 空闲**（忙时抛
-`busy`），且压缩服务在预设的 `isolate: { compaction: true }` 组里——组外的行解析不到它。因此：
+第一版做成「子会话 settle → 自动压缩」触发器行，用户改为主意：**不自动压**，给主会话一个工具、
+在行为规则里引导，而且对压缩内容有两个硬要求——**只压上一次压缩以来的多轮对话**、**用任务列表的形式表示**。
+查宿主事实后，这两个要求决定了不能走宿主自带的摘要器：
 
-- 新增一行，**挂在 compaction isolate 组内**（`cordis.patch.yml`，由 `gen-patch-yml.mjs` 生成）；
-- 监听 `agent/inbox/inserted`：消息 `source.kind === 'subagent-settled'`（宿主把子会话结束作为
-  notice 投进父会话收件箱）→ 给该 agent 记「待压缩」（`Set` 去重，同一轮多个子会话结束只压一次）；
-- 监听 `agent/turn-stopping`（该轮无工具/steering 后续、即将空闲）：有标记的 agent 才调
-  `compactNow`，调完清标记；用本行自己的 lifetime signal（不用回合的 abort signal，否则回合结束
-  会取消压缩）；
-- `busy / cancelled / changed / summary / commit / persistence` 一律吞掉并 `logger.warn`
-  （`turn-stopping` 是 serial 模式，穿透会卡住整轮收尾）；监听器注册失败也吞（预设树不回滚）。
+- 宿主 `compactNow` 每次 `selectCompactableRange` 都从 surface 第一个非系统节点重新选范围，摘要器
+  指令还要求「把 PRIOR checkpoint 合并成一份累积摘要」——它是**累积**的，不是**增量**的。
+- 摘要器指令是写死的八段英文结构（`COMPACTION_INSTRUCTION` 常量），没有任何注入口——做不出
+  「任务列表」。
 
-「任务完成」的信号是 DSH 运行时事实（子会话结束），不是模型自觉、也不是退出码推断——与
-「插件不从会话结束推断业务完成」不冲突：这里只触发压缩这个维护动作，不改任何业务标签。
+所以工具自己做，三步，全部走公开 API，**不再需要 compaction isolate 组里的独立行**（删掉了触发器行）：
+
+- **选范围**（`findCompactRange`）：起点 = 上一份检查点（`isCompactCheckpointSource` 认得的
+  user/message）之后的第一个 surface 节点（没有检查点则跳过 `system/message` 头）；终点 = 当前回合
+  （最后一个 `turn/start`）之前的最后一个 surface 节点——**只压已闭合的回合**，当前这轮（含本次
+  调用）一个字不动；终点再按工具调用/结果配对回退（`toolPairingBalancedBefore`），宁可不压也不切开
+  任何一对。没有可压内容返回 `compacted:false`（不是错误）。
+- **生成检查点**（`renderTaskListCheckpoint`）：**任务列表**直接从工作记录生成（全部任务含已报告：
+  状态、一句目标、子会话、最近报告；子任务缩进挂在父任务下）——确定性、不花一次模型调用；模型用
+  `notes` 附上几条「自上次压缩以来的关键决策/发现/用户纠正」，补记录里没有的对话结论。外层套
+  `<compacted-summary>`：宿主摘要器之后若因压力再压，会按它的规则把它当 PRIOR checkpoint 合并。
+- **落地**：按宿主压缩事务协议写三条事件——`compaction/start`（`turn:null`，独立手动尝试）→ 一条带
+  `surfaceOp: {op:'replace', startSeq, endSeq}` 与 `sourceEventSeqs`（全部被遮蔽节点）的 user/message
+  （`createUserMessage` 构造，source 用 `compactCheckpointSource(CompactionId(uuid))`，UI/日志据此
+  认成检查点）→ `compaction/end`。中途失败也写 `end(error)`，不留悬空锁。
+
+行为规则（`prompt.ts`「上下文与压缩」）引导：什么时候压（一个任务收到报告处理完之后 / 连续几轮讨论
+尘埃落定之后 / 历史很长还不想结束时）、一个任务压一次、**压之前先把关键决策写进任务描述**（检查点
+来源是记录，对话里没进记录的只有 notes 能带走）、`compacted:false` 别重试。
+
+宿主自己的压力压缩仍然存在（上下文溢出时的安全网），它走自己的累积摘要；本工具是模型主导的、
+结构化的那一层。
 
 ## 5. 任务描述驱动的上下文（`active-tasks.ts` + `context.ts`）
 
@@ -77,7 +94,7 @@
 记录后 `await` 刷新**（几份小 JSON，代价可忽略），context 行同步读——写完立刻新鲜，零滞后。
 缓存没有（刚启动/首次装配）就后台刷一次并渲染「加载中」。
 
-与自动压缩配合：压缩摘要可能丢细节，但活跃任务的完整描述始终在上下文里——**把关键决策写进
+与 `router_compact` 配合：检查点是任务列表、活跃任务的完整描述又每步注入——**把关键决策写进
 任务描述而不是只留在对话里**，这是模型给「压缩后的自己」留状态的方式。
 
 只对根会话生效：context 行把当前会话当作 root 去 `records.list`；worker 的任务正文已在它的
@@ -102,11 +119,12 @@
 
 ## 8. 验收与边界
 
-- 门禁：`npm run typecheck` + `npm test`（含 `compaction-trigger.spec`、`active-tasks.spec`、
-  dispatch 两级契约、roles 退役与 `remove`、context 任务注入与行接线、records 父子语义）+
-  `npm run build`；`check-subrows` / `check-collaboration-host` / `check-collaboration-client` /
-  容器 `check-host-rows` 双宿主全绿。
-- 真实宿主上 `compactNow` 在 `turn-stopping` 时机是否总成功，只有桌面版实机能证；失败路径
-  已全部吞掉并告警，最坏是「这次没压」。
+- 门禁：`npm run typecheck` + `npm test`（含 `compact.spec`、`active-tasks.spec`、dispatch 两级契约、
+  roles 退役与 `remove`、context 任务注入与行接线、records 父子语义）+ `npm run build`；
+  `check-subrows` / `check-collaboration-host` / `check-collaboration-client` / 容器 `check-host-rows`
+  双宿主全绿。`check-collaboration-host` 会在两个宿主里真实 import `dist/tools.js`，证明
+  `@deepseek-ai/dsh-compaction`、`/checkpoint`、`dsh-llm` 三个宿主侧导入在运行时解析得到。
+- 真实宿主上 `session.append(..., {surfaceOp: replace})` 的落地效果（UI 折叠、后续宿主压力压缩
+  认出 PRIOR checkpoint）只有桌面版实机能证；范围与配对规则有单元测试覆盖。
 - `maxDepth` 仍为 2：worker 仍可为自己的子任务派发一层 helper。
 - 明确排除：任意成员互通网络、任务图调度、自动验收、用模型文本替换历史。

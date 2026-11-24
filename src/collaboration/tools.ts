@@ -12,6 +12,7 @@
 
 import { CollaborationError, type RecordDraft, type RecordPatch, type RecordQuery, type RecordStore, type RoleStore } from './types.ts'
 import { buildDispatchTool, type SubagentsFace } from './dispatch.ts'
+import { buildCompactTool } from './compact.ts'
 
 /** 面向模型的一个内容块（与宿主工具输出内容块同形）。 */
 export interface ToolContentBlock {
@@ -145,6 +146,7 @@ export const COLLABORATION_TOOL_NAMES = [
   'router_role_list',
   'router_role_read',
   'router_role_save',
+  'router_compact',
 ] as const
 
 /**
@@ -357,5 +359,7 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
         return roles.save(input as unknown as { name: string; description: string })
       },
     },
+    // 压缩工具放最后：与 COLLABORATION_TOOL_NAMES 的顺序一致。
+    buildCompactTool({ records }),
   ]
 }

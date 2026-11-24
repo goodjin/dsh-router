@@ -29,8 +29,9 @@ DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保�
 - **每次派发可建任务并挂子会话**：`router_dispatch` 的 `taskId` 可选——给了在该任务下派发，省略则自动
   建任务（挂主任务下）；分工记录把子会话挂到任务上，追加需求时 `router_record_list` 查得到该发给谁，
   `mode=continue` 只投递并把追加要求拼进任务描述。
-- **任务完成自动压缩**：子会话结束（`subagent-settled`）后，插件在 Router 回合停下时调用宿主
-  `compactNow`；同一轮去重，失败只告警。
+- **压缩由模型决定**：`router_compact` 工具只压「上一次压缩以来」的已闭合回合（当前轮不动、工具
+  调用/结果不切开），原位取代成一份**任务列表检查点**（记录生成的任务列表 + 模型附的关键决策，不花
+  一次模型调用）；行为规则引导何时压、压之前先把决策写进任务描述。不自动压。
 - **任务描述驱动上下文**：活跃任务的完整描述每步注入系统上下文段（重渲染、原地替换、不进历史），
   写后零滞后刷新；压缩丢了细节，任务描述不丢。
 - **角色是提示规则**：Router/主管/成员职责写进统一协作提示词（`complete:true`），不是安全边界，
@@ -53,7 +54,7 @@ DSH 管会话、通信、执行工具、持久化与宿主权限，插件只保�
 | 工作记录 | `src/collaboration/{records,roles}.ts` 任务/分工/报告/角色模板的读写与会话关联 |
 | 工作台 | `src/client/collaboration-{api,store}.ts`、`collaboration-panel.tsx`：列表/详情/报告/成果链接/会话跳转/模板编辑（只读任务资料） |
 | DSH 接入 | `src/collaboration/{tools,context,routes,runtime}.ts` 用现有子会话工具、只读运行事实 |
-| 两级模型新增 | `src/collaboration/dispatch.ts` 可选 taskId 自动建任务 + continue 泛化；`src/collaboration/active-tasks.ts` 活跃任务视图缓存；`src/compaction-trigger.ts` 子会话结束→自动压缩触发器（挂 compaction isolate 组内） |
+| 两级模型新增 | `src/collaboration/dispatch.ts` 可选 taskId 自动建任务 + continue 泛化；`src/collaboration/active-tasks.ts` 活跃任务视图缓存；`src/collaboration/compact.ts` 模型主动压的 `router_compact` 工具（任务列表检查点，住 tools 行） |
 
 第一版不新增：执行代理、SQLite 业务库、消息箱、预算熔断、任务图调度、自动修复服务、旧会话迁移、
 业务授权引擎、独立投递状态机、自动成功判断、自动补做/换人、跨任务异步排空。
@@ -110,12 +111,11 @@ import/export）；`.` 入口指向宿主侧入口 `dist/entry.js`，浏览器�
 
 ```
 src/entry.ts              宿主侧入口（装配单 preset + 协作记录服务 + 活跃任务缓存 + 路由 + 上下文/工具行）→ dist/entry.js
-src/tools.ts              七条协作工具行（@goodjin2/dsh-router/tools）→ dist/tools.js
+src/tools.ts              九条协作工具行（@goodjin2/dsh-router/tools）→ dist/tools.js
 src/context.ts            协作上下文行（@goodjin2/dsh-router/context）→ dist/context.js
-src/compaction-trigger.ts 子会话结束→自动压缩触发器（@goodjin2/dsh-router/compaction-trigger）→ dist/compaction-trigger.js
 src/client/               浏览器半边（协作工作台面板 + 资料 API + 状态 store + ui-kit 基线）→ lib/client.js
 src/collaboration/        两级协作核心：records/roles 存储、dispatch（可选 taskId / continue）、active-tasks、tools/prompt/context/runtime、routes
-cordis.patch.yml          装载行（裸包名根服务行 + 一条静态 Router 预设行 + 原生执行/提问/指令/压缩（含 compaction-trigger）/子会话工具行）
+cordis.patch.yml          装载行（裸包名根服务行 + 一条静态 Router 预设行 + 原生执行/提问/指令/压缩/子会话工具行）
 tests/                    collaboration/* 单元测试 + bundle/entry/tracked-install/preset-rows/validate-row 装载接线
 scripts/                  check-subrows / check-collaboration-host / check-collaboration-client 候选核查
 ```

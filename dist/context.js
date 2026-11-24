@@ -1,5 +1,9 @@
 import Schema from "@deepseek-ai/schemastery";
 import { join } from "node:path";
+import "node:crypto";
+import "@deepseek-ai/dsh-compaction";
+import "@deepseek-ai/dsh-compaction/checkpoint";
+import "@deepseek-ai/dsh-llm";
 
 //#region src/collaboration/types.ts
 /** 协作域统一错误。 */
@@ -144,7 +148,8 @@ const COLLABORATION_TOOL_NAMES = [
 	"router_record_update",
 	"router_role_list",
 	"router_role_read",
-	"router_role_save"
+	"router_role_save",
+	"router_compact"
 ];
 
 //#endregion

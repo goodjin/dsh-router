@@ -136,6 +136,7 @@ const TOOL_NAMES = [
   'router_role_list',
   'router_role_read',
   'router_role_save',
+  'router_compact',
 ]
 
 /* ───────────────────────── 工具名与 schema ───────────────────────── */
@@ -144,7 +145,7 @@ describe('buildCollaborationTools — names & schemas', () => {
   const tools = buildCollaborationTools(makeFakeStores())
   const byName = new Map(tools.map((t) => [t.name, t]))
 
-  it('exposes exactly the eight fixed tool names in order', () => {
+  it('exposes exactly the nine fixed tool names in order (incl. router_compact)', () => {
     expect(tools.map((t) => t.name)).toEqual(TOOL_NAMES)
   })
 
@@ -316,7 +317,7 @@ describe('buildCollaborationTools — execute forwards to store', () => {
   it('subagents 缺席时其余七条照常注册（派发工具在调用时才明确报错）', () => {
     const { records, roles } = makeFakeStores()
     const tools = buildCollaborationTools({ records, roles })
-    expect(tools).toHaveLength(8)
+    expect(tools).toHaveLength(9)
     expect(tools.map((t) => t.name)).toContain('router_dispatch')
   })
 })

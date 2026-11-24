@@ -148,10 +148,6 @@ ${personaBlock}
                   thresholdChars: 8192
                   headChars: 4096
                   tailChars: 1024
-              # 子会话结束→主会话自动压缩的触发器。必须在 compaction isolate 组内：
-              # ctx.compaction 是这个组的入口局部 realm，组外的行解析不到。
-              - id: router-compaction-trigger
-                name: '@goodjin2/dsh-router/compaction-trigger'
 `
 
 writeFileSync(new URL('cordis.patch.yml', root), yml)

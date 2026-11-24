@@ -69,7 +69,7 @@ describe('eight_tool_registration — tools row registers exactly the eight Laye
     const { tools, registered } = recordingTools()
     const dispose = toolsApply({ tools, routerCollaboration: runtime })
     expect(registered.map((r) => r.name)).toEqual([...COLLABORATION_TOOL_NAMES])
-    expect(registered).toHaveLength(8)
+    expect(registered).toHaveLength(9)
     expect(typeof dispose).toBe('function')
   })
 
