@@ -249,6 +249,33 @@ describe('buildCollaborationContext — 活跃任务注入（完整描述 + 子�
   })
 })
 
+describe('context row apply — 整段关闭宿主变量插值（防 {{…}} 穿透炸整轮）', () => {
+  interface CapturedEntry { name: string; order: number; text(assembly?: unknown): string; interpolate?: boolean }
+
+  it('注册的上下文段带 interpolate: false（宿主当字面文本、不解析 {{…}}）', () => {
+    let captured: CapturedEntry | undefined
+    const dispose = contextApply(
+      { systemPrompt: { context: (e: CapturedEntry) => { captured = e } }, routerCollaboration: { dataDir: '/tmp/x', roles: { list: async () => [] } } as never },
+      { order: 100 } as never,
+    )
+    expect(captured!.interpolate).toBe(false)
+    dispose()
+  })
+
+  it('任务描述里混入 {{…}} 也不抛：buildCollaborationContext 把花括号原样输出（交由宿主关插值兜底）', () => {
+    const hostile = '接口配置 {{InterfaceName: tun0 LinkAddresses: [10.250.0.2/32] DnsAddresses: [223.5.5.5] MTU:1500}}'
+    let text = ''
+    expect(() => {
+      text = buildCollaborationContext({
+        sessionId: 'sid', dataDir: '/tmp/x',
+        tasks: [{ taskId: 't-1', title: '配网', body: hostile, workLabel: '进行中', sessions: [] }],
+      })
+    }).not.toThrow()
+    // 任务描述逐字保留（不被改写），且整段含那对花括号——正是宿主会去解析的串。
+    expect(text).toContain(hostile)
+  })
+})
+
 describe('context row apply — 活跃任务视图缓存接线', () => {
   interface CapturedEntry { name: string; order: number; text(assembly?: unknown): string }
 

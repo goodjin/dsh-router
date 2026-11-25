@@ -295,6 +295,7 @@ function apply(ctx, config) {
 	const dispose = ctx.systemPrompt.context({
 		name: "router-collaboration",
 		order,
+		interpolate: false,
 		text: (assembly) => {
 			kickIfStale();
 			const sessionId = currentSessionId(assembly);
