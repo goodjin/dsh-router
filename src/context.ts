@@ -48,6 +48,13 @@ interface ContextEntry {
   name: string
   order: number
   text(assembly?: unknown): string
+  /**
+   * 整段当字面文本、不参与宿主变量插值（宿主 `interpolate === false` 即不解析 `{{…}}`）。
+   * 本段注入了会话 ID、任务描述、角色摘要等不可信动态文本，其中任一字段都可能混入
+   * `{{…}}`（如接口配置输出 `{{InterfaceName: tun0 …}}`），被宿主当成非法变量引用来解析
+   * 会抛致命错、炸掉整轮组装。本段没有任何 `{{…}}` 变量占位意图，故一律关插值兜住。
+   */
+  interpolate?: false
 }
 
 interface SystemPromptFace {
@@ -122,6 +129,7 @@ export function apply(ctx: ContextHost, config: RouterContextConfig): () => void
   const dispose = ctx.systemPrompt.context({
     name: 'router-collaboration',
     order,
+    interpolate: false,
     text: (assembly: unknown) => {
       kickIfStale()
       const sessionId = currentSessionId(assembly)
