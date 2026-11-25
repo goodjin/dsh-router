@@ -21,9 +21,15 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { createCollaborationRuntime } from './collaboration/runtime.ts'
-import { registerCollaborationRoutes, type CollaborationRouteContext } from './collaboration/routes.ts'
+import { registerCollaborationRoutes, type CollaborationLlm, type CollaborationRouteContext } from './collaboration/routes.ts'
 import { seedPresetRoles } from './collaboration/roles.ts'
 import { createActiveTaskCache, type ActiveTaskCache } from './collaboration/active-tasks.ts'
+import {
+  createModelSwitch,
+  type ChildModelRun,
+  type ModelSwitchAgents,
+  type ModelSwitchSubagents,
+} from './collaboration/model-switch.ts'
 
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 export const name = '@goodjin2/dsh-router'
@@ -47,6 +53,8 @@ export interface RouterCollaborationFace {
   dataDir: string
   /** 活跃任务视图缓存：tools/dispatch 行写后刷新，context 行同步读（见 active-tasks.ts）。 */
   activeTasks: ActiveTaskCache
+  /** 本次 apply 的子会话候选游标。不落盘，卸载后不重建。 */
+  childModelRuns: Map<string, ChildModelRun>
 }
 
 /** apply 收到的 ctx 最小面：provide 必需；root 用于全局服务发布；inject 机会式。 */
@@ -64,18 +72,21 @@ interface EntryContext {
 export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
   const config = (rawConfig ?? {}) as { dataDir?: unknown }
   const runtime = createCollaborationRuntime({ dataDir: typeof config.dataDir === 'string' ? config.dataDir : undefined })
+  const childModelRuns = new Map<string, ChildModelRun>()
   const face: RouterCollaborationFace = {
     records: runtime.records,
     roles: runtime.roles,
     dataDir: runtime.dataDir,
     activeTasks: createActiveTaskCache(runtime.records),
+    childModelRuns,
   }
   // 服务必须发布到根作用域：预设内部插件（tools/context 行）经 isolate 符号解析服务，
   // 只有根级 provide 才能让所有子上下文（含预设 realm）看见。ctx.provide 只发布到
   // 当前 fiber 的隔离作用域，预设内部 inject 永远等不到。
   const useRoot = !!(ctx.root?.provide)
   const provideRoot = useRoot ? ctx.root!.provide.bind(ctx.root) : ctx.provide.bind(ctx)
-  provideRoot('routerCollaboration', face)
+  const released = provideRoot('routerCollaboration', face)
+  const disposeService = typeof released === 'function' ? released : () => {}
 
   // 旧 JSON 角色一次性迁成 md，再幂等种入预置角色（按名判断，不覆盖用户改动）。
   // fire-and-forget 必须就地兜底（宿主把未捕获 rejection 当致命错误）；失败只告警不挡装载。
@@ -85,12 +96,91 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
       console.warn('[dsh-router] migrate/seed roles failed:', error instanceof Error ? error.message : String(error))
     })
 
+  // 监听与 llm/agents 都是机会式的：缺了就跳过自动切换或清单，不挡派发和记录。
+  // llm 不进 webServer 那组必需 inject，否则缺 llm 时整组路由不挂。
+  const watcher = new AbortController()
+  let llmFace: CollaborationLlm | undefined
+  let agentsFace: ModelSwitchAgents | undefined
+  let subagentsFace: ModelSwitchSubagents | undefined
+  const switcher = createModelSwitch({
+    runs: childModelRuns,
+    records: runtime.records,
+    activeTasks: face.activeTasks,
+    signal: watcher.signal,
+    getAgents: () => agentsFace,
+    getSubagents: () => subagentsFace,
+    getLlm: () => llmFace,
+  })
+  const fibers: Array<{ dispose?: () => void | Promise<void> }> = []
+  const track = (fiber: unknown): void => {
+    if (typeof fiber === 'object' && fiber !== null) fibers.push(fiber as { dispose?: () => void | Promise<void> })
+  }
+  const warnSwitch = (error: unknown): void => {
+    console.warn('[dsh-router] model switch failed:', error instanceof Error ? error.message : String(error))
+  }
+  track(ctx.inject?.(['llm'], (child) => {
+    const llm = (child as { llm?: CollaborationLlm }).llm
+    if (llm !== undefined && typeof llm.listProviders === 'function' && typeof llm.listModels === 'function') {
+      llmFace = llm
+    }
+  }))
+  track(ctx.inject?.(['agents', 'subagents'], (child) => {
+    const got = child as { agents?: ModelSwitchAgents; subagents?: ModelSwitchSubagents }
+    agentsFace = got.agents
+    subagentsFace = got.subagents
+    void switcher.onAgentsAvailable().catch(warnSwitch)
+  }))
   // 机会式注入 webServer+connection：缺席（CLI）则跳过，工作台路由不挂、记录/工具照常。
   // 与模型工具共享同一 runtime 的 records/roles（routes_reuse_store）。
-  ctx.inject?.(['webServer', 'connection'], (child) => {
-    registerCollaborationRoutes(child as CollaborationRouteContext, { records: runtime.records, roles: runtime.roles })
-    return undefined
-  })
+  track(ctx.inject?.(['webServer', 'connection'], (child) => {
+    registerCollaborationRoutes(child as CollaborationRouteContext, {
+      records: runtime.records,
+      roles: runtime.roles,
+      llm: () => llmFace,
+    })
+  }))
 
-  return () => {}
+  const offs: Array<() => void> = []
+  const host = ctx as EntryContext & {
+    on?: (name: string, listener: (...args: unknown[]) => void) => unknown
+  }
+  if (typeof host.on === 'function') {
+    const offEvent = host.on('session/event', (session: unknown, event: unknown) => {
+      void switcher.onSessionEvent(session, event).catch(warnSwitch)
+    })
+    const offStatus = host.on('agent/status', (payload: unknown) => {
+      void switcher.onAgentStatus(payload).catch(warnSwitch)
+    })
+    if (typeof offEvent === 'function') offs.push(() => { offEvent() })
+    if (typeof offStatus === 'function') offs.push(() => { offStatus() })
+  }
+
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    watcher.abort()
+    for (const off of offs) {
+      try {
+        off()
+      } catch (error) {
+        warnSwitch(error)
+      }
+    }
+    for (const fiber of fibers) {
+      try {
+        const result = fiber.dispose?.()
+        if (result !== undefined && typeof (result as Promise<void>).then === 'function') {
+          void (result as Promise<void>).catch(() => {})
+        }
+      } catch (error) {
+        warnSwitch(error)
+      }
+    }
+    try {
+      disposeService()
+    } catch (error) {
+      warnSwitch(error)
+    }
+  }
 }

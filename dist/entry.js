@@ -421,6 +421,89 @@ function createRecordStore(dataDir, deps = {}) {
 }
 
 //#endregion
+//#region src/collaboration/role-models.ts
+const MODEL_FENCE_START = "<!-- dsh-router:models -->";
+const MODEL_FENCE_END = "<!-- /dsh-router:models -->";
+function linesOf(text) {
+	const lines = [];
+	let start = 0;
+	for (let i = 0; i < text.length; i++) if (text.charCodeAt(i) === 10) {
+		lines.push({
+			text: text.slice(start, i),
+			start
+		});
+		start = i + 1;
+	}
+	if (start < text.length) lines.push({
+		text: text.slice(start),
+		start
+	});
+	return lines;
+}
+function invalid(name$1, detail) {
+	return new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型围栏无效：${detail}`);
+}
+function parseCandidate(name$1, value, where) {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：${where} 必须是对象`);
+	const record = value;
+	if (Object.keys(record).length !== 2 || !Object.prototype.hasOwnProperty.call(record, "provider") || !Object.prototype.hasOwnProperty.call(record, "model")) throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：${where} 只能有 provider 与 model`);
+	const provider = record.provider;
+	const model = record.model;
+	if (typeof provider !== "string" || provider.trim() === "") throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：${where}.provider 必须是 trim 后的非空字符串`);
+	if (typeof model !== "string" || model.trim() === "") throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：${where}.model 必须是 trim 后的非空字符串`);
+	return {
+		provider: provider.trim(),
+		model: model.trim()
+	};
+}
+/** 保存入参里的 models。空数组合法（清空）。非数组、坏条目整次拒绝。 */
+function validateRoleModels(name$1, raw) {
+	if (!Array.isArray(raw)) throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：models 必须是数组`);
+	return raw.map((item, index) => parseCandidate(name$1, item, `models[${index}]`));
+}
+/** 读角色文件字节。没有单独成行的开始标记时 models 缺省，description 等于原文。 */
+function parseRoleDocument(name$1, text) {
+	const lines = linesOf(text);
+	const startIndex = lines.findIndex((line) => line.text === MODEL_FENCE_START);
+	if (startIndex < 0) return { description: text };
+	const start = lines[startIndex];
+	const endIndex = lines.findIndex((line, index) => index > startIndex && line.text === MODEL_FENCE_END);
+	if (endIndex < 0) throw invalid(name$1, "缺少结束标记");
+	if (lines.slice(endIndex + 1).length > 0) throw invalid(name$1, "结束标记之后还有内容");
+	const models = [];
+	for (let index = startIndex + 1; index < endIndex; index++) {
+		const line = lines[index].text;
+		let parsed;
+		try {
+			parsed = JSON.parse(line);
+		} catch (error) {
+			throw invalid(name$1, `第 ${index - startIndex} 行不是合法 JSON（${error instanceof Error ? error.message : String(error)}）`);
+		}
+		try {
+			models.push(parseCandidate(name$1, parsed, `围栏第 ${index - startIndex} 行`));
+		} catch (error) {
+			if (error instanceof CollaborationError) throw invalid(name$1, error.message);
+			throw error;
+		}
+	}
+	return {
+		description: text.slice(0, start.start),
+		models
+	};
+}
+/**
+* 写回文件字节。无候选不写围栏。有候选时正文不以换行结尾就先补一个，
+* 再写独占一行的标记。读出来的 description 再写回是稳定的。
+*/
+function serializeRoleFile(description, models) {
+	if (models === void 0 || models.length === 0) return description;
+	return `${description.endsWith("\n") ? description : `${description}\n`}${MODEL_FENCE_START}\n${models.map((candidate) => JSON.stringify({
+		provider: candidate.provider,
+		model: candidate.model
+	})).join("\n")}\n${MODEL_FENCE_END}\n`;
+}
+
+//#endregion
 //#region src/collaboration/preset-roles.ts
 /** 主管 v2 文本（2026-11-20 加入「派子会话一律 fork」前的版本；退役比对用）。 */
 const SUPERVISOR_V2_TEXT = [
@@ -896,9 +979,15 @@ function createRoleStore(dataDir, deps = {}) {
 			if (isEnoent(error)) throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${path}`);
 			throw new CollaborationError("IO_ERROR", `角色模板读取失败: ${path}`, { cause: error });
 		}
+		const parsed = parseRoleDocument(name$1, text);
+		if (parsed.models !== void 0) return {
+			name: name$1,
+			description: parsed.description,
+			models: parsed.models
+		};
 		return {
 			name: name$1,
-			description: text
+			description: parsed.description
 		};
 	};
 	return {
@@ -928,13 +1017,28 @@ function createRoleStore(dataDir, deps = {}) {
 		async save(input) {
 			const name$1 = validateRoleName(input.name);
 			if (typeof input.description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
+			const explicit = input.models === void 0 ? void 0 : validateRoleModels(name$1, input.models);
 			return enqueue(async () => {
+				let models = explicit;
+				if (models === void 0) try {
+					models = (await readRoleFile(name$1)).models ?? [];
+				} catch (error) {
+					if (!(error instanceof CollaborationError) || error.code !== "NOT_FOUND") throw error;
+					models = [];
+				}
 				const path = rolePath(name$1);
 				await guard.assertDirChain(path);
-				await atomicWrite(fs, path, input.description);
+				const content = serializeRoleFile(input.description, models);
+				await atomicWrite(fs, path, content);
+				const parsed = parseRoleDocument(name$1, content);
+				if (parsed.models !== void 0 && parsed.models.length > 0) return {
+					name: name$1,
+					description: parsed.description,
+					models: parsed.models
+				};
 				return {
 					name: name$1,
-					description: input.description
+					description: parsed.description
 				};
 			});
 		},
@@ -1001,16 +1105,18 @@ function createRoleStore(dataDir, deps = {}) {
 * - 现有内容等于最新预置 → 跳过；
 * - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
 * - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
+* - 文件带候选围栏（models 已出现，含空围栏）视为用户改过：不升级、不删除。
 *
-* 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：磁盘内容等于它任一版历史
-* 文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
+* 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：没有围栏且磁盘内容等于它
+* 任一版历史文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
+* 相等比较只对没有围栏的文件用 description（此时它就是文件字节）。
 */
 async function seedPresetRoles(store) {
-	const existing = new Map((await store.list()).map((role) => [role.name, role.description]));
+	const existing = new Map((await store.list()).map((role) => [role.name, role]));
 	for (const [name$1, texts] of Object.entries(RETIRED_PRESET_ROLES)) {
 		const current = existing.get(name$1);
-		if (current === void 0) continue;
-		if (texts.includes(current)) {
+		if (current === void 0 || current.models !== void 0) continue;
+		if (texts.includes(current.description)) {
 			await store.remove(name$1);
 			existing.delete(name$1);
 		}
@@ -1024,9 +1130,10 @@ async function seedPresetRoles(store) {
 			});
 			continue;
 		}
-		if (current === preset.description) continue;
+		if (current.models !== void 0) continue;
+		if (current.description === preset.description) continue;
 		const history = HISTORICAL_PRESET_DESCRIPTIONS[preset.name];
-		if (history !== void 0 && history.includes(current)) await store.save({
+		if (history !== void 0 && history.includes(current.description)) await store.save({
 			name: preset.name,
 			description: preset.description
 		});
@@ -1064,6 +1171,7 @@ function createCollaborationRuntime(input = {}) {
 const COLLABORATION_RECORDS_PATH = "/router/collaboration/records";
 const COLLABORATION_RECORD_PATH = "/router/collaboration/record";
 const COLLABORATION_ROLES_PATH = "/router/collaboration/roles";
+const COLLABORATION_MODELS_PATH = "/router/collaboration/models";
 /** POST 体上限：1MiB（1024×1024）简单 UI 传输限（非源存储约束）；按累计字节计，非 string 长度。 */
 const BODY_LIMIT = 1024 * 1024;
 /**
@@ -1229,11 +1337,71 @@ function registerCollaborationRoutes(ctx, deps) {
 			name: typeof body.name === "string" ? body.name : "",
 			description: typeof body.description === "string" ? body.description : ""
 		};
+		if (Object.prototype.hasOwnProperty.call(body, "models")) input.models = body.models;
 		const saved = await deps.roles.save(input);
 		return {
 			status: 200,
 			body: JSON.stringify(saved)
 		};
+	});
+	handle(COLLABORATION_MODELS_PATH, ["GET"], async () => {
+		const llm = deps.llm?.();
+		if (llm === void 0 || typeof llm.listProviders !== "function" || typeof llm.listModels !== "function") return {
+			status: 200,
+			body: JSON.stringify({
+				unavailable: true,
+				providers: []
+			})
+		};
+		try {
+			const listed = await llm.listProviders();
+			if (!Array.isArray(listed)) return {
+				status: 200,
+				body: JSON.stringify({
+					unavailable: true,
+					providers: []
+				})
+			};
+			const providers = [];
+			for (const provider of listed) {
+				if (typeof provider?.id !== "string") continue;
+				const name$1 = typeof provider.name === "string" ? provider.name : provider.id;
+				try {
+					const models = await llm.listModels(provider.id);
+					if (!Array.isArray(models)) throw new Error("listModels 返回的不是数组");
+					providers.push({
+						id: provider.id,
+						name: name$1,
+						models: models.flatMap((item) => item !== null && typeof item === "object" && typeof item.id === "string" && typeof item.name === "string" ? [{
+							id: item.id,
+							name: item.name
+						}] : [])
+					});
+				} catch (error) {
+					providers.push({
+						id: provider.id,
+						name: name$1,
+						models: [],
+						error: error instanceof Error ? error.message : String(error)
+					});
+				}
+			}
+			return {
+				status: 200,
+				body: JSON.stringify({
+					unavailable: false,
+					providers
+				})
+			};
+		} catch {
+			return {
+				status: 200,
+				body: JSON.stringify({
+					unavailable: true,
+					providers: []
+				})
+			};
+		}
 	});
 }
 
@@ -1278,6 +1446,373 @@ function createActiveTaskCache(records, options = {}) {
 }
 
 //#endregion
+//#region src/collaboration/model-switch.ts
+const DIRECT_CODES = new Set([
+	"NO_ADAPTER",
+	"QUOTA",
+	"ACCOUNT_QUOTA",
+	"RATE_LIMIT",
+	"TIMEOUT",
+	"TRANSPORT",
+	"SERVER"
+]);
+/** 命中则这一轮不前进，即使 status 是 429 或 5xx。INVALID_REQUEST 不在此表，单独按清单判断。 */
+const EXCLUDED_CODES = new Set([
+	"AUTH",
+	"INVALID_CREDENTIAL",
+	"MISSING_CREDENTIAL",
+	"CONTEXT_WINDOW_EXCEEDED",
+	"EMPTY_RESPONSE",
+	"PI_AI_ERROR",
+	"UNKNOWN",
+	"IMAGE_OFFLOAD_REQUIRED",
+	"STREAM_CLOSED",
+	"MALFORMED_RESPONSE"
+]);
+function warn(error) {
+	console.warn("[dsh-router] model switch failed:", error instanceof Error ? error.message : String(error));
+}
+function sessionIdOf(session) {
+	if (typeof session !== "object" || session === null) return "";
+	const id = session.id;
+	return typeof id === "string" ? id : "";
+}
+function agentIdOf(agent) {
+	if (typeof agent !== "object" || agent === null) return "";
+	const id = agent.id;
+	return typeof id === "string" ? id : "";
+}
+function classifyTurnError(error) {
+	const code = typeof error.code === "string" ? error.code : "";
+	if (DIRECT_CODES.has(code)) return "switch";
+	if (code === "INVALID_REQUEST") return "invalid-request";
+	if (EXCLUDED_CODES.has(code) || code.startsWith("HTTP_")) return "ignore";
+	if (error.status === 429) return "switch";
+	if (typeof error.status === "number" && error.status >= 500 && error.status <= 599) return "switch";
+	return "ignore";
+}
+function toFailure(candidate, error) {
+	const failure = {
+		provider: candidate.provider,
+		model: candidate.model,
+		code: typeof error.code === "string" ? error.code : "",
+		message: typeof error.message === "string" ? error.message : ""
+	};
+	if (typeof error.status === "number") failure.status = error.status;
+	return failure;
+}
+function formatPair(candidate) {
+	return `${candidate.provider}/${candidate.model}`;
+}
+function formatSequence(sequence) {
+	return sequence.map(formatPair).join("、");
+}
+function formatFailure(failure) {
+	const status = failure.status !== void 0 ? ` status=${failure.status}` : "";
+	return `- ${failure.provider}/${failure.model}：code=${failure.code}${status} message=${failure.message}`;
+}
+async function modelListed(llm, provider, model) {
+	if (llm === void 0 || typeof llm.listProviders !== "function" || typeof llm.listModels !== "function") return "unreadable";
+	let providers;
+	try {
+		const listed = await llm.listProviders();
+		if (!Array.isArray(listed)) return "unreadable";
+		providers = listed;
+	} catch {
+		return "unreadable";
+	}
+	if (!providers.some((item) => item?.id === provider)) return "unreadable";
+	try {
+		const models = await llm.listModels(provider);
+		if (!Array.isArray(models)) return "unreadable";
+		return models.some((item) => item?.id === model) ? "present" : "missing";
+	} catch {
+		return "unreadable";
+	}
+}
+function createModelSwitch(deps) {
+	const { runs, records, signal } = deps;
+	const commitPending = (run) => {
+		if (run.pending === void 0) return;
+		run.failures.push(run.pending);
+		run.pending = void 0;
+	};
+	const markBlocked = async (run) => {
+		try {
+			await records.update(run.rootSessionId, run.taskId, run.taskId, { workLabel: "受阻" });
+		} catch (error) {
+			warn(error);
+		}
+		if (deps.activeTasks === void 0) return;
+		try {
+			await deps.activeTasks.refresh(run.rootSessionId);
+		} catch (error) {
+			warn(error);
+		}
+	};
+	const writeReport = async (run, childId, title, body) => {
+		try {
+			await records.create(run.rootSessionId, {
+				kind: "report",
+				taskId: run.taskId,
+				title,
+				body,
+				workLabel: "已报告",
+				sessions: [{
+					sessionId: childId,
+					label: run.roleName
+				}]
+			});
+		} catch (error) {
+			warn(error);
+		}
+	};
+	const stopUnsafe = async (run, childId, detail) => {
+		run.phase = "stopped";
+		const lines = [
+			"不能安全地再自动走下一步。",
+			`卡在候选：${formatPair(detail.stuck)}`,
+			`select 已改模型：${detail.selectChanged ? "是" : "否"}`,
+			`投递是否发生：${detail.delivered ? "是" : "否"}`,
+			`最后一次错误：${detail.errorText}`,
+			"未退回主会话模型。",
+			"任务已标为受阻。"
+		];
+		if (detail.extra !== void 0 && detail.extra !== "") lines.push(detail.extra);
+		await markBlocked(run);
+		await writeReport(run, childId, "模型切换受阻", lines.join("\n"));
+	};
+	const stopExhausted = async (run, childId) => {
+		commitPending(run);
+		run.phase = "stopped";
+		const last = run.failures[run.failures.length - 1];
+		const lines = [
+			"候选已用完，已停止。",
+			"试过：",
+			...run.failures.map(formatFailure),
+			`最后一次错误：${last ? `${last.code} ${last.message}` : ""}`,
+			"未退回主会话模型。",
+			"未再投递继续。",
+			"任务已标为受阻，等待用户决定。"
+		];
+		await markBlocked(run);
+		await writeReport(run, childId, "模型切换受阻", lines.join("\n"));
+	};
+	const proceed = async (childId) => {
+		const run = runs.get(childId);
+		if (run === void 0 || run.phase !== "switching" || run.delivering === true || signal.aborted) return;
+		if (run.index + 1 >= run.sequence.length) {
+			run.delivering = true;
+			try {
+				if (signal.aborted || run.phase !== "switching") return;
+				await stopExhausted(run, childId);
+			} finally {
+				run.delivering = false;
+			}
+			return;
+		}
+		const agents = deps.getAgents();
+		if (agents === void 0) return;
+		const agent = agents.get(childId);
+		if (agent === void 0) {
+			run.delivering = true;
+			try {
+				if (signal.aborted || run.phase !== "switching") return;
+				commitPending(run);
+				const stuck = run.sequence[run.index];
+				await stopUnsafe(run, childId, {
+					stuck,
+					selectChanged: false,
+					delivered: false,
+					errorText: "没有在线子会话"
+				});
+			} finally {
+				run.delivering = false;
+			}
+			return;
+		}
+		if (agent.status !== "idle") return;
+		if (agents.get(childId)?.status !== "idle") return;
+		run.delivering = true;
+		let successReport;
+		try {
+			if (signal.aborted || run.phase !== "switching") return;
+			const modelApi = agent.model;
+			if (modelApi === void 0 || typeof modelApi.select !== "function") {
+				commitPending(run);
+				await stopUnsafe(run, childId, {
+					stuck: run.sequence[run.index],
+					selectChanged: false,
+					delivered: false,
+					errorText: "宿主没有 agent.model.select",
+					extra: "宿主没有 agent.model.select。"
+				});
+				return;
+			}
+			const from = run.sequence[run.index];
+			const failure = run.pending;
+			let chosen = -1;
+			let selectError;
+			for (let index = run.index + 1; index < run.sequence.length; index++) {
+				if (signal.aborted || run.phase !== "switching") return;
+				const candidate = run.sequence[index];
+				try {
+					await modelApi.select({
+						provider: candidate.provider,
+						model: candidate.model
+					});
+					chosen = index;
+					break;
+				} catch (error) {
+					selectError = error;
+				}
+			}
+			if (signal.aborted || run.phase !== "switching") return;
+			if (chosen < 0) {
+				commitPending(run);
+				await stopUnsafe(run, childId, {
+					stuck: run.sequence[run.index + 1] ?? from,
+					selectChanged: false,
+					delivered: false,
+					errorText: selectError instanceof Error ? selectError.message : String(selectError)
+				});
+				return;
+			}
+			const to = run.sequence[chosen];
+			const parent = agents.get(run.parentSessionId);
+			if (parent === void 0) {
+				commitPending(run);
+				run.index = chosen;
+				await stopUnsafe(run, childId, {
+					stuck: to,
+					selectChanged: true,
+					delivered: false,
+					errorText: "没有在线父会话",
+					extra: "已改模型，未能取得在线父会话，未投递。"
+				});
+				return;
+			}
+			const text = `已从 ${from.provider}/${from.model} 换到 ${to.provider}/${to.model}，继续原任务。`;
+			const subagents = deps.getSubagents();
+			if (subagents?.sendMessage === void 0) {
+				commitPending(run);
+				run.index = chosen;
+				await stopUnsafe(run, childId, {
+					stuck: to,
+					selectChanged: true,
+					delivered: false,
+					errorText: "宿主缺少向子会话投递的能力"
+				});
+				return;
+			}
+			try {
+				await subagents.sendMessage(parent, childId, [{
+					type: "text",
+					text
+				}], { signal });
+			} catch (error) {
+				commitPending(run);
+				run.index = chosen;
+				await stopUnsafe(run, childId, {
+					stuck: to,
+					selectChanged: true,
+					delivered: false,
+					errorText: error instanceof Error ? error.message : String(error)
+				});
+				return;
+			}
+			commitPending(run);
+			run.index = chosen;
+			run.phase = "armed";
+			run.failedTurn = void 0;
+			const reported = failure ?? run.failures[run.failures.length - 1];
+			const statusLine = reported?.status !== void 0 ? `状态：${reported.status}\n` : "";
+			successReport = {
+				title: "模型切换",
+				body: [
+					`已从 ${from.provider}/${from.model} 换到 ${to.provider}/${to.model}。`,
+					`错误码：${reported?.code ?? ""}`,
+					`${statusLine}错误信息：${reported?.message ?? ""}`,
+					`本次序列：${formatSequence(run.sequence)}`,
+					`已经放弃的前缀：${formatSequence(run.sequence.slice(0, chosen))}`,
+					"未退回主会话模型。"
+				].join("\n")
+			};
+		} finally {
+			run.delivering = false;
+		}
+		if (successReport !== void 0 && !signal.aborted) await writeReport(run, childId, successReport.title, successReport.body);
+	};
+	const arm = (run, turn, failure) => {
+		run.phase = "switching";
+		run.failedTurn = turn;
+		run.pending = failure;
+	};
+	return {
+		async onSessionEvent(session, event) {
+			const childId = sessionIdOf(session);
+			const run = runs.get(childId);
+			if (run === void 0 || run.phase === "stopped" || signal.aborted) return;
+			if (typeof event !== "object" || event === null) return;
+			const record = event;
+			if (record.type === "turn/start") {
+				if ((run.phase === "switching" || run.phase === "checking") && typeof record.turn === "number" && run.failedTurn !== void 0 && record.turn > run.failedTurn) {
+					run.phase = "armed";
+					run.pending = void 0;
+					run.failedTurn = void 0;
+				}
+				return;
+			}
+			if (record.type !== "turn/end" || run.phase !== "armed") return;
+			const reason = record.reason;
+			if (typeof reason !== "object" || reason === null) return;
+			if (reason.kind !== "error") return;
+			const error = reason.error;
+			if (typeof error !== "object" || error === null) return;
+			const turnError = error;
+			const current = run.sequence[run.index];
+			if (current === void 0) return;
+			const kind = classifyTurnError(turnError);
+			if (kind === "ignore") return;
+			const turn = typeof record.turn === "number" ? record.turn : 0;
+			const failure = toFailure(current, turnError);
+			if (kind === "invalid-request") {
+				run.phase = "checking";
+				run.failedTurn = turn;
+				run.pending = failure;
+				const verdict = await modelListed(deps.getLlm(), current.provider, current.model);
+				const latest = runs.get(childId);
+				if (latest === void 0 || latest.phase !== "checking" || latest.failedTurn !== turn || signal.aborted) return;
+				if (verdict !== "missing") {
+					latest.phase = "armed";
+					latest.pending = void 0;
+					latest.failedTurn = void 0;
+					return;
+				}
+				latest.phase = "switching";
+				await proceed(childId);
+				return;
+			}
+			arm(run, turn, failure);
+			await proceed(childId);
+		},
+		async onAgentStatus(payload) {
+			if (typeof payload !== "object" || payload === null || signal.aborted) return;
+			const record = payload;
+			if (record.status !== "idle") return;
+			const childId = agentIdOf(record.agent);
+			if (childId === "") return;
+			await proceed(childId);
+		},
+		async onAgentsAvailable() {
+			if (signal.aborted) return;
+			const pending = [...runs.keys()];
+			for (const childId of pending) await proceed(childId);
+		}
+	};
+}
+
+//#endregion
 //#region src/entry.ts
 /** Loader 行与诊断里看到的插件名（裸包名，与 cordis.patch.yml 的行一致）。 */
 const name = "@goodjin2/dsh-router";
@@ -1296,23 +1831,94 @@ const Config = Schema.object({ dataDir: Schema.string().default("") });
 function apply(ctx, rawConfig) {
 	const config = rawConfig ?? {};
 	const runtime = createCollaborationRuntime({ dataDir: typeof config.dataDir === "string" ? config.dataDir : void 0 });
+	const childModelRuns = /* @__PURE__ */ new Map();
 	const face = {
 		records: runtime.records,
 		roles: runtime.roles,
 		dataDir: runtime.dataDir,
-		activeTasks: createActiveTaskCache(runtime.records)
+		activeTasks: createActiveTaskCache(runtime.records),
+		childModelRuns
 	};
-	(!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
+	const released = (!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
+	const disposeService = typeof released === "function" ? released : () => {};
 	runtime.roles.migrateLegacyJson().then(() => seedPresetRoles(runtime.roles)).catch((error) => {
 		console.warn("[dsh-router] migrate/seed roles failed:", error instanceof Error ? error.message : String(error));
 	});
-	ctx.inject?.(["webServer", "connection"], (child) => {
+	const watcher = new AbortController();
+	let llmFace;
+	let agentsFace;
+	let subagentsFace;
+	const switcher = createModelSwitch({
+		runs: childModelRuns,
+		records: runtime.records,
+		activeTasks: face.activeTasks,
+		signal: watcher.signal,
+		getAgents: () => agentsFace,
+		getSubagents: () => subagentsFace,
+		getLlm: () => llmFace
+	});
+	const fibers = [];
+	const track = (fiber) => {
+		if (typeof fiber === "object" && fiber !== null) fibers.push(fiber);
+	};
+	const warnSwitch = (error) => {
+		console.warn("[dsh-router] model switch failed:", error instanceof Error ? error.message : String(error));
+	};
+	track(ctx.inject?.(["llm"], (child) => {
+		const llm = child.llm;
+		if (llm !== void 0 && typeof llm.listProviders === "function" && typeof llm.listModels === "function") llmFace = llm;
+	}));
+	track(ctx.inject?.(["agents", "subagents"], (child) => {
+		const got = child;
+		agentsFace = got.agents;
+		subagentsFace = got.subagents;
+		switcher.onAgentsAvailable().catch(warnSwitch);
+	}));
+	track(ctx.inject?.(["webServer", "connection"], (child) => {
 		registerCollaborationRoutes(child, {
 			records: runtime.records,
-			roles: runtime.roles
+			roles: runtime.roles,
+			llm: () => llmFace
 		});
-	});
-	return () => {};
+	}));
+	const offs = [];
+	const host = ctx;
+	if (typeof host.on === "function") {
+		const offEvent = host.on("session/event", (session, event) => {
+			switcher.onSessionEvent(session, event).catch(warnSwitch);
+		});
+		const offStatus = host.on("agent/status", (payload) => {
+			switcher.onAgentStatus(payload).catch(warnSwitch);
+		});
+		if (typeof offEvent === "function") offs.push(() => {
+			offEvent();
+		});
+		if (typeof offStatus === "function") offs.push(() => {
+			offStatus();
+		});
+	}
+	let disposed = false;
+	return () => {
+		if (disposed) return;
+		disposed = true;
+		watcher.abort();
+		for (const off of offs) try {
+			off();
+		} catch (error) {
+			warnSwitch(error);
+		}
+		for (const fiber of fibers) try {
+			const result = fiber.dispose?.();
+			if (result !== void 0 && typeof result.then === "function") result.catch(() => {});
+		} catch (error) {
+			warnSwitch(error);
+		}
+		try {
+			disposeService();
+		} catch (error) {
+			warnSwitch(error);
+		}
+	};
 }
 
 //#endregion

@@ -15,6 +15,7 @@ import {
   COLLABORATION_API_RECORDS_PATH,
   COLLABORATION_API_RECORD_PATH,
   COLLABORATION_API_ROLES_PATH,
+  COLLABORATION_API_MODELS_PATH,
 } from '../../src/client/collaboration-api.ts'
 import type { RecordQuery, RoleTemplate, SavedRecord, WorkRecord } from '../../src/collaboration/types.ts'
 
@@ -97,6 +98,29 @@ describe('createCollaborationApi — 四条方法与默认同源 fetch', () => {
     const api = createCollaborationApi({ fetch: fakeFetch({ body: role, capture }) })
     await api.saveRole({ name: '前端', description: 'UI' })
     expect(capture[0]!.init!.body).toBe(JSON.stringify({ name: '前端', description: 'UI' }))
+  })
+
+  it('saveRole 传入 models（含空数组）时请求体带上；listModelCatalog 走 GET /models', async () => {
+    const capture: Call[] = []
+    const models = [{ provider: 'deepseek', model: 'deepseek-chat' }]
+    const api = createCollaborationApi({
+      fetch: fakeFetch({
+        responses: [
+          { body: { name: '前端', description: 'UI', models } },
+          { body: { name: '前端', description: 'UI' } },
+          { body: { unavailable: false, providers: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }] }] } },
+        ],
+        capture,
+      }),
+    })
+    await api.saveRole({ name: '前端', description: 'UI', models })
+    expect(capture[0]!.init!.body).toBe(JSON.stringify({ name: '前端', description: 'UI', models }))
+    await api.saveRole({ name: '前端', description: 'UI', models: [] })
+    expect(capture[1]!.init!.body).toBe(JSON.stringify({ name: '前端', description: 'UI', models: [] }))
+    const catalog = await api.listModelCatalog()
+    expect(capture[2]!.url).toBe(COLLABORATION_API_MODELS_PATH)
+    expect(catalog.unavailable).toBe(false)
+    expect(catalog.providers[0]!.models[0]!.id).toBe('deepseek-chat')
   })
 })
 

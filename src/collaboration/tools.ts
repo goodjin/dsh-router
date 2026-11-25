@@ -12,6 +12,7 @@
 
 import { CollaborationError, type RecordDraft, type RecordPatch, type RecordQuery, type RecordStore, type RoleStore } from './types.ts'
 import { buildDispatchTool, type SubagentsFace } from './dispatch.ts'
+import type { ChildModelRun } from './model-switch.ts'
 import { buildCompactTool } from './compact.ts'
 
 /** 面向模型的一个内容块（与宿主工具输出内容块同形）。 */
@@ -118,13 +119,29 @@ const SAVED_RECORD_SCHEMA = {
   required: ['record', 'path'],
 }
 
-/** 角色模板 schema。 */
+/** 角色候选模型。 */
+const ROLE_MODEL_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    provider: { type: 'string', description: '提供方 id' },
+    model: { type: 'string', description: '模型 id' },
+  },
+  required: ['provider', 'model'],
+}
+
+/** 角色模板 schema。models 可选：缺省表示没有候选围栏。 */
 const ROLE_TEMPLATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
     name: { type: 'string', description: '角色名（=md 文件名）' },
-    description: { type: 'string', description: '职责说明' },
+    description: { type: 'string', description: '职责说明（不含候选围栏）' },
+    models: {
+      type: 'array',
+      description: '有序候选模型。省略表示文件里没有围栏。',
+      items: ROLE_MODEL_SCHEMA,
+    },
   },
   required: ['name', 'description'],
 }
@@ -157,7 +174,13 @@ export const COLLABORATION_TOOL_NAMES = [
 /** 写记录成功后的回调（刷新活跃任务视图缓存，让上下文段零滞后）；缺席时不调。 */
 export type AfterRecordWrite = (rootSessionId: string) => Promise<void>
 
-export function buildCollaborationTools(deps: { records: RecordStore; roles: RoleStore; subagents?: SubagentsFace; afterWrite?: AfterRecordWrite }): ToolDefinition[] {
+export function buildCollaborationTools(deps: {
+  records: RecordStore
+  roles: RoleStore
+  subagents?: SubagentsFace
+  afterWrite?: AfterRecordWrite
+  childModelRuns?: Map<string, ChildModelRun>
+}): ToolDefinition[] {
   const { records, roles } = deps
   // 写后刷新：失败只告警，绝不把一次成功的写入变成失败（缓存下一拍会自愈）。
   const afterWrite = async (rootSessionId: string): Promise<void> => {
@@ -169,7 +192,13 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
     }
   }
   return [
-    buildDispatchTool(deps),
+    buildDispatchTool({
+      records,
+      roles,
+      subagents: deps.subagents,
+      afterWrite,
+      childModelRuns: deps.childModelRuns,
+    }),
     {
       name: 'router_record_create',
       description:
@@ -334,7 +363,8 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
       name: 'router_role_save',
       description:
         '创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，' +
-        '一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。',
+        '一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。' +
+        'models 可选：省略则保留盘上已有候选；空数组清空候选。',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -346,6 +376,11 @@ export function buildCollaborationTools(deps: { records: RecordStore; roles: Rol
             properties: {
               name: { type: 'string', description: '角色名（非空；同名即更新）' },
               description: { type: 'string', description: '职责说明' },
+              models: {
+                type: 'array',
+                description: '有序候选。省略保留已有候选；空数组清空。形状不合法整次拒绝。',
+                items: ROLE_MODEL_SCHEMA,
+              },
             },
             required: ['name', 'description'],
           },

@@ -323,3 +323,176 @@ it('两级模型：不同任务各派子会话；同一子会话登记在多个�
   await expect(run(tool,{...BASE_ARGS, mode:'continue', expectedChildId:'a', task:'追加'})).rejects.toThrow(/归属不唯一/)
   expect(startActivation).toHaveBeenCalledTimes(2); expect(sendMessage).not.toHaveBeenCalled()
 })
+
+describe('dispatch role models', () => {
+  it('序列为空时 startActivation 参数没有 agentOptions，返回键与现在相同', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '执行者', description: '拆解并汇总。' })
+    const taskId = await makeTask(records)
+    let request: Record<string, unknown> | undefined
+    const tool = buildDispatchTool({
+      records,
+      roles,
+      subagents: {
+        async startActivation(input) {
+          request = input.request as Record<string, unknown>
+          return { childId: 'child-empty' }
+        },
+      },
+    })
+    const result = await run(tool, { ...BASE_ARGS, taskId }) as Record<string, unknown>
+    expect(Object.keys(request ?? {}).sort()).toEqual(['maxDepth', 'parent', 'prompt'])
+    expect(request).not.toHaveProperty('agentOptions')
+    expect(Object.keys(result).sort()).toEqual(['childId', 'createdTask', 'record', 'taskId'])
+    expect(result).not.toHaveProperty('model')
+  })
+
+  it('序列非空时 agentOptions 只有 provider 与 model，成功和 recordError 都带 model', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '只写职责',
+      models: [{ provider: 'deepseek', model: 'deepseek-chat' }],
+    })
+    const taskId = await makeTask(records)
+    const runs = new Map<string, { parentSessionId: string; sequence: Array<{ provider: string; model: string }> }>()
+    let request: { agentOptions?: Record<string, unknown>; prompt: Array<{ text: string }> } | undefined
+    const subagents = {
+      async startActivation(input: { request: { agentOptions?: Record<string, unknown>; prompt: Array<{ text: string }> } }) {
+        request = input.request
+        return { childId: 'child-model' }
+      },
+    }
+    const tool = buildDispatchTool({ records, roles, subagents, childModelRuns: runs as never })
+    const result = await run(tool, { ...BASE_ARGS, taskId }, { agent: { id: 'parent-9', session: 'other' } }) as { model?: { provider: string; model: string } }
+    expect(Object.keys(request ?? {}).sort()).toEqual(['agentOptions', 'maxDepth', 'parent', 'prompt'])
+    expect(request?.agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    expect(Object.keys(request!.agentOptions!)).toEqual(['provider', 'model'])
+    expect(request?.prompt[0]!.text).not.toContain('dsh-router:models')
+    expect(request?.prompt[0]!.text).not.toContain('deepseek')
+    expect(request?.prompt[0]!.text).toContain('只写职责')
+    expect(result.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    expect(runs.get('child-model')?.parentSessionId).toBe('parent-9')
+    expect(runs.get('child-model')?.sequence).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+
+    const failing = {
+      ...records,
+      async create(root: string, input: Parameters<typeof records.create>[1]) {
+        if (input.kind === 'assignment') throw new Error('disk full')
+        return records.create(root, input)
+      },
+    }
+    const tool2 = buildDispatchTool({ records: failing, roles, subagents, childModelRuns: runs as never })
+    const errored = await run(tool2, { ...BASE_ARGS, taskId, task: '另一件' }, { agent: { id: 'parent-9' } }) as { recordError?: string; model?: { provider: string; model: string } }
+    expect(errored.recordError).toContain('disk full')
+    expect(errored.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+  })
+
+  it('临时指定在角色候选前面并按 provider+NUL+model 去重；坏形状在建任务和读角色之前拒绝', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '职责',
+      models: [
+        { provider: 'openai', model: 'gpt-4.1' },
+        { provider: 'deepseek', model: 'deepseek-chat' },
+      ],
+    })
+    let reads = 0
+    const wrapped = {
+      ...roles,
+      async read(name: string) {
+        reads += 1
+        return roles.read(name)
+      },
+    }
+    const runs = new Map<string, { sequence: Array<{ provider: string; model: string }> }>()
+    let agentOptions: { provider: string; model: string } | undefined
+    const tool = buildDispatchTool({
+      records,
+      roles: wrapped,
+      childModelRuns: runs as never,
+      subagents: {
+        async startActivation(input) {
+          agentOptions = (input.request as { agentOptions?: { provider: string; model: string } }).agentOptions
+          return { childId: 'child-override' }
+        },
+      },
+    })
+    await expect(run(tool, { ...BASE_ARGS, provider: 'only-provider' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, model: 'only-model' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, provider: '  ', model: 'gpt' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect(reads).toBe(0)
+    expect(await records.list('root-1', { kind: 'task' })).toEqual([])
+    expect(runs.size).toBe(0)
+
+    await run(tool, { ...BASE_ARGS, provider: ' deepseek ', model: ' deepseek-chat ' })
+    expect(agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    expect(runs.get('child-override')?.sequence).toEqual([
+      { provider: 'deepseek', model: 'deepseek-chat' },
+      { provider: 'openai', model: 'gpt-4.1' },
+    ])
+  })
+
+  it('continue 带 provider 或 model 时 INVALID_INPUT，不投递也不改任务正文', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '执行者', description: '职责' })
+    const taskId = await makeTask(records)
+    const before = (await records.read('root-1', taskId, taskId)).record.body
+    await records.create('root-1', {
+      kind: 'assignment',
+      taskId,
+      title: '已有分工',
+      body: '分工',
+      sessions: [{ sessionId: 'child-keep', label: '执行者' }],
+    })
+    const startActivation = vi.fn()
+    const sendMessage = vi.fn()
+    const tool = buildDispatchTool({ records, roles, subagents: { startActivation, sendMessage } })
+    await expect(run(tool, { ...BASE_ARGS, mode: 'continue', expectedChildId: 'child-keep', provider: 'deepseek', task: '不要写入' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, mode: 'continue', expectedChildId: 'child-keep', model: 'gpt', task: '不要写入' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    expect(startActivation).not.toHaveBeenCalled()
+    expect(sendMessage).not.toHaveBeenCalled()
+    expect((await records.read('root-1', taskId, taskId)).record.body).toBe(before)
+  })
+
+  it('startActivation 抛错不登记游标，也不改试剩余候选', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '职责',
+      models: [{ provider: 'p', model: 'm1' }, { provider: 'p', model: 'm2' }],
+    })
+    const runs = new Map<string, unknown>()
+    let calls = 0
+    const tool = buildDispatchTool({
+      records,
+      roles,
+      childModelRuns: runs as never,
+      subagents: {
+        async startActivation() {
+          calls += 1
+          throw new Error('activation limit')
+        },
+      },
+    })
+    await expect(run(tool, BASE_ARGS)).rejects.toThrow(/activation limit/)
+    expect(calls).toBe(1)
+    expect(runs.size).toBe(0)
+  })
+
+  it('调用方没有 id 时游标里的 parentSessionId 是空串', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({ name: '执行者', description: '职责', models: [{ provider: 'p', model: 'm' }] })
+    const taskId = await makeTask(records)
+    const runs = new Map<string, { parentSessionId: string }>()
+    const tool = buildDispatchTool({
+      records,
+      roles,
+      childModelRuns: runs as never,
+      subagents: { async startActivation() { return { childId: 'child-noid' } } },
+    })
+    await run(tool, { ...BASE_ARGS, taskId })
+    expect(runs.get('child-noid')?.parentSessionId).toBe('')
+  })
+})

@@ -1,9 +1,9 @@
 /**
  * 轻量角色模板存储 RoleStore（md 按名键版）。
  *
- * 一个角色一个 md 文件：文件名 = 角色名、正文 = 职责说明。用户与模型通过同一
- * save 能力按名 upsert；也可以用任何编辑器直接改 md 文件（文件是唯一事实源，
- * 读取方按缓存节奏看到）。不注册 preset、不含运行时插件树、无业务授权语义。
+ * 一个角色一个 md 文件：文件名 = 角色名、围栏前是职责说明，可选文末候选模型围栏。
+ * 用户与模型通过同一 save 能力按名 upsert；也可以用任何编辑器直接改 md 文件
+ * （文件是唯一事实源，读取方按缓存节奏看到）。不注册 preset、不含运行时插件树、无业务授权语义。
  *
  * 名字即文件名：保存前校验（非空、无路径分隔符、不藏头、长度受限），中文合法；
  * 目录链与符号链接守卫沿用 PathGuard。旧版 <uuid>.json 角色经 migrateLegacyJson
@@ -21,6 +21,7 @@ import {
   type RoleTemplate,
 } from './types.ts'
 import { PathGuard } from './path-guard.ts'
+import { parseRoleDocument, serializeRoleFile, validateRoleModels } from './role-models.ts'
 
 const ROLE_EXT = '.md'
 const LEGACY_EXT = '.json'
@@ -111,7 +112,9 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       if (isEnoent(error)) throw new CollaborationError('NOT_FOUND', `角色模板不存在: ${path}`)
       throw new CollaborationError('IO_ERROR', `角色模板读取失败: ${path}`, { cause: error })
     }
-    return { name, description: text }
+    const parsed = parseRoleDocument(name, text)
+    if (parsed.models !== undefined) return { name, description: parsed.description, models: parsed.models }
+    return { name, description: parsed.description }
   }
 
   return {
@@ -141,16 +144,33 @@ export function createRoleStore(dataDir: string, deps: RoleStoreDeps = {}): Role
       return readRoleFile(validated)
     },
 
-    async save(input: { name: string; description: string }): Promise<RoleTemplate> {
+    async save(input: { name: string; description: string; models?: unknown }): Promise<RoleTemplate> {
       const name = validateRoleName(input.name)
       if (typeof input.description !== 'string') {
         throw new CollaborationError('INVALID_INPUT', 'description 必须是字符串')
       }
+      // 形状不合法在入队前拒绝，避免坏保存排到写队列里才失败。
+      const explicit = input.models === undefined ? undefined : validateRoleModels(name, input.models)
       return enqueue(async () => {
+        let models = explicit
+        if (models === undefined) {
+          try {
+            const existing = await readRoleFile(name)
+            models = existing.models ?? []
+          } catch (error) {
+            if (!(error instanceof CollaborationError) || error.code !== 'NOT_FOUND') throw error
+            models = []
+          }
+        }
         const path = rolePath(name)
         await guard.assertDirChain(path)
-        await atomicWrite(fs, path, input.description)
-        return { name, description: input.description }
+        const content = serializeRoleFile(input.description, models)
+        await atomicWrite(fs, path, content)
+        const parsed = parseRoleDocument(name, content)
+        if (parsed.models !== undefined && parsed.models.length > 0) {
+          return { name, description: parsed.description, models: parsed.models }
+        }
+        return { name, description: parsed.description }
       })
     },
 
@@ -228,16 +248,18 @@ import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES, RETIRED_PRESET_R
  * - 现有内容等于最新预置 → 跳过；
  * - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
  * - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
+ * - 文件带候选围栏（models 已出现，含空围栏）视为用户改过：不升级、不删除。
  *
- * 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：磁盘内容等于它任一版历史
- * 文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
+ * 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：没有围栏且磁盘内容等于它
+ * 任一版历史文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
+ * 相等比较只对没有围栏的文件用 description（此时它就是文件字节）。
  */
 export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save' | 'remove'>): Promise<void> {
-  const existing = new Map((await store.list()).map((role) => [role.name, role.description]))
+  const existing = new Map((await store.list()).map((role) => [role.name, role]))
   for (const [name, texts] of Object.entries(RETIRED_PRESET_ROLES)) {
     const current = existing.get(name)
-    if (current === undefined) continue
-    if (texts.includes(current)) {
+    if (current === undefined || current.models !== undefined) continue
+    if (texts.includes(current.description)) {
       await store.remove(name)
       existing.delete(name)
     }
@@ -248,9 +270,10 @@ export async function seedPresetRoles(store: Pick<RoleStore, 'list' | 'save' | '
       await store.save({ name: preset.name, description: preset.description })
       continue
     }
-    if (current === preset.description) continue
+    if (current.models !== undefined) continue
+    if (current.description === preset.description) continue
     const history = HISTORICAL_PRESET_DESCRIPTIONS[preset.name]
-    if (history !== undefined && history.includes(current)) {
+    if (history !== undefined && history.includes(current.description)) {
       await store.save({ name: preset.name, description: preset.description })
     }
   }

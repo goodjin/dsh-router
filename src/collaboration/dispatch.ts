@@ -19,8 +19,10 @@
  * 创建成功但登记失败 → 返回 childId + recordError（子会话已存在，不能丢编号）。
  */
 
-import { CollaborationError, type RecordStore, type RoleStore } from './types.ts'
+import { CollaborationError, type RecordStore, type RoleModelCandidate, type RoleStore } from './types.ts'
 import type { ToolDefinition } from './tools.ts'
+import type { ChildModelRun } from './model-switch.ts'
+import { resolveDispatchSequence } from './role-models.ts'
 
 /** 宿主 subagents 服务的最小面（真实服务由 dsh-subagent 提供，base 全局挂载）。 */
 export interface SubagentsFace {
@@ -32,6 +34,7 @@ export interface SubagentsFace {
       prompt: Array<{ type: 'text'; text: string }>
       parent: unknown
       maxDepth?: number
+      agentOptions?: { provider: string; model: string }
     }
     signal?: unknown
     delivery: 'parent'
@@ -45,6 +48,8 @@ export interface DispatchDeps {
   subagents?: SubagentsFace
   /** 写记录成功后的回调（刷新活跃任务视图缓存）；缺席时不调。失败只告警，不影响派发结果。 */
   afterWrite?: (rootSessionId: string) => Promise<void>
+  /** 本次 apply 的子会话候选游标。缺席时仍按序列传 agentOptions，只是不登记切换。 */
+  childModelRuns?: Map<string, ChildModelRun>
 }
 
 /** 工具执行上下文的最小面（宿主 execute(args, exec) 的 exec）。 */
@@ -99,6 +104,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       'parentTaskId 可选，新任务作为它的子任务，通常传主任务）。' +
       'spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；' +
       'continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。' +
+      'spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色）；continue 不能带。' +
       'rootSessionId 必须显式传入。',
     parameters: {
       type: 'object',
@@ -116,6 +122,8 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
         taskTitle: { type: 'string', description: '省略 taskId 时必填：自动新建的任务标题' },
         parentTaskId: { type: 'string', description: '省略 taskId 时可选：新任务挂在这个父任务下（通常传主任务）' },
         expectedChildId: { type: 'string', description: '仅 continue 必填：从归属任务的分工记录（assignment.sessions）取得的确切子会话 ID' },
+        provider: { type: 'string', description: '仅 spawn/fork 可选：这一次的首选提供方，必须与 model 成对，不写回角色' },
+        model: { type: 'string', description: '仅 spawn/fork 可选：这一次的首选模型，必须与 provider 成对，不写回角色' },
       },
       required: ['rootSessionId', 'role', 'task', 'mode'],
     },
@@ -134,6 +142,16 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           },
           messageId: { type: 'string', description: 'continue：追加要求已投递到既有子会话的宿主回执' },
           recordError: { type: 'string' },
+          model: {
+            type: 'object',
+            additionalProperties: false,
+            description: '实际传给子会话的第一个候选；没配候选时不出现',
+            properties: {
+              provider: { type: 'string' },
+              model: { type: 'string' },
+            },
+            required: ['provider', 'model'],
+          },
         },
         required: ['childId'],
       },
@@ -154,6 +172,8 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       if (mode !== 'continue' && a.expectedChildId !== undefined) {
         throw new CollaborationError('INVALID_INPUT', 'expectedChildId 只能配合 continue 使用，新建不需要')
       }
+      // 临时指定在读角色、建任务、投递之前拒绝坏形状。continue 上出现任一字段都不改任务正文。
+      const override = takeDispatchOverride(a, mode)
       if (deps.subagents === undefined) {
         throw new CollaborationError('IO_ERROR', 'subagents 服务不可用：无法创建子会话（检查宿主装载）')
       }
@@ -210,6 +230,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       // ── spawn / fork：新建子会话 ────────────────────────────────────────────
       // 先读角色（无副作用）：角色不存在就什么都不写，不会留下自动建的孤儿任务。
       const role = await deps.roles.read(roleName)
+      const sequence = resolveDispatchSequence(role.models, override)
       // 解析归属任务：给了 taskId 用它；省略则自动新建（taskTitle 必填，parentTaskId 可选）。
       let taskId: string
       let createdTask = false
@@ -230,15 +251,38 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
         createdTask = true
       }
       const instruction = composeDispatchInstruction({ role, task, taskId, rootSessionId })
-      // 创建子会话；失败原样上抛（不落记录）。signal 必传：宿主 startActivation 会
-      // spec.signal.throwIfAborted()，缺席即 TypeError（见 dispatchLifetime 说明）。
+      // 创建子会话；失败原样上抛（不落记录，也不替剩下的候选再循环创建）。
+      // signal 必传：宿主 startActivation 会 spec.signal.throwIfAborted()，缺席即 TypeError。
+      // 序列为空时 request 不出现 agentOptions 键（D6，保持今天的调用形状）。
+      const request: {
+        prompt: Array<{ type: 'text'; text: string }>
+        parent: unknown
+        maxDepth: number
+        agentOptions?: { provider: string; model: string }
+      } = { prompt: [{ type: 'text', text: instruction }], parent, maxDepth: 2 }
+      const first = sequence[0]
+      if (first !== undefined) request.agentOptions = { provider: first.provider, model: first.model }
       const { childId } = await deps.subagents.startActivation({
         provider: mode,
         label: `${role.name}·${taskId}`,
-        request: { prompt: [{ type: 'text', text: instruction }], parent, maxDepth: 2 },
+        request,
         signal,
         delivery: 'parent',
       })
+      if (first !== undefined && deps.childModelRuns !== undefined) {
+        const parentSessionId = agentId(parent)
+        deps.childModelRuns.set(childId, {
+          sequence,
+          index: 0,
+          phase: 'armed',
+          rootSessionId,
+          taskId,
+          roleName: role.name,
+          parentSessionId,
+          failures: [],
+        })
+      }
+      const sentModel = first === undefined ? {} : { model: { provider: first.provider, model: first.model } }
       // 登记分工记录；失败不丢 childId（返回 recordError，让模型补记）。
       try {
         const saved = await deps.records.create(rootSessionId, {
@@ -250,7 +294,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           sessions: [{ sessionId: childId, label: role.name }],
         })
         await afterWrite()
-        return { childId, taskId, createdTask, record: { taskId: saved.record.taskId, recordId: saved.record.id, path: saved.path } }
+        return { childId, taskId, createdTask, record: { taskId: saved.record.taskId, recordId: saved.record.id, path: saved.path }, ...sentModel }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
         return {
@@ -258,6 +302,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           taskId,
           createdTask,
           recordError: `子会话已创建（${childId}），但分工记录登记失败：${message}——请用 router_record_create 补记并关联该子会话`,
+          ...sentModel,
         }
       }
     },
@@ -269,4 +314,34 @@ function nonEmpty(value: unknown, what: string): string {
     throw new CollaborationError('INVALID_INPUT', `${what} 必须是非空字符串`)
   }
   return value
+}
+
+function agentId(agent: unknown): string {
+  if (typeof agent === 'object' && agent !== null && typeof (agent as { id?: unknown }).id === 'string') {
+    return (agent as { id: string }).id
+  }
+  return ''
+}
+
+/** spawn/fork 的一次性首选。两个都缺才是没有；只出现一个或 trim 后为空则拒绝。continue 上任一字段都拒绝。 */
+function takeDispatchOverride(args: Record<string, unknown>, mode: string): RoleModelCandidate | undefined {
+  const hasProvider = args.provider !== undefined
+  const hasModel = args.model !== undefined
+  if (mode === 'continue') {
+    if (hasProvider || hasModel) {
+      throw new CollaborationError('INVALID_INPUT', 'continue 不能指定 provider 或 model')
+    }
+    return undefined
+  }
+  if (!hasProvider && !hasModel) return undefined
+  if (!hasProvider || !hasModel) {
+    throw new CollaborationError('INVALID_INPUT', 'provider 与 model 必须成对出现')
+  }
+  if (typeof args.provider !== 'string' || args.provider.trim() === '') {
+    throw new CollaborationError('INVALID_INPUT', 'provider 必须是 trim 后的非空字符串')
+  }
+  if (typeof args.model !== 'string' || args.model.trim() === '') {
+    throw new CollaborationError('INVALID_INPUT', 'model 必须是 trim 后的非空字符串')
+  }
+  return { provider: args.provider.trim(), model: args.model.trim() }
 }

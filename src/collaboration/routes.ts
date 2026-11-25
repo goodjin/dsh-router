@@ -5,7 +5,8 @@
  *   GET  /records?rootSessionId=&taskId=&kind=  → WorkRecord[]（复用 RecordStore.list）
  *   GET  /record?rootSessionId=&taskId=&recordId= → SavedRecord（复用 RecordStore.read）
  *   GET  /roles                                 → RoleTemplate[]（复用 RoleStore.list）
- *   POST /roles {name,description}              → RoleTemplate（按名 upsert，复用 RoleStore.save）
+ *   POST /roles {name,description,models?}      → RoleTemplate（按名 upsert，复用 RoleStore.save）
+ *   GET  /models                                → 已注册模型清单（llm 缺失时 200 且 unavailable）
  *
  * 第一版工作台只读任务资料：记录修改由模型工具负责，宿主不挂任务写/控制路由
  * （旧 /router/tasks/control 等一概不注册）。本文件只折叠 HTTP，逻辑全部在注入的
@@ -28,6 +29,13 @@ import { CollaborationError, type RecordQuery, type RecordStore, type RoleStore 
 export const COLLABORATION_RECORDS_PATH = '/router/collaboration/records'
 export const COLLABORATION_RECORD_PATH = '/router/collaboration/record'
 export const COLLABORATION_ROLES_PATH = '/router/collaboration/roles'
+export const COLLABORATION_MODELS_PATH = '/router/collaboration/models'
+
+/** 页面清单用的 llm 最小面。不要放进 webServer 那组必需 inject。 */
+export interface CollaborationLlm {
+  listProviders(): Promise<ReadonlyArray<{ id: string; name: string }>> | ReadonlyArray<{ id: string; name: string }>
+  listModels(provider: string): Promise<ReadonlyArray<{ id: string; name: string }>> | ReadonlyArray<{ id: string; name: string }>
+}
 
 /** POST 体上限：1MiB（1024×1024）简单 UI 传输限（非源存储约束）；按累计字节计，非 string 长度。 */
 const BODY_LIMIT = 1024 * 1024
@@ -62,6 +70,8 @@ export interface CollaborationRouteContext {
 export interface CollaborationRouteDeps {
   records: RecordStore
   roles: RoleStore
+  /** 请求时再读，好让 llm 的机会式 inject 晚于路由注册也能用。缺席则清单 unavailable。 */
+  llm?: () => CollaborationLlm | undefined
 }
 
 /** CollaborationError.code → HTTP 状态。 */
@@ -235,13 +245,55 @@ export function registerCollaborationRoutes(
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new CollaborationError('INVALID_INPUT', '请求体须为 JSON 对象')
     }
-    const body = parsed as { name?: unknown; description?: unknown }
-    const input: { name: string; description: string } = {
+    const body = parsed as { name?: unknown; description?: unknown; models?: unknown }
+    const input: { name: string; description: string; models?: unknown } = {
       name: typeof body.name === 'string' ? body.name : '',
       description: typeof body.description === 'string' ? body.description : '',
     }
+    if (Object.prototype.hasOwnProperty.call(body, 'models')) input.models = body.models
     // name 非空与文件名安全由 RoleStore.save 校验（INVALID_INPUT）。
     const saved = await deps.roles.save(input)
     return { status: 200, body: JSON.stringify(saved) }
+  })
+
+  handle(COLLABORATION_MODELS_PATH, ['GET'], async () => {
+    const llm = deps.llm?.()
+    if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+      return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }
+    }
+    try {
+      const listed = await llm.listProviders()
+      if (!Array.isArray(listed)) {
+        return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }
+      }
+      const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string }>; error?: string }> = []
+      for (const provider of listed) {
+        if (typeof provider?.id !== 'string') continue
+        const name = typeof provider.name === 'string' ? provider.name : provider.id
+        try {
+          const models = await llm.listModels(provider.id)
+          if (!Array.isArray(models)) throw new Error('listModels 返回的不是数组')
+          providers.push({
+            id: provider.id,
+            name,
+            models: models.flatMap((item) => (
+              item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.name === 'string'
+                ? [{ id: item.id, name: item.name }]
+                : []
+            )),
+          })
+        } catch (error) {
+          providers.push({
+            id: provider.id,
+            name,
+            models: [],
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      }
+      return { status: 200, body: JSON.stringify({ unavailable: false, providers }) }
+    } catch {
+      return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }
+    }
   })
 }

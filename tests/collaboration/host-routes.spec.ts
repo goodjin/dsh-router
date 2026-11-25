@@ -19,6 +19,7 @@ import {
   COLLABORATION_RECORDS_PATH,
   COLLABORATION_RECORD_PATH,
   COLLABORATION_ROLES_PATH,
+  COLLABORATION_MODELS_PATH,
 } from '../../src/collaboration/routes.ts'
 
 /** 刷新 entry fire-and-forget 的 ctx.inject fiber（cordis fiber reload 是异步的）。 */
@@ -27,7 +28,7 @@ function flush(): Promise<void> {
 }
 
 describe('entry optional injection — real cordis Context', () => {
-  it('webServer+connection 都在 → 挂三条协作路由，routerCollaboration 仍 provide', async () => {
+  it('webServer+connection 都在 → 挂四条协作路由，routerCollaboration 仍 provide', async () => {
     const ctx = new Context()
     const registered: string[] = []
     ctx.provide('webServer', {
@@ -37,7 +38,7 @@ describe('entry optional injection — real cordis Context', () => {
     expect(() => entryApply(ctx, { dataDir: '/tmp/router-cordis-routes' })).not.toThrow()
     await flush()
     expect(registered.slice().sort()).toEqual(
-      [COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH].slice().sort(),
+      [COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH, COLLABORATION_MODELS_PATH].slice().sort(),
     )
     // 根服务单实例仍提供（记录/工具经作用域链取用）。
     const face = ctx.get('routerCollaboration') as { records: { list: unknown }; roles: { list: unknown }; dataDir: string } | undefined
