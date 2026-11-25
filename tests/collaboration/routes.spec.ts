@@ -21,7 +21,7 @@ import { createRecordStore } from '../../src/collaboration/records.ts'
 import { createRoleStore } from '../../src/collaboration/roles.ts'
 import { CollaborationError, type RecordStore, type RoleStore } from '../../src/collaboration/types.ts'
 import { registerCollaborationRoutes, type CollaborationRouteContext } from '../../src/collaboration/routes.ts'
-import { COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH } from '../../src/collaboration/routes.ts'
+import { COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH, COLLABORATION_MODELS_PATH, type CollaborationLlm } from '../../src/collaboration/routes.ts'
 
 const scratch: string[] = []
 afterAll(async () => {
@@ -86,6 +86,7 @@ interface RegisteredRoute {
 function harness(opts: {
   records: RecordStore
   roles: RoleStore
+  llm?: () => CollaborationLlm | undefined
   admit?: (request: unknown) => { rejection: number } | { peer: unknown }
 }): {
   ctx: CollaborationRouteContext
@@ -105,7 +106,7 @@ function harness(opts: {
       admit: (request) => opts.admit?.(request) ?? { peer: {} },
     },
   }
-  registerCollaborationRoutes(ctx, { records: opts.records, roles: opts.roles })
+  registerCollaborationRoutes(ctx, { records: opts.records, roles: opts.roles, llm: opts.llm })
   const invoke = async (method: string, pathAndQuery: string, body?: string | Buffer[]) => {
     const [path, query] = pathAndQuery.split('?')
     const route = routes.find((r) => r.path === path)
@@ -122,11 +123,11 @@ function harness(opts: {
 }
 
 describe('routes_reuse_store — UI 模板保存与模型工具共享同一 RoleStore，控制路由不注册', () => {
-  it('注册恰好三条协作路由（records/record/roles），旧控制路由未注册', async () => {
+  it('注册恰好四条协作路由（records/record/roles/models），旧控制路由未注册', async () => {
     const dataDir = await freshDir()
     const { routes } = harness({ records: createRecordStore(dataDir), roles: createRoleStore(dataDir) })
     const paths = routes.map((r) => r.path).sort()
-    expect(paths).toEqual([COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH].sort())
+    expect(paths).toEqual([COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH, COLLABORATION_MODELS_PATH].sort())
     // 旧事务协议控制路由一概不挂（首版工作台只读，记录修改由工具负责）。
     for (const legacy of ['/router/tasks/control', '/router/breaker/unfreeze', '/router/emergency-pause', '/router/state']) {
       expect(paths).not.toContain(legacy)
@@ -388,6 +389,90 @@ describe('POST body transport — 跨块多字节解码 + 1MiB 累计字节上�
     expect(res.status).toBe(413)
     expect((JSON.parse(res.body) as { error: { code: string } }).error.code).toBe('BODY_TOO_LARGE')
     expect(await roles.list()).toHaveLength(0)
+  })
+})
+
+describe('GET /router/collaboration/models', () => {
+  it('没有 llm 时 200 且 unavailable', async () => {
+    const dataDir = await freshDir()
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles: createRoleStore(dataDir) })
+    const res = await invoke('GET', COLLABORATION_MODELS_PATH)
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ unavailable: true, providers: [] })
+  })
+
+  it('listProviders 抛错时仍是 200 unavailable，不让角色路由整组失败', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({
+      records: createRecordStore(dataDir),
+      roles,
+      llm: () => ({
+        listProviders: async () => { throw new Error('llm down') },
+        listModels: async () => [],
+      }),
+    })
+    const res = await invoke('GET', COLLABORATION_MODELS_PATH)
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ unavailable: true, providers: [] })
+    const saved = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '职责' }))
+    expect(saved.status).toBe(200)
+  })
+
+  it('单个 listModels 失败保留该 provider 和其他 provider', async () => {
+    const dataDir = await freshDir()
+    const { invoke } = harness({
+      records: createRecordStore(dataDir),
+      roles: createRoleStore(dataDir),
+      llm: () => ({
+        listProviders: async () => [{ id: 'broken', name: 'Broken' }, { id: 'ok', name: 'Ok' }],
+        listModels: (async (provider: string) => {
+          if (provider === 'broken') throw new Error('list failed')
+          return [{ id: 'gpt', name: 'GPT' }, { id: 1, name: '丢弃' }]
+        }) as CollaborationLlm['listModels'],
+      }),
+    })
+    const res = await invoke('GET', COLLABORATION_MODELS_PATH)
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({
+      unavailable: false,
+      providers: [
+        { id: 'broken', name: 'Broken', models: [], error: 'list failed' },
+        { id: 'ok', name: 'Ok', models: [{ id: 'gpt', name: 'GPT' }] },
+      ],
+    })
+  })
+})
+
+describe('POST /roles models', () => {
+  it('省略 models 保留旧候选；[] 清空；坏形状 400 且不改文件', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    const created = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({
+      name: '执行者',
+      description: '旧',
+      models: [{ provider: 'not-registered', model: 'no-such' }],
+    }))
+    expect(created.status).toBe(200)
+    const kept = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '新职责' }))
+    expect(kept.status).toBe(200)
+    expect(JSON.parse(kept.body).models).toEqual([{ provider: 'not-registered', model: 'no-such' }])
+    const path = (await roles.read('执行者')).description
+    expect(path.startsWith('新职责')).toBe(true)
+    const before = await roles.read('执行者')
+    const bad = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({
+      name: '执行者',
+      description: '不该写上',
+      models: [{ provider: 'p' }],
+    }))
+    expect(bad.status).toBe(400)
+    expect(JSON.parse(bad.body).error.code).toBe('INVALID_INPUT')
+    expect(await roles.read('执行者')).toEqual(before)
+    const cleared = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '清空', models: [] }))
+    expect(cleared.status).toBe(200)
+    expect(JSON.parse(cleared.body).models).toBeUndefined()
+    expect((await roles.read('执行者')).description).toBe('清空')
   })
 })
 

@@ -76,6 +76,7 @@ function scriptedApi(overrides: {
     readRecord: async () => overrides.record ?? { record: {} as WorkRecord, path: '' },
     listRoles: async () => overrides.roles ?? [],
     saveRole: async (input) => ({ id: '55555555-5555-4555-8555-555555555555', name: input.name, description: input.description, createdAt: 1, updatedAt: 1 }),
+    listModelCatalog: async () => ({ unavailable: true, providers: [] }),
   }
   return { api, setRecords: (r) => { records = r } }
 }
@@ -233,6 +234,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => roles,
       saveRole: async (input) => { roles = [saved]; return saved },
+      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
     }
     const store = startCollaborationStore({ api })
     const props = baseProps(store)
@@ -278,6 +280,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => roles,
       saveRole: async (input) => { roles = [{ name: input.name, description: input.description }]; return { name: input.name, description: input.description } },
+      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
     }
     const store = startCollaborationStore({ api })
     const props = baseProps(store)
@@ -333,6 +336,136 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('草稿角色')
     await act(async () => { root.unmount() })
   })
+
+  it('左侧预览只用职责；候选可手工填写，保存请求体带 models', async () => {
+    let roles: RoleTemplate[] = [{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'prov-secret', model: 'hidden-model' }] }]
+    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
+    const api: CollaborationApi = {
+      listRecords: async () => [],
+      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
+      listRoles: async () => roles,
+      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
+      saveRole: async (input) => {
+        posted = input
+        roles = [{ name: input.name, description: input.description, models: input.models }]
+        return roles[0]!
+      },
+    }
+    const store = startCollaborationStore({ api })
+    const props = baseProps(store)
+    const { root, container } = render(props)
+    await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    const item = container.querySelector('[data-router-collab-role-item="测试工程师"]')!
+    expect(item.textContent).toContain('写测试用例并报告')
+    expect(item.textContent).not.toContain('prov-secret')
+    click(item)
+    await flush()
+    expect((container.querySelector('[data-router-collab-model-provider]') as HTMLInputElement).value).toBe('prov-secret')
+    const setValue = (el: HTMLInputElement | HTMLTextAreaElement, value: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, 'value')!.set!
+      setter.call(el, value)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    click(container.querySelector('[data-router-collab-model-add]')!)
+    await flush()
+    const providers = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-provider]')
+    const modelInputs = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-model]')
+    await act(async () => {
+      setValue(providers[1]!, 'manual-provider')
+      setValue(modelInputs[1]!, 'manual-model')
+    })
+    click(container.querySelector('[data-router-collab-role-save]')!)
+    await flush()
+    await flush()
+    expect(posted?.models).toEqual([
+      { provider: 'prov-secret', model: 'hidden-model' },
+      { provider: 'manual-provider', model: 'manual-model' },
+    ])
+    await act(async () => { root.unmount() })
+  })
+
+  it('从清单添加一行；400 时 saveError 可见且草稿还在', async () => {
+    let fail = false
+    const api: CollaborationApi = {
+      listRecords: async () => [],
+      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
+      listRoles: async () => [],
+      listModelCatalog: async () => ({
+        unavailable: false,
+        providers: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }] }],
+      }),
+      saveRole: async (input) => {
+        if (fail) throw new Error('候选无效')
+        return { name: input.name, description: input.description, models: input.models }
+      },
+    }
+    const store = startCollaborationStore({ api })
+    const props = baseProps(store)
+    const { root, container } = render(props)
+    await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-role-new]')!)
+    await flush()
+    const setValue = (el: HTMLInputElement | HTMLSelectElement, value: string): void => {
+      const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype
+      Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, value)
+      el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }))
+    }
+    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
+    await act(async () => { setValue(nameInput, '执行者') })
+    const providerSelect = container.querySelector<HTMLSelectElement>('[data-router-collab-catalog-provider]')!
+    const modelSelect = container.querySelector<HTMLSelectElement>('[data-router-collab-catalog-model]')!
+    await act(async () => { setValue(providerSelect, 'deepseek') })
+    await act(async () => { setValue(modelSelect, 'deepseek-chat') })
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    expect((container.querySelector('[data-router-collab-model-provider]') as HTMLInputElement).value).toBe('deepseek')
+    expect((container.querySelector('[data-router-collab-model-model]') as HTMLInputElement).value).toBe('deepseek-chat')
+    fail = true
+    click(container.querySelector('[data-router-collab-role-save]')!)
+    await flush()
+    expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('候选无效')
+    expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('执行者')
+    expect((container.querySelector('[data-router-collab-model-model]') as HTMLInputElement).value).toBe('deepseek-chat')
+    await act(async () => { root.unmount() })
+  })
+
+  it('rolesError 时不保存，避免把加载失败当成空候选', async () => {
+    let saves = 0
+    const api: CollaborationApi = {
+      listRecords: async () => [],
+      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
+      listRoles: async () => { throw new Error('角色列表坏了') },
+      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
+      saveRole: async (input) => { saves += 1; return { name: input.name, description: input.description } },
+    }
+    const store = startCollaborationStore({ api })
+    const props = baseProps(store)
+    const { root, container } = render(props)
+    await act(async () => { root.render(createElement(CollaborationView, props)) })
+    await flush()
+    click(container.querySelector('[data-router-collab-tab="roles"]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-role-new]')!)
+    await flush()
+    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(nameInput, '执行者')
+      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-save]')!
+    expect(save.disabled).toBe(true)
+    click(save)
+    await flush()
+    expect(saves).toBe(0)
+    expect(nameInput.value).toBe('执行者')
+    await act(async () => { root.unmount() })
+  })
 })
 
 describe('staleasyncresultsignored — 切换根后旧响应不落地', () => {
@@ -343,6 +476,7 @@ describe('staleasyncresultsignored — 切换根后旧响应不落地', () => {
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => [],
       saveRole: async (input) => ({ name: input.name, description: input.description }),
+      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
     }
     const store = startCollaborationStore({ api })
     store.setCurrentSession('root-A')

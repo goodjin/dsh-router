@@ -4,7 +4,8 @@
  * 新代码全部集中于 src/collaboration/；本模块只定义数据类型、存储接口与
  * CollaborationError，零 node 依赖、零宿主（DSH）依赖、零旧 TaskLedger/RouterCore 依赖。
  * 数据布局：collaboration/roots/<sha256(rootSessionId)>/tasks/<taskId>/<recordId>.json，
- * 角色位于 collaboration/roles/<roleId>.json。rootSessionId 哈希只用于文件名，不产生权限。
+ * 角色位于 collaboration/roles/<角色名>.md（正文是职责；可选文末候选围栏）。
+ * rootSessionId 哈希只用于文件名，不产生权限。
  */
 
 /** 记录种类：任务说明 / 分工记录 / 工作报告 / 汇总报告。 */
@@ -61,10 +62,20 @@ export interface SavedRecord {
   path: string
 }
 
-/** 角色模板：一个角色一个 md 文件——文件名 = 角色名、正文 = 职责说明。 */
+/** 角色的一个有序候选模型。保存值是 trim 后的非空字符串。 */
+export interface RoleModelCandidate {
+  provider: string
+  model: string
+}
+
+/**
+ * 角色模板：一个角色一个 md 文件。文件名 = 角色名。
+ * description 只是围栏前的职责切片；models 缺省表示文件里没有合法围栏。不持久化空数组。
+ */
 export interface RoleTemplate {
   name: string
   description: string
+  models?: RoleModelCandidate[]
 }
 
 /** 工作记录存储：模型主导读写，文件是唯一事实源，无全局索引/Markdown 副本。 */
@@ -79,7 +90,11 @@ export interface RecordStore {
 export interface RoleStore {
   list(): Promise<RoleTemplate[]>
   read(name: string): Promise<RoleTemplate>
-  save(input: { name: string; description: string }): Promise<RoleTemplate>
+  /**
+   * 按名 upsert。models 缺省保留盘上已有候选；models 为数组则整次校验后写入
+   * （空数组清空围栏）。形状不合法整次拒绝且不写文件。
+   */
+  save(input: { name: string; description: string; models?: unknown }): Promise<RoleTemplate>
   /**
    * 按名删除角色模板文件；不存在时静默返回 false。只给「退役预置角色」用：
    * 内容仍等于某版预置文本（= 用户没改过）才删，用户改过的永不动。

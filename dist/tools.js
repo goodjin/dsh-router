@@ -17,6 +17,26 @@ var CollaborationError = class extends Error {
 };
 
 //#endregion
+//#region src/collaboration/role-models.ts
+/** 一次派发的候选：临时指定在前，再接角色候选，按 provider+NUL+model 去重（先出现的保留）。 */
+function resolveDispatchSequence(models, override) {
+	const sequence = [];
+	const seen = /* @__PURE__ */ new Set();
+	const push = (candidate) => {
+		const key = `${candidate.provider}\0${candidate.model}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		sequence.push({
+			provider: candidate.provider,
+			model: candidate.model
+		});
+	};
+	if (override !== void 0) push(override);
+	if (models !== void 0) for (const candidate of models) push(candidate);
+	return sequence;
+}
+
+//#endregion
 //#region src/collaboration/dispatch.ts
 /** 派发方式：spawn 轻装自足 / fork 带父级已完成轮次 / continue 向既有子会话追加。 */
 const DISPATCH_MODES = [
@@ -52,7 +72,7 @@ function composeDispatchInstruction(input) {
 function buildDispatchTool(deps) {
 	return {
 		name: "router_dispatch",
-		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。rootSessionId 必须显式传入。",
+		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色）；continue 不能带。rootSessionId 必须显式传入。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -89,6 +109,14 @@ function buildDispatchTool(deps) {
 				expectedChildId: {
 					type: "string",
 					description: "仅 continue 必填：从归属任务的分工记录（assignment.sessions）取得的确切子会话 ID"
+				},
+				provider: {
+					type: "string",
+					description: "仅 spawn/fork 可选：这一次的首选提供方，必须与 model 成对，不写回角色"
+				},
+				model: {
+					type: "string",
+					description: "仅 spawn/fork 可选：这一次的首选模型，必须与 provider 成对，不写回角色"
 				}
 			},
 			required: [
@@ -125,7 +153,17 @@ function buildDispatchTool(deps) {
 						type: "string",
 						description: "continue：追加要求已投递到既有子会话的宿主回执"
 					},
-					recordError: { type: "string" }
+					recordError: { type: "string" },
+					model: {
+						type: "object",
+						additionalProperties: false,
+						description: "实际传给子会话的第一个候选；没配候选时不出现",
+						properties: {
+							provider: { type: "string" },
+							model: { type: "string" }
+						},
+						required: ["provider", "model"]
+					}
 				},
 				required: ["childId"]
 			},
@@ -143,6 +181,7 @@ function buildDispatchTool(deps) {
 			const mode = a.mode;
 			if (mode !== "spawn" && mode !== "fork" && mode !== "continue") throw new CollaborationError("INVALID_INPUT", `mode 必须是 ${DISPATCH_MODES.join(" 或 ")}`);
 			if (mode !== "continue" && a.expectedChildId !== void 0) throw new CollaborationError("INVALID_INPUT", "expectedChildId 只能配合 continue 使用，新建不需要");
+			const override = takeDispatchOverride(a, mode);
 			if (deps.subagents === void 0) throw new CollaborationError("IO_ERROR", "subagents 服务不可用：无法创建子会话（检查宿主装载）");
 			const parent = exec?.agent;
 			if (parent === void 0) throw new CollaborationError("INVALID_INPUT", "router_dispatch 需要调用方 agent（exec.agent 缺失）");
@@ -187,6 +226,7 @@ function buildDispatchTool(deps) {
 				}
 			}
 			const role = await deps.roles.read(roleName);
+			const sequence = resolveDispatchSequence(role.models, override);
 			let taskId;
 			let createdTask = false;
 			if (a.taskId !== void 0) {
@@ -210,20 +250,43 @@ function buildDispatchTool(deps) {
 				taskId,
 				rootSessionId
 			});
+			const request = {
+				prompt: [{
+					type: "text",
+					text: instruction
+				}],
+				parent,
+				maxDepth: 2
+			};
+			const first = sequence[0];
+			if (first !== void 0) request.agentOptions = {
+				provider: first.provider,
+				model: first.model
+			};
 			const { childId } = await deps.subagents.startActivation({
 				provider: mode,
 				label: `${role.name}·${taskId}`,
-				request: {
-					prompt: [{
-						type: "text",
-						text: instruction
-					}],
-					parent,
-					maxDepth: 2
-				},
+				request,
 				signal,
 				delivery: "parent"
 			});
+			if (first !== void 0 && deps.childModelRuns !== void 0) {
+				const parentSessionId = agentId(parent);
+				deps.childModelRuns.set(childId, {
+					sequence,
+					index: 0,
+					phase: "armed",
+					rootSessionId,
+					taskId,
+					roleName: role.name,
+					parentSessionId,
+					failures: []
+				});
+			}
+			const sentModel = first === void 0 ? {} : { model: {
+				provider: first.provider,
+				model: first.model
+			} };
 			try {
 				const saved = await deps.records.create(rootSessionId, {
 					kind: "assignment",
@@ -245,7 +308,8 @@ function buildDispatchTool(deps) {
 						taskId: saved.record.taskId,
 						recordId: saved.record.id,
 						path: saved.path
-					}
+					},
+					...sentModel
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -253,7 +317,8 @@ function buildDispatchTool(deps) {
 					childId,
 					taskId,
 					createdTask,
-					recordError: `子会话已创建（${childId}），但分工记录登记失败：${message}——请用 router_record_create 补记并关联该子会话`
+					recordError: `子会话已创建（${childId}），但分工记录登记失败：${message}——请用 router_record_create 补记并关联该子会话`,
+					...sentModel
 				};
 			}
 		}
@@ -262,6 +327,27 @@ function buildDispatchTool(deps) {
 function nonEmpty(value, what) {
 	if (typeof value !== "string" || value.trim() === "") throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
 	return value;
+}
+function agentId(agent) {
+	if (typeof agent === "object" && agent !== null && typeof agent.id === "string") return agent.id;
+	return "";
+}
+/** spawn/fork 的一次性首选。两个都缺才是没有；只出现一个或 trim 后为空则拒绝。continue 上任一字段都拒绝。 */
+function takeDispatchOverride(args, mode) {
+	const hasProvider = args.provider !== void 0;
+	const hasModel = args.model !== void 0;
+	if (mode === "continue") {
+		if (hasProvider || hasModel) throw new CollaborationError("INVALID_INPUT", "continue 不能指定 provider 或 model");
+		return;
+	}
+	if (!hasProvider && !hasModel) return void 0;
+	if (!hasProvider || !hasModel) throw new CollaborationError("INVALID_INPUT", "provider 与 model 必须成对出现");
+	if (typeof args.provider !== "string" || args.provider.trim() === "") throw new CollaborationError("INVALID_INPUT", "provider 必须是 trim 后的非空字符串");
+	if (typeof args.model !== "string" || args.model.trim() === "") throw new CollaborationError("INVALID_INPUT", "model 必须是 trim 后的非空字符串");
+	return {
+		provider: args.provider.trim(),
+		model: args.model.trim()
+	};
 }
 
 //#endregion
@@ -686,7 +772,23 @@ const SAVED_RECORD_SCHEMA = {
 	},
 	required: ["record", "path"]
 };
-/** 角色模板 schema。 */
+/** 角色候选模型。 */
+const ROLE_MODEL_SCHEMA = {
+	type: "object",
+	additionalProperties: false,
+	properties: {
+		provider: {
+			type: "string",
+			description: "提供方 id"
+		},
+		model: {
+			type: "string",
+			description: "模型 id"
+		}
+	},
+	required: ["provider", "model"]
+};
+/** 角色模板 schema。models 可选：缺省表示没有候选围栏。 */
 const ROLE_TEMPLATE_SCHEMA = {
 	type: "object",
 	additionalProperties: false,
@@ -697,7 +799,12 @@ const ROLE_TEMPLATE_SCHEMA = {
 		},
 		description: {
 			type: "string",
-			description: "职责说明"
+			description: "职责说明（不含候选围栏）"
+		},
+		models: {
+			type: "array",
+			description: "有序候选模型。省略表示文件里没有围栏。",
+			items: ROLE_MODEL_SCHEMA
 		}
 	},
 	required: ["name", "description"]
@@ -720,7 +827,13 @@ function buildCollaborationTools(deps) {
 		}
 	};
 	return [
-		buildDispatchTool(deps),
+		buildDispatchTool({
+			records,
+			roles,
+			subagents: deps.subagents,
+			afterWrite,
+			childModelRuns: deps.childModelRuns
+		}),
 		{
 			name: "router_record_create",
 			description: "新建一条工作记录（任务说明 task / 分工 assignment / 工作报告 report / 汇总 summary）。rootSessionId 是整棵任务树的根会话，必须显式传入，不要拿当前会话 ID 充当根会话。空 body 合法，空 title 不合法。",
@@ -993,7 +1106,7 @@ function buildCollaborationTools(deps) {
 		},
 		{
 			name: "router_role_save",
-			description: "创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。",
+			description: "创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。models 可选：省略则保留盘上已有候选；空数组清空候选。",
 			parameters: {
 				type: "object",
 				additionalProperties: false,
@@ -1009,6 +1122,11 @@ function buildCollaborationTools(deps) {
 						description: {
 							type: "string",
 							description: "职责说明"
+						},
+						models: {
+							type: "array",
+							description: "有序候选。省略保留已有候选；空数组清空。形状不合法整次拒绝。",
+							items: ROLE_MODEL_SCHEMA
 						}
 					},
 					required: ["name", "description"]
@@ -1050,7 +1168,8 @@ function apply(ctx) {
 		subagents: ctx.subagents,
 		afterWrite: ctx.routerCollaboration.activeTasks === void 0 ? void 0 : async (rootSessionId) => {
 			await ctx.routerCollaboration.activeTasks.refresh(rootSessionId);
-		}
+		},
+		childModelRuns: ctx.routerCollaboration.childModelRuns
 	}).map((definition) => ctx.tools.register(definition));
 	return () => {
 		for (const dispose of disposers) dispose?.();

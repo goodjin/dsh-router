@@ -7,9 +7,10 @@
  * 错误并保留草稿。与模型共享同一 RoleStore（按名 upsert）。
  */
 
-import { useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
 
 import type { CollaborationStore } from './collaboration-store.ts'
+import type { RoleModelCandidate } from '../collaboration/types.ts'
 
 const LAYOUT_STYLE: CSSProperties = {
   display: 'flex',
@@ -84,6 +85,23 @@ const TEXTAREA_STYLE: CSSProperties = {
   whiteSpace: 'pre-wrap',
 }
 
+const ROW_STYLE: CSSProperties = {
+  display: 'flex',
+  gap: 6,
+  alignItems: 'center',
+  marginBottom: 6,
+}
+
+const SMALL_BUTTON_STYLE: CSSProperties = {
+  padding: '3px 8px',
+  borderRadius: 6,
+  border: '1px solid var(--dsw-alias-border-l2, #d8dbe0)',
+  background: 'var(--dsw-alias-bg-layer-2, #fff)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
+  cursor: 'pointer',
+  fontSize: 12,
+}
+
 const BUTTON_STYLE: CSSProperties = {
   padding: '4px 14px',
   borderRadius: 6,
@@ -115,25 +133,55 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const [selected, setSelected] = useState<string | undefined>(undefined)
   const [draftName, setDraftName] = useState('')
   const [draftDesc, setDraftDesc] = useState('')
+  const [draftModels, setDraftModels] = useState<RoleModelCandidate[]>([])
+  const [catalogProvider, setCatalogProvider] = useState('')
+  const [catalogModel, setCatalogModel] = useState('')
   const [dirty, setDirty] = useState(false)
+
+  useEffect(() => {
+    void props.store.refreshModelCatalog()
+  }, [props.store])
 
   const select = (name: string | undefined, isDraft = false): void => {
     setSelected(name)
+    setCatalogProvider('')
+    setCatalogModel('')
     if (name === undefined || isDraft) {
       setDraftName('')
       setDraftDesc('')
+      setDraftModels([])
     } else {
       // 读 store 当前值而非渲染快照：保存成功后的回调里快照还是旧列表。
       const role = props.store.get().templates.find((t) => t.name === name)
       setDraftName(role?.name ?? '')
       setDraftDesc(role?.description ?? '')
+      setDraftModels((role?.models ?? []).map((candidate) => ({ provider: candidate.provider, model: candidate.model })))
     }
     setDirty(false)
   }
 
+  const patchModel = (index: number, patch: Partial<RoleModelCandidate>): void => {
+    setDraftModels((rows) => rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)))
+    setDirty(true)
+  }
+
+  const moveModel = (index: number, delta: number): void => {
+    setDraftModels((rows) => {
+      const target = index + delta
+      if (target < 0 || target >= rows.length) return rows
+      const next = rows.slice()
+      const [item] = next.splice(index, 1)
+      next.splice(target, 0, item!)
+      return next
+    })
+    setDirty(true)
+  }
+
   const isNew = selected === NEW_SELECTION
   const currentRole = isNew ? undefined : state.templates.find((t) => t.name === selected)
-  const canSave = draftName.trim() !== ''
+  const canSave = draftName.trim() !== '' && state.rolesError === null
+  const catalogProviders = state.modelCatalog.providers
+  const catalogModels = catalogProviders.find((provider) => provider.id === catalogProvider)?.models ?? []
 
   return (
     <div data-router-collab-roles-tab style={LAYOUT_STYLE}>
@@ -184,6 +232,96 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
               value={draftDesc}
               onChange={(event) => { setDraftDesc(event.target.value); setDirty(true) }}
             />
+            <div data-router-collab-role-models style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, marginBottom: 6 }}>候选模型</div>
+              {draftModels.map((candidate, index) => (
+                <div key={index} data-router-collab-model-row style={ROW_STYLE}>
+                  <input
+                    data-router-collab-model-provider
+                    style={{ ...INPUT_STYLE, flex: 1 }}
+                    placeholder="provider"
+                    aria-label={`候选 ${index + 1} provider`}
+                    value={candidate.provider}
+                    onChange={(event) => { patchModel(index, { provider: event.target.value }) }}
+                  />
+                  <input
+                    data-router-collab-model-model
+                    style={{ ...INPUT_STYLE, flex: 1 }}
+                    placeholder="model"
+                    aria-label={`候选 ${index + 1} model`}
+                    value={candidate.model}
+                    onChange={(event) => { patchModel(index, { model: event.target.value }) }}
+                  />
+                  <button type="button" data-router-collab-model-up style={SMALL_BUTTON_STYLE} disabled={index === 0} onClick={() => { moveModel(index, -1) }}>上移</button>
+                  <button type="button" data-router-collab-model-down style={SMALL_BUTTON_STYLE} disabled={index === draftModels.length - 1} onClick={() => { moveModel(index, 1) }}>下移</button>
+                  <button
+                    type="button"
+                    data-router-collab-model-delete
+                    style={SMALL_BUTTON_STYLE}
+                    onClick={() => {
+                      setDraftModels((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
+                      setDirty(true)
+                    }}
+                  >
+                    删除
+                  </button>
+                </div>
+              ))}
+              <div style={ROW_STYLE}>
+                <button
+                  type="button"
+                  data-router-collab-model-add
+                  style={SMALL_BUTTON_STYLE}
+                  onClick={() => {
+                    setDraftModels((rows) => [...rows, { provider: '', model: '' }])
+                    setDirty(true)
+                  }}
+                >
+                  添加一行
+                </button>
+              </div>
+              <div style={ROW_STYLE}>
+                <select
+                  data-router-collab-catalog-provider
+                  style={{ ...INPUT_STYLE, flex: 1 }}
+                  aria-label="清单 provider"
+                  value={catalogProvider}
+                  onChange={(event) => {
+                    setCatalogProvider(event.target.value)
+                    setCatalogModel('')
+                  }}
+                >
+                  <option value="">{state.modelCatalog.unavailable ? '清单不可用' : '选择 provider'}</option>
+                  {catalogProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>{provider.name}</option>
+                  ))}
+                </select>
+                <select
+                  data-router-collab-catalog-model
+                  style={{ ...INPUT_STYLE, flex: 1 }}
+                  aria-label="清单 model"
+                  value={catalogModel}
+                  onChange={(event) => { setCatalogModel(event.target.value) }}
+                >
+                  <option value="">选择 model</option>
+                  {catalogModels.map((model) => (
+                    <option key={model.id} value={model.id}>{model.name}</option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  data-router-collab-catalog-add
+                  style={SMALL_BUTTON_STYLE}
+                  disabled={catalogProvider === '' || catalogModel === ''}
+                  onClick={() => {
+                    setDraftModels((rows) => [...rows, { provider: catalogProvider, model: catalogModel }])
+                    setDirty(true)
+                  }}
+                >
+                  从清单添加
+                </button>
+              </div>
+            </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
               <button
                 type="button"
@@ -191,7 +329,9 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                 style={{ ...BUTTON_STYLE, opacity: canSave ? 1 : 0.5 }}
                 disabled={!canSave}
                 onClick={() => {
-                  void props.store.saveRole({ name: draftName.trim(), description: draftDesc }).then((ok) => {
+                  if (props.store.get().rolesError !== null) return
+                  const models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
+                  void props.store.saveRole({ name: draftName.trim(), description: draftDesc, models }).then((ok) => {
                     if (ok) select(draftName.trim())
                   })
                 }}

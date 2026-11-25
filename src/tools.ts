@@ -11,6 +11,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { buildCollaborationTools, type ToolDefinition } from './collaboration/tools.ts'
+import type { ChildModelRun } from './collaboration/model-switch.ts'
 
 /** 本入口的插件名（诊断显示用；装载行的 name 是带子路径说明符）。 */
 export const name = 'router-tools'
@@ -33,6 +34,8 @@ interface ToolsContext {
     roles: Parameters<typeof buildCollaborationTools>[0]['roles']
     /** 活跃任务视图缓存（共享单实例）；缺席时写后不刷新，上下文段靠后台刷新自愈。 */
     activeTasks?: { refresh(rootSessionId: string): Promise<unknown> }
+    /** 本次入口 apply 的子会话候选游标；缺席时派发不登记自动切换。 */
+    childModelRuns?: Map<string, ChildModelRun>
   }
   subagents?: Parameters<typeof buildCollaborationTools>[0]['subagents']
 }
@@ -49,6 +52,7 @@ export function apply(ctx: ToolsContext): () => void {
       : async (rootSessionId) => {
           await ctx.routerCollaboration.activeTasks!.refresh(rootSessionId)
         },
+    childModelRuns: ctx.routerCollaboration.childModelRuns,
   })
   const disposers = definitions.map((definition) => ctx.tools.register(definition))
   return () => {

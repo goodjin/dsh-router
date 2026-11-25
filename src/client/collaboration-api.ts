@@ -5,7 +5,8 @@
  *   listRecords(rootSessionId, query?) → WorkRecord[]
  *   readRecord(rootSessionId, taskId, recordId) → SavedRecord
  *   listRoles() → RoleTemplate[]
- *   saveRole({name,description}) → RoleTemplate（按名 upsert）
+ *   saveRole({name,description,models?}) → RoleTemplate（按名 upsert；models 缺省不写入请求体）
+ *   listModelCatalog() → 已注册模型清单（GET /models）
  *
  * 浏览器半边纪律：fetch 可注入（缺省 globalThis.fetch，同源会话登录传输沿用宿主既有
  * transport，不自建传输层）；失败**不**变成空数组——抛 CollaborationApiError 并保留
@@ -13,12 +14,24 @@
  * 引入新类型（types.ts 零 node 依赖），不 bundle node:path/fs/oldcore。
  */
 
-import type { RecordQuery, RoleTemplate, SavedRecord, WorkRecord } from '../collaboration/types.ts'
+import type { RecordQuery, RoleModelCandidate, RoleTemplate, SavedRecord, WorkRecord } from '../collaboration/types.ts'
 
 /** 宿主路由前缀（与 src/collaboration/routes.ts 逐字对齐；此处重复字符串，避免客户端 import 宿主 node 模块）。 */
 export const COLLABORATION_API_RECORDS_PATH = '/router/collaboration/records'
 export const COLLABORATION_API_RECORD_PATH = '/router/collaboration/record'
 export const COLLABORATION_API_ROLES_PATH = '/router/collaboration/roles'
+export const COLLABORATION_API_MODELS_PATH = '/router/collaboration/models'
+
+/** GET /models 的页面清单。只用 id 与 name。 */
+export interface CollaborationModelCatalog {
+  unavailable: boolean
+  providers: Array<{
+    id: string
+    name: string
+    models: Array<{ id: string; name: string }>
+    error?: string
+  }>
+}
 
 /** 请求失败（网络/HTTP 错误体）；code 是宿主错误码（INVALID_INPUT/NOT_FOUND/…），status 是 HTTP 状态。 */
 export class CollaborationApiError extends Error {
@@ -46,7 +59,8 @@ export interface CollaborationApi {
   listRecords(rootSessionId: string, query?: RecordQuery): Promise<WorkRecord[]>
   readRecord(rootSessionId: string, taskId: string, recordId: string): Promise<SavedRecord>
   listRoles(): Promise<RoleTemplate[]>
-  saveRole(input: { name: string; description: string }): Promise<RoleTemplate>
+  saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate>
+  listModelCatalog(): Promise<CollaborationModelCatalog>
 }
 
 /** 把响应体收成 JSON；解析失败给 null。 */
@@ -117,17 +131,35 @@ export function createCollaborationApi(deps: CollaborationApiDeps = {}): Collabo
       return body as RoleTemplate[]
     },
 
-    async saveRole(input: { name: string; description: string }): Promise<RoleTemplate> {
+    async saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate> {
+      const payload: { name: string; description: string; models?: RoleModelCandidate[] } = {
+        name: input.name,
+        description: input.description,
+      }
+      if (input.models !== undefined) payload.models = input.models
       const body = await request(COLLABORATION_API_ROLES_PATH, {
         method: 'POST',
         headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: JSON.stringify({ name: input.name, description: input.description }),
+        body: JSON.stringify(payload),
       })
       const role = body as RoleTemplate | null
       if (role === null || typeof role !== 'object' || typeof role.name !== 'string') {
         throw new CollaborationApiError('router: roles response missing role')
       }
       return role as RoleTemplate
+    },
+
+    async listModelCatalog(): Promise<CollaborationModelCatalog> {
+      const body = await request(COLLABORATION_API_MODELS_PATH, { headers: { accept: 'application/json' } })
+      if (
+        body === null
+        || typeof body !== 'object'
+        || typeof (body as { unavailable?: unknown }).unavailable !== 'boolean'
+        || !Array.isArray((body as { providers?: unknown }).providers)
+      ) {
+        throw new CollaborationApiError('router: models response missing catalog')
+      }
+      return body as CollaborationModelCatalog
     },
   }
 }

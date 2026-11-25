@@ -31,7 +31,7 @@ function scriptedApi(): {
   setListRecords: (impl: (root: string) => Promise<WorkRecord[]>) => void
   setReadRecord: (impl: (root: string, taskId: string, recordId: string) => Promise<SavedRecord>) => void
   setListRoles: (impl: () => Promise<RoleTemplate[]>) => void
-  setSaveRole: (impl: (input: { id?: string; name: string; description: string }) => Promise<RoleTemplate>) => void
+  setSaveRole: (impl: (input: { id?: string; name: string; description: string; models?: Array<{ provider: string; model: string }> }) => Promise<RoleTemplate>) => void
   calls: { listRecords: number; readRecord: number; listRoles: number; saveRole: number }
   lastListRoot: () => string | undefined
 } {
@@ -39,13 +39,14 @@ function scriptedApi(): {
   let listRecordsImpl: (root: string) => Promise<WorkRecord[]> = async () => []
   let readRecordImpl: (root: string, taskId: string, recordId: string) => Promise<SavedRecord> = async () => ({ record: {} as WorkRecord, path: '' })
   let listRolesImpl: () => Promise<RoleTemplate[]> = async () => []
-  let saveRoleImpl: (input: { id?: string; name: string; description: string }) => Promise<RoleTemplate> = async (input) => ({ id: '00000000-0000-4000-8000-000000000000', name: input.name, description: input.description, createdAt: 1, updatedAt: 1 })
+  let saveRoleImpl: (input: { id?: string; name: string; description: string; models?: Array<{ provider: string; model: string }> }) => Promise<RoleTemplate> = async (input) => ({ name: input.name, description: input.description })
   let lastRoot: string | undefined
   const api: CollaborationApi = {
     listRecords: async (root) => { calls.listRecords += 1; lastRoot = root; return listRecordsImpl(root) },
     readRecord: async (root, taskId, recordId) => { calls.readRecord += 1; return readRecordImpl(root, taskId, recordId) },
     listRoles: async () => { calls.listRoles += 1; return listRolesImpl() },
     saveRole: async (input) => { calls.saveRole += 1; return saveRoleImpl(input) },
+    listModelCatalog: async () => ({ unavailable: true, providers: [] }),
   }
   return {
     api,
@@ -357,5 +358,26 @@ describe('saveRole — 共享同一 RoleStore 路径；失败显示并保留草�
     expect(store.get().saveError).toBe('保存失败：网络')
     store.clearSaveError()
     expect(store.get().saveError).toBeNull()
+  })
+
+  it('saveRole 把 models 原样交给 api；清单失败不写 rolesError', async () => {
+    const { api, setSaveRole } = scriptedApi()
+    let seen: { models?: unknown } | undefined
+    setSaveRole(async (input) => {
+      seen = input
+      return { name: input.name, description: input.description }
+    })
+    const store = startCollaborationStore({ api })
+    const models = [{ provider: 'p', model: 'm' }]
+    expect(await store.saveRole({ name: '执行者', description: '职责', models })).toBe(true)
+    expect(seen?.models).toEqual(models)
+    const failing = {
+      ...api,
+      listModelCatalog: async () => { throw new Error('llm down') },
+    }
+    const catalogStore = startCollaborationStore({ api: failing })
+    await catalogStore.refreshModelCatalog()
+    expect(catalogStore.get().rolesError).toBeNull()
+    expect(catalogStore.get().modelCatalog).toEqual({ unavailable: true, providers: [] })
   })
 })

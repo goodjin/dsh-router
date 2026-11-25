@@ -13,8 +13,8 @@
  * 不推断权限、不扫会话历史、不自动判定业务完成；记录修改由模型工具负责。
  */
 
-import type { CollaborationApi } from './collaboration-api.ts'
-import type { RoleTemplate, SavedRecord, WorkRecord } from '../collaboration/types.ts'
+import type { CollaborationApi, CollaborationModelCatalog } from './collaboration-api.ts'
+import type { RoleModelCandidate, RoleTemplate, SavedRecord, WorkRecord } from '../collaboration/types.ts'
 
 /** store 对外状态（React useSyncExternalStore 直接读）。 */
 export interface CollaborationState {
@@ -30,6 +30,8 @@ export interface CollaborationState {
   selectedRecord?: SavedRecord
   /** 角色模板列表（与用户/模型共享同一 RoleStore）。 */
   templates: RoleTemplate[]
+  /** 已注册模型清单。读不到时 unavailable，不占用 rolesError。 */
+  modelCatalog: CollaborationModelCatalog
   /** 记录列表加载中。 */
   loadingRecords: boolean
   /** 角色模板加载中。 */
@@ -61,7 +63,8 @@ export interface CollaborationStore {
   selectRecord(taskId: string, recordId: string): Promise<void>
   clearSelectedRecord(): void
   refreshRoles(): Promise<void>
-  saveRole(input: { name: string; description: string }): Promise<boolean>
+  refreshModelCatalog(): Promise<void>
+  saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<boolean>
   clearSaveError(): void
 }
 
@@ -85,6 +88,7 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
   let records: WorkRecord[] = []
   let selectedRecord: SavedRecord | undefined
   let templates: RoleTemplate[] = []
+  let modelCatalog: CollaborationModelCatalog = { unavailable: true, providers: [] }
   let loadingRecords = false
   let loadingRoles = false
   let recordsError: string | null = null
@@ -99,6 +103,7 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
     effectiveRootId: undefined,
     records: [],
     templates: [],
+    modelCatalog: { unavailable: true, providers: [] },
     loadingRecords: false,
     loadingRoles: false,
     recordsError: null,
@@ -138,6 +143,7 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
       records,
       selectedRecord,
       templates,
+      modelCatalog,
       loadingRecords,
       loadingRoles,
       recordsError,
@@ -263,7 +269,17 @@ export function startCollaborationStore(deps: CollaborationStoreDeps): Collabora
       await reloadRoles()
     },
 
-    async saveRole(input: { name: string; description: string }): Promise<boolean> {
+    async refreshModelCatalog(): Promise<void> {
+      try {
+        const catalog = await api.listModelCatalog()
+        apply(() => { modelCatalog = catalog })
+      } catch (error) {
+        report(`collaboration model catalog load failed: ${errorMessage(error)}`)
+        apply(() => { modelCatalog = { unavailable: true, providers: [] } })
+      }
+    },
+
+    async saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<boolean> {
       try {
         await api.saveRole(input)
         saveError = null

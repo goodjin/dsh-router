@@ -203,3 +203,73 @@ describe('entry 预置角色种入（seedPresetRoles 接线）', () => {
     expect(again).toEqual(expected)
   })
 })
+
+describe('routerCollaboration 重挂', () => {
+  function rootHost() {
+    const registry = new Map<string, { childModelRuns: Map<string, { index: number }> }>()
+    const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+    const subscribed: string[] = []
+    const ctx = {
+      provide(): () => void {
+        throw new Error('应发布到 root')
+      },
+      root: {
+        provide(name: string, value: unknown): () => void {
+          if (registry.has(name)) throw new Error(`service "${name}" has been registered at <root>`)
+          registry.set(name, value as { childModelRuns: Map<string, { index: number }> })
+          return () => { registry.delete(name) }
+        },
+      },
+      on(name: string, listener: (...args: unknown[]) => void): () => void {
+        subscribed.push(name)
+        const set = listeners.get(name) ?? new Set<(...args: unknown[]) => void>()
+        listeners.set(name, set)
+        set.add(listener)
+        return () => { set.delete(listener) }
+      },
+      inject(): { dispose(): void } {
+        return { dispose() {} }
+      },
+    }
+    return { ctx, registry, listeners, subscribed }
+  }
+
+  it('调用注销函数后第二次 apply 不抛，且根上的 face 是新的', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'router-remount-'))
+    seededRoots.push(dir)
+    const host = rootHost()
+    const firstDispose = entryApply(host.ctx as never, { dataDir: dir })
+    const first = host.registry.get('routerCollaboration')
+    expect(first).toBeTruthy()
+    first!.childModelRuns.set('child-old', { index: 0 })
+    expect(host.subscribed).toEqual(['session/event', 'agent/status'])
+    expect(host.subscribed).not.toContain('agent/request-error')
+    firstDispose()
+    firstDispose()
+    expect(host.registry.has('routerCollaboration')).toBe(false)
+    expect(host.listeners.get('session/event')?.size ?? 0).toBe(0)
+    const secondDispose = entryApply(host.ctx as never, { dataDir: dir })
+    const second = host.registry.get('routerCollaboration')
+    expect(second).toBeTruthy()
+    expect(second).not.toBe(first)
+    expect(second!.childModelRuns.has('child-old')).toBe(false)
+    const event = {
+      type: 'turn/end',
+      turn: 1,
+      reason: { kind: 'error', error: { code: 'RATE_LIMIT', message: '限流' } },
+    }
+    for (const listener of host.listeners.get('session/event') ?? []) listener({ id: 'child-old' }, event)
+    await new Promise((resolve) => { setTimeout(resolve, 0) })
+    expect(second!.childModelRuns.has('child-old')).toBe(false)
+    expect(first!.childModelRuns.get('child-old')?.index).toBe(0)
+    secondDispose()
+  })
+
+  it('不调用注销函数就第二次 apply 必须抛服务已在 root 注册', () => {
+    const host = rootHost()
+    entryApply(host.ctx as never, { dataDir: '/tmp/router-remount-dup' })
+    expect(() => entryApply(host.ctx as never, { dataDir: '/tmp/router-remount-dup' })).toThrow(
+      'service "routerCollaboration" has been registered at <root>',
+    )
+  })
+})
