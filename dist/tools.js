@@ -72,7 +72,7 @@ function composeDispatchInstruction(input) {
 function buildDispatchTool(deps) {
 	return {
 		name: "router_dispatch",
-		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色）；continue 不能带。rootSessionId 必须显式传入。",
+		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色；不传就继承主会话当前模型，不要擅自换成 pro 之类更重的模型）；continue 不能带。rootSessionId 必须显式传入。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,

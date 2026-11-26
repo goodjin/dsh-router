@@ -104,7 +104,8 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       'parentTaskId 可选，新任务作为它的子任务，通常传主任务）。' +
       'spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；' +
       'continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。' +
-      'spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色）；continue 不能带。' +
+      'spawn/fork 可带仅这一次的 provider 与 model（必须成对，不写回角色；不传就继承主会话当前模型，' +
+      '不要擅自换成 pro 之类更重的模型）；continue 不能带。' +
       'rootSessionId 必须显式传入。',
     parameters: {
       type: 'object',
