@@ -278,6 +278,9 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | undefined>(undefined)
   const [dirty, setDirty] = useState(false)
+  // 候选列表本次是否被动过：新增/删除/上移/下移/编辑取值都算；只改名称或职责不算。
+  // 保存时据此决定是否带 models——没动过就省略字段，由服务端保留文件里已有的候选。
+  const [modelsTouched, setModelsTouched] = useState(false)
 
   useEffect(() => {
     void props.store.refreshModelCatalog()
@@ -289,6 +292,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     setCatalogSelection(new Set())
     setCatalogOpen(false)
     setEditingIndex(undefined)
+    setModelsTouched(false)
     if (name === undefined || isDraft) {
       setDraftName('')
       setDraftDesc('')
@@ -306,6 +310,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const patchModel = (index: number, patch: Partial<RoleModelCandidate>): void => {
     setDraftModels((rows) => rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)))
     setDirty(true)
+    setModelsTouched(true)
   }
 
   const moveModel = (index: number, delta: number): void => {
@@ -324,6 +329,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       return current
     })
     setDirty(true)
+    setModelsTouched(true)
   }
 
   const deleteModel = (index: number): void => {
@@ -335,6 +341,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       return current
     })
     setDirty(true)
+    setModelsTouched(true)
   }
 
   const toggleEdit = (index: number): void => {
@@ -370,6 +377,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     if (toAdd.length > 0) {
       setDraftModels((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
       setDirty(true)
+      setModelsTouched(true)
     }
     closeCatalog()
   }
@@ -465,17 +473,6 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                 )
               })}
               <div style={ROW_STYLE}>
-                <button
-                  type="button"
-                  data-router-collab-model-add
-                  style={SMALL_BUTTON_STYLE}
-                  onClick={() => {
-                    setDraftModels((rows) => [...rows, { provider: '', model: '' }])
-                    setDirty(true)
-                  }}
-                >
-                  添加空行
-                </button>
                 <button
                   type="button"
                   data-router-collab-catalog-open
@@ -590,8 +587,15 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                 disabled={!canSave}
                 onClick={() => {
                   if (props.store.get().rolesError !== null) return
-                  const models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
-                  void props.store.saveRole({ name: draftName.trim(), description: draftDesc, models }).then((ok) => {
+                  const input: { name: string; description: string; models?: RoleModelCandidate[] } = {
+                    name: draftName.trim(),
+                    description: draftDesc,
+                  }
+                  // 候选列表被本次编辑动过才带 models；否则省略字段，由服务端保留既有候选围栏。
+                  if (modelsTouched) {
+                    input.models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
+                  }
+                  void props.store.saveRole(input).then((ok) => {
                     if (ok) select(draftName.trim())
                   })
                 }}
