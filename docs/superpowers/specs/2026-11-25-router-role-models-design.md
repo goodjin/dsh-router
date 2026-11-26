@@ -137,7 +137,9 @@ D6 按桌面版理解：不传 `agentOptions` 时，子会话用主会话最近�
 
 浏览器到不了 `ctx.llm`。现有页面只打 HTTP `/router/collaboration/*`（`src/collaboration/routes.ts` 30 行 `COLLABORATION_ROLES_PATH`）。
 
-「宿主已注册」用 `ctx.llm.listProviders(): LlmProviderInfo[]`（`id`、`name`；`llm-streaming.md` 467–472、1001 行）和 `listModels(provider): LlmModelInfo[]`（`provider`、`id`、`name`，可选 `description`、`inputModalities`；533–545、1095 行）。不用 `listConfigurableProviders`（含尚未注册的休眠路由，475–484 行）。不用 `session.modelCatalog()`（`session.md` 882–886 行与 808 行）：那是 Host generation 目录（部署默认、可路由 provider、隔离的 provider 失败），和「当前已注册」不是同一份。`modelCatalog` 在官方目录里有声明；本方案的页面不依赖它的函数体。
+协作页清单用 `ctx.sessionController.modelCatalog()`（Host generation 目录，与聊天输入框的模型选择器同一份；`sessionController` 是可选能力，机会式注入）。取返回的 `groups`（可路由提供方分组，每项 `id`/`name`/`models` 的 `id`/`name`），`failures` 里的提供方不进清单。不用 `llm.listProviders`/`listModels` 全量枚举，也不用 `listConfigurableProviders`。
+
+反转（2026-11-26）：本设计稿原稿选 `llm.listProviders`/`listModels`（「当前已注册」口径）而不用 `modelCatalog`。用户在界面上看到「聊天输入框里被屏蔽的模型也出现在角色候选面板」，要求两边一致；调研确认聊天输入框的模型选择器消费的就是宿主的 `modelCatalog()`（`buildModelCatalog` 的产物：只用已激活提供方、逐模型校验、空组丢弃、出错进 failures）——即原稿标注「不用」的那份 Host generation 目录。据此 /router/collaboration/models 改走 `sessionController.modelCatalog()` 的 `groups`，failures 不进清单；拿不到目录时返回 unavailable:true，绝不退回 llm 全量枚举。不要按旧稿再改回 llm 枚举。
 
 读不到时手工填写仍然可用，见协作页一节。
 
@@ -416,12 +418,11 @@ interface ChildModelRun {
     id: string
     name: string
     models: Array<{ id: string; name: string }>
-    error?: string
   }>
 }
 ```
 
-装配：入口对 `llm` 做单独的机会式 `ctx.inject?.(['llm'], …)`，把 `listProviders` / `listModels` 留在闭包里。不要把 `llm` 加进 `webServer` 那组必需 inject（缺 `llm` 时整组路由会不挂）。`webServer` 那组照常注册路由。处理函数里没有留到 `llm`，或列举抛错：HTTP 200，`{ providers: [], unavailable: true }`。某个 provider 的 `listModels` 抛错：保留该 provider，`models: []`，带上 `error`，不让整个角色页失败。
+装配：workbench 行对 `sessionController` 做单独的机会式 `ctx.inject?.(['sessionController'], …)`，把 `modelCatalog()` 留在闭包里。不要把 `sessionController` 加进 `webServer` 那组必需 inject（缺它时不能连累 roles/records 路由）。`webServer` 那组照常注册路由。处理函数里没拿到 `sessionController`，或 `modelCatalog()` 抛错 / 返回坏形状（无 groups）：HTTP 200，`{ providers: [], unavailable: true }`——绝不退回 llm 全量枚举。groups 里缺 id 的分组、缺 id/name 的模型条目被丢弃，不让整个角色页失败。
 
 页面只用 `id` 与 `name`。不展示休眠路由。
 
@@ -468,7 +469,7 @@ return () => {
 - 派发：序列空时 `startActivation` 参数深比较没有 `agentOptions`，返回键与现在相同。序列非空时 `agentOptions` 只有 `provider` 和 `model`。临时指定在前、去重、失败形状在建任务前拒绝。`continue` 拒绝 `provider`/`model`，且不调用 `startActivation`。
 - 状态机（假的 `session/event`、`agent/status`、`agent.model.select`、`sendMessage`、`listModels`）：`agent/request-error` 不触发切换；`llm/retry` 期间不切换；`turn/end` `RATE_LIMIT` 在 idle 之后 `select` 下一个并送出固定中文句；`aborted`、`EMPTY_RESPONSE`、`HTTP_404` 不 `select`；`INVALID_REQUEST` 且 `listModels` 成功不含该 id（含成功的空列表）会前进；`INVALID_REQUEST` 且 id 在列表中不 `select`；`INVALID_REQUEST` 且 `listModels` 抛错或不存在该 provider 不 `select`、不标受阻；`NO_ADAPTER` 不看清单也会前进；下标不回头；最后一个也失败时任务 `workLabel` 为 `受阻`，报告含试过的候选和最后错误，且没有 `sendMessage`；`select` 成功但 `sendMessage` 失败时不再试下一个；没有 `agent.model` 时不调用 `selectModel`。
 - 游标在 face 上：注销后再 `apply`，旧 childId 的失败不会打到新 face 的表。
-- 模型路由：无 `llm` 时 200 且 `unavailable: true`；单个 `listModels` 失败不影响其他 provider。
+- 模型路由：无 `sessionController`、`modelCatalog()` 抛错或返回无 groups 时 200 且 `unavailable: true`（绝不退回 llm 全量枚举）；有 groups 时只返回 groups 里的模型，failures 不进清单。
 - 重挂测试见上一节。
 - 客户端：保存请求体带 `models`；400 时 `saveError` 有文案且草稿还在。
 
@@ -508,7 +509,7 @@ return () => {
 1. 内容被拒没有单独的 `LlmFailure.code`。在观测到之前，凡不是通道码、不是 `NO_ADAPTER`、也不是 `aborted` 的错误都不切换。观测：让一个子会话因为内容被拒结束一轮，记下 `turn/end` 的 `reason.kind` 与 `error.code` / `status` / `message`。不要先发明码名。
 2. 已注册适配器遇上不存在的 model id 时，`turn/end` 的 `code` 仍可能不是 `INVALID_REQUEST`。D11 只覆盖确认为 `INVALID_REQUEST` 的那一支；其他码按 D7 的表，不因为「猜它是模型不存在」而切。桌面验收可以记下真实 code，但不阻塞实现。
 3. 官方 `Agent` 类型没有 `.model`，桌面版循环有。若运行中的子会话上 `agent.model.select` 不是函数，按「受阻、不用 `selectModel`」处理。桌面验收时确认它是函数。
-4. `session.modelCatalog` 的实现体本次没有从 asar 里单独抽出；官方 `session.md` 882–886 行声明了它。页面不依赖它。不要把它写成「宿主没有这个方法」。
+4. （已反转，见「协作页清单从哪读」）`sessionController.modelCatalog()` 的实现体已按 groups/failures 形状接入 /router/collaboration/models，页面已依赖它；不要按旧稿再写「页面不依赖它」。
 5. `startActivation` 对未注册 provider 是立刻抛 `NO_ADAPTER`，还是仍返回 `childId`、等第一轮 `turn/end`。观测：临时指定一个未注册 provider 派发一次。在此之前，`startActivation` 抛错就原样上抛，不在派发函数里循环候选。
 6. `turn/end` 写入时子会话往往还不是 `idle`（时序图是先 `turn/end` 再 `agent/status` idle）。方案按图等待。若桌面版上 `turn/end` 之后长期没有 idle，不发明超时、不因此标受阻、不向 running 投递；这一笔停在 `switching`，直到看到 idle 或条目卸载。
 7. 轮次错误之后，子会话是否仍在 `agents` 注册表里，以及父会话 `agents.get` 会不会是空的。两者为空都不 `resume`。父级为空时不投递。

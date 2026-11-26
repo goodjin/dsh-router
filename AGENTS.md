@@ -51,7 +51,7 @@ node /Users/good/github/dsh-plugins/scripts/check-host-rows.mjs dsh-router   # �
 patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 独立工作台行（`@goodjin2/dsh-router/workbench`，
 模块级必需 inject ['webServer','connection','routerCollaboration'] 挂四条协作 HTTP 路由
 （/router/collaboration/{records,record,roles,models}），与工具行共享同一 RecordStore/RoleStore 单实例，
-llm 可选注入、缺 llm 时 models 路由返回 unavailable:true）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
+工作台行捕获宿主 sessionController（可选能力），/router/collaboration/models 取 sessionController.modelCatalog() 的可路由分组（与界面模型选择器同源），failures 不进清单；拿不到目录时 models 路由返回 unavailable:true，绝不退回全量枚举）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
 persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 九条协作工具行（含派发工具
 `router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork/continue，自动登记分工记录；
 `taskId` 可选，省略即自动建任务；含压缩工具 `router_compact`：只压上次检查点以来的已闭合回合、原位取代成
