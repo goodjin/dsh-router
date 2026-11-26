@@ -1,13 +1,13 @@
 /**
  * 仅凭 git 跟踪文件的「干净安装」可加载（router-header-index fix round 1，
- * I9 回归）。宿主入口四个产物必须是自包含 bundle：历史上 tsc 平铺产物带着
+ * I9 回归）。宿主入口产物必须是自包含 bundle：历史上 tsc 平铺产物带着
  * `./host/...` 相对导入，而 dist/host、dist/shared 都被 .gitignore 排除——
  * GitHub 安装直接加载失败。本文件双保险：
  *
- *  1. 静态：四个产物剥注释后不得再出现任何相对导入（静态或动态）。
+ *  1. 静态：每个宿主入口产物剥注释后不得再出现任何相对导入（静态或动态）。
  *  2. 动态：按 `git ls-files` 取跟踪文件清单，拷进干净目录（模拟 GitHub
  *     安装只有跟踪文件）、软链 node_modules（宿主/依赖由安装环境提供），
- *     逐一 import 四个入口并断言导出形状。
+ *     逐一 import 宿主入口并断言导出形状。
  */
 
 import { execFileSync } from 'node:child_process'
@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { afterAll, describe, expect, it } from 'vitest'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-const ENTRIES = ['dist/entry.js', 'dist/tools.js', 'dist/context.js'] as const
+const ENTRIES = ['dist/entry.js', 'dist/tools.js', 'dist/context.js', 'dist/workbench.js'] as const
 
 const stagingRoot = join(tmpdir(), `router-tracked-install-${process.pid}`)
 afterAll(() => {
@@ -74,7 +74,7 @@ describe('仅跟踪文件的干净安装可加载（I9）', () => {
     expect(typeof entryMod['apply']).toBe('function')
     expect(typeof entryMod['Config']).toBe('function')
 
-    for (const sub of ['tools', 'context']) {
+    for (const sub of ['tools', 'context', 'workbench']) {
       const mod = (await import(pathToFileURL(join(staging, `dist/${sub}.js`)).href)) as Record<string, unknown>
       expect(typeof mod['name'], `${sub} 缺 name`).toBe('string')
       expect(Array.isArray(mod['inject']), `${sub} 缺 inject`).toBe(true)

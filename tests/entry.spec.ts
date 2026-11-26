@@ -1,8 +1,9 @@
 /**
  * 入口接线测试（协作视图页版）。
  *
- * 宿主侧 src/entry.ts 已重写为薄根服务 + 机会式薄路由（见 tests/collaboration/host-routes.spec.ts
- * 用真实 Cordis Context 验证）。本文件断言浏览器半边工厂面：src/client/index.ts 注册**协作视图页**
+ * 宿主侧 src/entry.ts 已重写为薄根服务（工作台路由已拆到独立 workbench 行，
+ * 见 tests/collaboration/host-routes.spec.ts 与 tests/collaboration/workbench.spec.ts）。
+ * 本文件断言浏览器半边工厂面：src/client/index.ts 注册**协作视图页**
  * 单一表面（会话标签行 conversation.view 的「协作」页），旧的头部按钮浮层、工作台标签条、问题浮窗、
  * 返回按钮、设置段一概不再注册（oldsurfacesnotregistered）。ui-kit 形状断言保留。
  */

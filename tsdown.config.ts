@@ -42,6 +42,7 @@ const hostEntries = {
   entry: 'src/entry.ts',
   tools: 'src/tools.ts',
   context: 'src/context.ts',
+  workbench: 'src/workbench.ts',
 } as const
 
 const clientConfig = defineConfig({

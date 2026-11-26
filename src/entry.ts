@@ -1,18 +1,16 @@
 /**
- * DSH Router 宿主根服务入口（轻量协作版，计划 Task 3 起接入薄路由）。
+ * DSH Router 宿主根服务入口（轻量协作版）。
  *
  * 裸包名行加载本文件（`name` 恰好等于包名的行既是浏览器资产行、也是宿主根服务行）。
- * 本文件在宿主进程里做两件事：
- *  1. 用标准 Cordis provide/lifecycle 组装根服务 `routerCollaboration`——一次解析 dataDir、
- *     创建一条 RecordStore 与一条 RoleStore 单实例，供预设树里的 tools 行 / context 行
- *     经 inject ['routerCollaboration'] 取用（记录与工具，CLI 也有）。
- *  2. 经官方 ctx.inject 机会式注入 webServer+connection，挂三条薄路由
- *     （/router/collaboration/*）给工作台 UI 用——与模型工具共享同一 RecordStore/RoleStore。
- *     webServer/connection 缺席（如纯 CLI 宿主）时不挂路由、不挡记录/工具服务。
+ * 本文件只做一件事：用标准 Cordis provide/lifecycle 组装根服务 `routerCollaboration`——
+ * 一次解析 dataDir、创建一条 RecordStore 与一条 RoleStore 单实例，供预设树里的 tools 行 /
+ * context 行经 inject ['routerCollaboration'] 取用（记录与工具，CLI 也有），并接线模型切换
+ * 与会话事件。工作台 HTTP 路由已拆到独立行 src/workbench.ts（`@goodjin2/dsh-router/workbench`），
+ * 不再经本文件的可选注入挂载（见 workbench.ts 的修复说明）。
  *
  * 不再装配：旧 routerCore、旧 HTTP 路由、会话收编/监听、派发预算、摘要替换、动态预设引擎、
  * 压缩驱动、问答瀑布、紧急暂停熔断。这些是旧事务协议的控制面，本设计明确排除；旧代码与
- * 用户数据保留，但不接入新入口。浏览器半边（src/client）由 Task 3 的协作工作台取代旧表面。
+ * 用户数据保留，但不接入新入口。浏览器半边（src/client）由协作工作台取代旧表面。
  *
  * 配置只有 dataDir（可缺省，缺省 DSH_HOME/router）。构造是纯内存的：不扫描、不建目录、
  * 不起引擎；存储真正做 IO 时才碰文件系统。
@@ -21,7 +19,7 @@
 import Schema from '@deepseek-ai/schemastery'
 
 import { createCollaborationRuntime } from './collaboration/runtime.ts'
-import { registerCollaborationRoutes, type CollaborationLlm, type CollaborationRouteContext } from './collaboration/routes.ts'
+import type { CollaborationLlm } from './collaboration/routes.ts'
 import { seedPresetRoles } from './collaboration/roles.ts'
 import { createActiveTaskCache, type ActiveTaskCache } from './collaboration/active-tasks.ts'
 import {
@@ -35,9 +33,10 @@ import {
 export const name = '@goodjin2/dsh-router'
 
 /**
- * 根服务不 require 任何旧宿主服务：它只 provide 一个纯内存运行时。
- * webServer/connection 经官方 ctx.inject 机会式注入（见 apply），不进全局必需数组——
- * 否则缺席时整行装载失败、CLI 记录/工具服务也被拖死（brief：不能 required 使 CLI 不可用）。
+ * 根服务不 require 任何旧宿主服务：它只 provide 一个纯内存运行时。llm 是模型切换的
+ * 可选依赖（机会式注入），不进全局必需数组——否则缺席时整行装载失败、CLI 记录/工具
+ * 服务也被拖死（brief：不能 required 使 CLI 不可用）。工作台路由所需的 webServer/connection
+ * 已移到独立 workbench 行的必需 inject 里。
  */
 export const inject = [] as const
 
@@ -66,8 +65,8 @@ interface EntryContext {
 }
 
 /**
- * 装载入口：组装根服务并 provide，再机会式挂三条薄路由。标准 Cordis 生命周期——
- * 返回注销器（路由注册与存储单实例随 fiber 销毁自然回收；保留 disposer 形状）。
+ * 装载入口：组装根服务并 provide，接线模型切换与会话事件。标准 Cordis 生命周期——
+ * 返回注销器（存储单实例随 fiber 销毁自然回收；保留 disposer 形状）。
  */
 export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
   const config = (rawConfig ?? {}) as { dataDir?: unknown }
@@ -97,7 +96,7 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
     })
 
   // 监听与 llm/agents 都是机会式的：缺了就跳过自动切换或清单，不挡派发和记录。
-  // llm 不进 webServer 那组必需 inject，否则缺 llm 时整组路由不挂。
+  // llm 不进任何必需 inject，否则缺 llm 时整行装载失败。
   const watcher = new AbortController()
   let llmFace: CollaborationLlm | undefined
   let agentsFace: ModelSwitchAgents | undefined
@@ -129,15 +128,6 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
     agentsFace = got.agents
     subagentsFace = got.subagents
     void switcher.onAgentsAvailable().catch(warnSwitch)
-  }))
-  // 机会式注入 webServer+connection：缺席（CLI）则跳过，工作台路由不挂、记录/工具照常。
-  // 与模型工具共享同一 runtime 的 records/roles（routes_reuse_store）。
-  track(ctx.inject?.(['webServer', 'connection'], (child) => {
-    registerCollaborationRoutes(child as CollaborationRouteContext, {
-      records: runtime.records,
-      roles: runtime.roles,
-      llm: () => llmFace,
-    })
   }))
 
   const offs: Array<() => void> = []

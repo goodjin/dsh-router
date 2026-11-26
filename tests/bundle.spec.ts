@@ -36,6 +36,7 @@ const BUNDLE_PATH = fileURLToPath(new URL('../lib/client.js', import.meta.url))
 const ENTRY_PATH = fileURLToPath(new URL('../dist/entry.js', import.meta.url))
 const TOOLS_PATH = fileURLToPath(new URL('../dist/tools.js', import.meta.url))
 const CONTEXT_PATH = fileURLToPath(new URL('../dist/context.js', import.meta.url))
+const WORKBENCH_PATH = fileURLToPath(new URL('../dist/workbench.js', import.meta.url))
 
 type Factory = (require: (specifier: string) => unknown) => Record<string, unknown>
 type Row = { id: string; factory: Factory }
@@ -82,10 +83,11 @@ describe('package.json 满足浏览器半边的接线条件', () => {
     expect(entryCode).not.toContain('lib/client')
   })
 
-  it('子路径导出 ./tools、./context 存在且指向构建产物（./prompt-section、./compaction 已退役），产物可加载', async () => {
+  it('子路径导出 ./tools、./context、./workbench 存在且指向构建产物（./prompt-section、./compaction 已退役），产物可加载', async () => {
     for (const [key, file] of [
       ['./tools', TOOLS_PATH],
       ['./context', CONTEXT_PATH],
+      ['./workbench', WORKBENCH_PATH],
     ] as const) {
       const exportEntry = PKG.exports[key] as { types?: string; default?: string } | undefined
       expect(exportEntry, `${key} 导出缺失：预设树里的行会 never started → 整预设回滚`).toBeDefined()
@@ -123,11 +125,11 @@ describe('宿主产物的官方包装载必须经宿主基座解析', () => {
 })
 
 describe('cordis.patch.yml 的装载行', () => {
-  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context（压缩工具住在 tools 行，无独立行）', () => {
+  it('有一条 name 为裸包名的装载行；子路径行只许宿主侧 ./tools、./context、./workbench（压缩工具住在 tools 行，无独立行）', () => {
     expect(PATCH_TEXT).toMatch(/-\s+id:\s*dsh-router-client\b/)
     expect(PATCH_TEXT).toMatch(/name:\s*['"]@goodjin2\/dsh-router['"]\s*$/m)
     const subpathRows = [...PATCH_TEXT.matchAll(/name:\s*['"]@goodjin2\/dsh-router\/([^'"]+)['"]/g)].map((m) => m[1])
-    expect(subpathRows.sort()).toEqual(['context', 'tools'])
+    expect(subpathRows.sort()).toEqual(['context', 'tools', 'workbench'])
     // 2026-11-24 退役：自动压缩触发器行已删，压缩改由模型主动调 router_compact。
     expect(PATCH_TEXT).not.toMatch(/compaction-trigger/)
   })

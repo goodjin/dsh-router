@@ -83,6 +83,8 @@ export const REQUIRED_ROW_CONFIG: Record<string, Record<string, unknown>> = {
   /* 本包自己的行：Task 2B 起 tools 行无 config（角色闸退役） */
   'tools': {},
   'router-context': { order: 100 },
+  /* 独立工作台行（2026-11-26）：无 config（路由由代码注册，不读行 config） */
+  'dsh-router-workbench': {},
   /* 无必填 config 的行：空登记（完整性守卫） */
   'dsh-router-client': {},
   'dsh-router-preset': {},

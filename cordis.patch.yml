@@ -4,6 +4,10 @@
 #   - dsh-router-client：裸包名行——既把浏览器半边送进启动图（name 必须恰好等于包名），
 #     也是宿主根服务行（dist/entry.js 提供 routerCollaboration：一条 RecordStore + 一条
 #     RoleStore 单实例）。config 全部可缺省（缺省 DSH_HOME/router）。
+#   - dsh-router-workbench：独立工作台行（@goodjin2/dsh-router/workbench）——模块级
+#     inject ['webServer','connection','routerCollaboration'] 挂四条协作 HTTP 路由
+#     （/router/collaboration/{records,record,roles,models}），与工具行共享同一
+#     RecordStore/RoleStore 单实例。必需依赖缺失即 PENDING/失败，可见而非静默。
 #   - 一条静态预设行 dsh-router/Router（@deepseek-ai/dsh-agent-preset）：
 #     · persona complete:true，prefix 即 collaborationPrompt 单一来源（生成脚本实际导入）；
 #     · tools 行 @goodjin2/dsh-router/tools 注册八条协作工具（含 router_dispatch；无 role 配置/角色闸）；
@@ -20,6 +24,8 @@
 - insert:
     - id: dsh-router-client
       name: '@goodjin2/dsh-router'
+    - id: dsh-router-workbench
+      name: '@goodjin2/dsh-router/workbench'
     - id: dsh-router-preset
       name: '@deepseek-ai/dsh-agent-preset'
       config:
