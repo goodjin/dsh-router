@@ -12,8 +12,11 @@
  *    路由真的注册成功（而非静默跳过）。
  */
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
+import { existsSync, readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { apply as workbenchApply, name as workbenchName, inject as workbenchInject, Config as workbenchConfig } from '../../src/workbench.ts'
 import { apply as entryApply } from '../../src/entry.ts'
@@ -24,6 +27,8 @@ import {
   COLLABORATION_MODELS_PATH,
 } from '../../src/collaboration/routes.ts'
 import { createCollaborationRuntime } from '../../src/collaboration/runtime.ts'
+
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 /** 路由注册项的最小形状（webServer.register 收到的对象）。 */
 interface CapturedRoute {
@@ -183,5 +188,76 @@ describe('workbench 真实 cordis 挂载（entry + workbench + 假 webServer/con
     expect(face).toBeTruthy()
     expect(typeof face?.records.list).toBe('function')
     expect(typeof face?.roles.list).toBe('function')
+  })
+})
+
+describe('workbench apply — llm 捕获不到打一次性警告（不静默、不刷屏）', () => {
+  it('ctx.inject 不可用 → 打一次警告，models 会 unavailable，路由仍注册', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-no-inject' })
+      const { webServer, routes } = fakeWebServer()
+      const ctx = {
+        effect(factory: () => unknown) { return factory() },
+        webServer,
+        connection: fakeConnection(),
+        routerCollaboration: runtime,
+        // 无 inject 通道：llm 必然捕获不到。
+      }
+      workbenchApply(ctx as never)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain('unavailable')
+      // llm 缺席不挡挂载：四条路由照常注册。
+      expect(routes).toHaveLength(4)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('注入回调里 llm 形状不符 → 打一次警告（不重复）', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-bad-llm' })
+      const { webServer, routes } = fakeWebServer()
+      const ctx = {
+        effect(factory: () => unknown) { return factory() },
+        webServer,
+        connection: fakeConnection(),
+        routerCollaboration: runtime,
+        inject(_deps: string[], body: (child: unknown) => unknown) {
+          // llm 服务存在但缺 listProviders/listModels：形状不符。
+          body({ llm: { listProviders: undefined, listModels: undefined } })
+          return { dispose() {} }
+        },
+      }
+      workbenchApply(ctx as never)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(String(warnSpy.mock.calls[0]?.[0])).toContain('unavailable')
+      expect(routes).toHaveLength(4)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+})
+
+describe('装载面覆盖 — 声明行名经 exports 解析到宿主产物', () => {
+  it('@goodjin2/dsh-router/workbench 经 exports["./workbench"] 解析到可导入产物，name/inject 与声明一致', async () => {
+    const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')) as {
+      exports: Record<string, { types?: string; default?: string }>
+    }
+    const exp = pkg.exports['./workbench']
+    expect(exp?.default, 'exports["./workbench"].default 缺失').toBe('./dist/workbench.js')
+    const artifact = resolve(repoRoot, exp!.default!)
+    expect(existsSync(artifact), 'dist/workbench.js 不存在——先 npm run build').toBe(true)
+
+    // 声明行在 cordis.patch.yml 里存在且 name 与子路径一致。
+    const patchText = readFileSync(join(repoRoot, 'cordis.patch.yml'), 'utf8')
+    expect(patchText).toMatch(/-\s+id:\s*dsh-router-workbench\b/)
+    expect(patchText).toMatch(/name:\s*['"]@goodjin2\/dsh-router\/workbench['"]/)
+
+    // 产物可导入，且 name/inject 与源模块级声明一致。
+    const mod = (await import(pathToFileURL(artifact).href)) as { name: string; inject: readonly string[] }
+    expect(mod.name).toBe(workbenchName)
+    expect([...mod.inject]).toEqual([...workbenchInject])
   })
 })

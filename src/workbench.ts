@@ -50,23 +50,35 @@ interface WorkbenchContext {
  * 路由返回 unavailable:true。返回联合注销器交给宿主 effect 生命周期。
  */
 export function apply(ctx: WorkbenchContext): () => void {
-  // llm 是可选依赖：捕获并缓存，models 路由在请求时再读。捕获不到时打一条一次性
-  // 警告（不重复刷屏），路由仍注册、models 降级为 unavailable。
+  // llm 是可选依赖：捕获并缓存，models 路由在请求时再读。捕获不到（ctx.inject 不可用，
+  // 或注入回调里 llm 形状不符）就打一条一次性警告（只打一次、不刷屏），说明 models
+  // 路由会返回 unavailable:true；路由仍注册、models 降级不致命。
   let llmFace: CollaborationLlm | undefined
   let llmWarned = false
+  const warnLlmUnavailable = (): void => {
+    if (llmWarned) return
+    llmWarned = true
+    console.warn('[dsh-router] workbench: llm 不可用，models 路由将返回 unavailable:true')
+  }
+
   const fibers: Array<{ dispose?: () => void | Promise<void> }> = []
   const track = (fiber: unknown): void => {
     if (typeof fiber === 'object' && fiber !== null) fibers.push(fiber as { dispose?: () => void | Promise<void> })
   }
-  track(ctx.inject?.(['llm'], (child) => {
-    const llm = (child as { llm?: CollaborationLlm }).llm
-    if (llm !== undefined && typeof llm.listProviders === 'function' && typeof llm.listModels === 'function') {
-      llmFace = llm
-    } else if (!llmWarned) {
-      llmWarned = true
-      console.warn('[dsh-router] workbench: llm 注入缺席或形状不匹配，models 路由将返回 unavailable')
-    }
-  }))
+  const injectFn = ctx.inject
+  if (typeof injectFn !== 'function') {
+    // 宿主没有 inject 通道：llm 必然捕获不到，models 路由只能 unavailable。
+    warnLlmUnavailable()
+  } else {
+    track(injectFn(['llm'], (child) => {
+      const llm = (child as { llm?: CollaborationLlm }).llm
+      if (llm !== undefined && typeof llm.listProviders === 'function' && typeof llm.listModels === 'function') {
+        llmFace = llm
+      } else {
+        warnLlmUnavailable()
+      }
+    }))
+  }
 
   // 注册四条路由；失败（例如宿主 webServer 契约不匹配）打警告日志——不再静默。
   try {

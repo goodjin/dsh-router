@@ -272,17 +272,21 @@ const Config = Schema.object({});
 function apply(ctx) {
 	let llmFace;
 	let llmWarned = false;
+	const warnLlmUnavailable = () => {
+		if (llmWarned) return;
+		llmWarned = true;
+		console.warn("[dsh-router] workbench: llm 不可用，models 路由将返回 unavailable:true");
+	};
 	const fibers = [];
 	const track = (fiber) => {
 		if (typeof fiber === "object" && fiber !== null) fibers.push(fiber);
 	};
-	track(ctx.inject?.(["llm"], (child) => {
+	const injectFn = ctx.inject;
+	if (typeof injectFn !== "function") warnLlmUnavailable();
+	else track(injectFn(["llm"], (child) => {
 		const llm = child.llm;
 		if (llm !== void 0 && typeof llm.listProviders === "function" && typeof llm.listModels === "function") llmFace = llm;
-		else if (!llmWarned) {
-			llmWarned = true;
-			console.warn("[dsh-router] workbench: llm 注入缺席或形状不匹配，models 路由将返回 unavailable");
-		}
+		else warnLlmUnavailable();
 	}));
 	try {
 		registerCollaborationRoutes(ctx, {
