@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { CollaborationView, type CollaborationViewProps } from '../../src/client/collaboration-view.tsx'
 import { startCollaborationStore } from '../../src/client/collaboration-store.ts'
-import type { CollaborationApi } from '../../src/client/collaboration-api.ts'
+import type { CollaborationApi, CollaborationModelCatalog } from '../../src/client/collaboration-api.ts'
 import type { RoleTemplate, SavedRecord, WorkRecord } from '../../src/collaboration/types.ts'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -119,6 +119,58 @@ function click(el: Element): void {
 
 async function flush(): Promise<void> {
   await act(async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() })
+}
+
+/* ---- 角色候选清单 fixture 与工具 ---- */
+
+const catalogFixture = {
+  unavailable: false,
+  providers: [
+    { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }, { id: 'deepseek-reasoner', name: 'Reasoner' }] },
+    { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] },
+  ],
+}
+
+function setFieldValue(el: HTMLInputElement | HTMLTextAreaElement, value: string): void {
+  const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype
+  Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, value)
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+function catalogOptionRow(container: HTMLElement, provider: string, model: string): HTMLElement {
+  const row = container.querySelector(`[data-router-collab-catalog-provider="${provider}"][data-router-collab-catalog-model="${model}"]`)
+  if (row === null) throw new Error(`catalog option not found: ${provider} / ${model}`)
+  return row as HTMLElement
+}
+
+function catalogCheckbox(row: HTMLElement): HTMLInputElement {
+  const checkbox = row.querySelector<HTMLInputElement>('[data-router-collab-catalog-checkbox]')
+  if (checkbox === null) throw new Error('catalog checkbox not found')
+  return checkbox
+}
+
+async function mountRolesNew(api: CollaborationApi): Promise<{ root: Root; container: HTMLElement }> {
+  const store = startCollaborationStore({ api })
+  const props = baseProps(store)
+  const { root, container } = render(props)
+  await act(async () => { root.render(createElement(CollaborationView, props)) })
+  await flush()
+  click(container.querySelector('[data-router-collab-tab="roles"]')!)
+  await flush()
+  click(container.querySelector('[data-router-collab-role-new]')!)
+  await flush()
+  return { root, container }
+}
+
+function catalogApi(catalog: CollaborationModelCatalog, overrides?: Partial<CollaborationApi>): CollaborationApi {
+  return {
+    listRecords: async () => [],
+    readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
+    listRoles: async () => [],
+    listModelCatalog: async () => catalog,
+    saveRole: async (input) => ({ name: input.name, description: input.description, models: input.models }),
+    ...overrides,
+  }
 }
 
 let openSession: ReturnType<typeof vi.fn>
@@ -387,41 +439,19 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await act(async () => { root.unmount() })
   })
 
-  it('从清单添加一行；400 时 saveError 可见且草稿还在', async () => {
+  it('从清单多选添加；400 时 saveError 可见且草稿还在', async () => {
     let fail = false
-    const api: CollaborationApi = {
-      listRecords: async () => [],
-      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
-      listRoles: async () => [],
-      listModelCatalog: async () => ({
-        unavailable: false,
-        providers: [{ id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }] }],
-      }),
+    const api = catalogApi(catalogFixture, {
       saveRole: async (input) => {
         if (fail) throw new Error('候选无效')
         return { name: input.name, description: input.description, models: input.models }
       },
-    }
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-new]')!)
-    await flush()
-    const setValue = (el: HTMLInputElement | HTMLSelectElement, value: string): void => {
-      const proto = el instanceof HTMLSelectElement ? HTMLSelectElement.prototype : HTMLInputElement.prototype
-      Object.getOwnPropertyDescriptor(proto, 'value')!.set!.call(el, value)
-      el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? 'change' : 'input', { bubbles: true }))
-    }
+    })
+    const { root, container } = await mountRolesNew(api)
     const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    await act(async () => { setValue(nameInput, '执行者') })
-    const providerSelect = container.querySelector<HTMLSelectElement>('[data-router-collab-catalog-provider]')!
-    const modelSelect = container.querySelector<HTMLSelectElement>('[data-router-collab-catalog-model]')!
-    await act(async () => { setValue(providerSelect, 'deepseek') })
-    await act(async () => { setValue(modelSelect, 'deepseek-chat') })
+    await act(async () => { setFieldValue(nameInput, '执行者') })
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
     click(container.querySelector('[data-router-collab-catalog-add]')!)
     await flush()
     expect((container.querySelector('[data-router-collab-model-provider]') as HTMLInputElement).value).toBe('deepseek')
@@ -432,6 +462,117 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('候选无效')
     expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('执行者')
     expect((container.querySelector('[data-router-collab-model-model]') as HTMLInputElement).value).toBe('deepseek-chat')
+    await act(async () => { root.unmount() })
+  })
+
+  it('清单搜索框按名称/ID 过滤，每条完整显示 provider 与 model', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    const query = container.querySelector<HTMLInputElement>('[data-router-collab-catalog-query]')!
+    // 无关键词：显示全部 3 条。
+    expect(container.querySelectorAll('[data-router-collab-catalog-option]')).toHaveLength(3)
+    await act(async () => { setFieldValue(query, 'deepseek') })
+    await flush()
+    const rows = container.querySelectorAll('[data-router-collab-catalog-option]')
+    expect(rows).toHaveLength(2)
+    // 每条结果同时展示 provider 名称/ID 与 model 名称/ID。
+    const first = rows[0]!.textContent!
+    expect(first).toContain('DeepSeek'); expect(first).toContain('deepseek'); expect(first).toContain('Chat'); expect(first).toContain('deepseek-chat')
+    // 按 model ID 过滤。
+    await act(async () => { setFieldValue(query, 'gpt-4o') })
+    await flush()
+    const one = container.querySelectorAll('[data-router-collab-catalog-option]')
+    expect(one).toHaveLength(1)
+    expect(one[0]!.textContent).toContain('OpenAI')
+    await act(async () => { root.unmount() })
+  })
+
+  it('多选按清单顺序一次追加，添加后清空搜索与选择', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-reasoner')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    const providers = [...container.querySelectorAll('[data-router-collab-model-provider]')].map((el) => (el as HTMLInputElement).value)
+    const models = [...container.querySelectorAll('[data-router-collab-model-model]')].map((el) => (el as HTMLInputElement).value)
+    expect(providers).toEqual(['deepseek', 'deepseek'])
+    expect(models).toEqual(['deepseek-chat', 'deepseek-reasoner'])
+    // 添加后搜索与内部选择一并清空。
+    expect((container.querySelector('[data-router-collab-catalog-query]') as HTMLInputElement).value).toBe('')
+    expect((container.querySelector('[data-router-collab-catalog-add]') as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => { root.unmount() })
+  })
+
+  it('添加时跳过已有相同 provider+model（去重）', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
+    // 再次勾选同一项并添加：应被跳过。
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
+    await act(async () => { root.unmount() })
+  })
+
+  it('清空选择：勾选后一键清空，不追加任何候选', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    click(catalogCheckbox(catalogOptionRow(container, 'openai', 'gpt-4o')))
+    await flush()
+    const addBtn = container.querySelector<HTMLButtonElement>('[data-router-collab-catalog-add]')!
+    expect(addBtn.disabled).toBe(false)
+    click(container.querySelector('[data-router-collab-catalog-clear]')!)
+    await flush()
+    expect(addBtn.disabled).toBe(true)
+    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(0)
+    await act(async () => { root.unmount() })
+  })
+
+  it('无匹配显示明确状态', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    const query = container.querySelector<HTMLInputElement>('[data-router-collab-catalog-query]')!
+    await act(async () => { setFieldValue(query, '不存在的模型') })
+    await flush()
+    expect(container.querySelector('[data-router-collab-catalog-status]')?.textContent).toContain('无匹配')
+    expect(container.querySelectorAll('[data-router-collab-catalog-option]')).toHaveLength(0)
+    await act(async () => { root.unmount() })
+  })
+
+  it('空清单显示明确状态', async () => {
+    const { root, container } = await mountRolesNew(catalogApi({ unavailable: false, providers: [] }))
+    expect(container.querySelector('[data-router-collab-catalog-status]')?.textContent).toContain('清单为空')
+    await act(async () => { root.unmount() })
+  })
+
+  it('清单不可用显示状态，手工候选行仍可编辑保存', async () => {
+    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
+    const api = catalogApi({ unavailable: true, providers: [] }, {
+      saveRole: async (input) => {
+        posted = input
+        return { name: input.name, description: input.description, models: input.models }
+      },
+    })
+    const { root, container } = await mountRolesNew(api)
+    expect(container.querySelector('[data-router-collab-catalog-status]')?.textContent).toContain('清单不可用')
+    // 手工候选行在清单不可用时仍可编辑保存。
+    click(container.querySelector('[data-router-collab-model-add]')!)
+    await flush()
+    const provider = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-provider]')[0]!
+    const model = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-model]')[0]!
+    await act(async () => {
+      setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '执行者')
+      setFieldValue(provider, 'manual-provider')
+      setFieldValue(model, 'manual-model')
+    })
+    click(container.querySelector('[data-router-collab-role-save]')!)
+    await flush()
+    await flush()
+    expect(posted?.models).toEqual([{ provider: 'manual-provider', model: 'manual-model' }])
     await act(async () => { root.unmount() })
   })
 

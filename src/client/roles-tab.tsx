@@ -9,7 +9,7 @@
 
 import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
 
-import type { CollaborationStore } from './collaboration-store.ts'
+import type { CollaborationState, CollaborationStore } from './collaboration-store.ts'
 import type { RoleModelCandidate } from '../collaboration/types.ts'
 
 const LAYOUT_STYLE: CSSProperties = {
@@ -124,7 +124,87 @@ const ERROR_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
+const CATALOG_STYLE: CSSProperties = {
+  marginTop: 8,
+  padding: 8,
+  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  borderRadius: 6,
+  background: 'var(--dsw-alias-bg-l1, #fff)',
+}
+
+const CATALOG_RESULTS_STYLE: CSSProperties = {
+  marginTop: 6,
+  maxHeight: 220,
+  overflow: 'auto',
+  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  borderRadius: 6,
+}
+
+const CATALOG_OPTION_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'flex-start',
+  gap: 7,
+  padding: '6px 8px',
+  borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  cursor: 'pointer',
+  overflowWrap: 'anywhere',
+}
+
+const CATALOG_OPTION_DISABLED_STYLE: CSSProperties = {
+  ...CATALOG_OPTION_STYLE,
+  cursor: 'default',
+  opacity: 0.6,
+}
+
+const CATALOG_STATUS_STYLE: CSSProperties = {
+  marginTop: 6,
+  padding: '6px 8px',
+  color: '#6b7078',
+  fontSize: 12,
+}
+
 const NEW_SELECTION = '__new__'
+
+interface CatalogOption {
+  key: string
+  providerId: string
+  providerName: string
+  modelId: string
+  modelName: string
+}
+
+function modelKey(provider: string, model: string): string {
+  return JSON.stringify([provider, model])
+}
+
+function collectCatalogOptions(catalog: CollaborationState['modelCatalog']): CatalogOption[] {
+  const seen = new Set<string>()
+  const options: CatalogOption[] = []
+  for (const provider of catalog.providers) {
+    for (const model of provider.models) {
+      const key = modelKey(provider.id, model.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      options.push({
+        key,
+        providerId: provider.id,
+        providerName: provider.name,
+        modelId: model.id,
+        modelName: model.name,
+      })
+    }
+  }
+  return options
+}
+
+function filterCatalogOptions(options: CatalogOption[], query: string): CatalogOption[] {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (terms.length === 0) return options
+  return options.filter((option) => {
+    const fields = [option.providerId, option.providerName, option.modelId, option.modelName].map((field) => field.toLowerCase())
+    return terms.every((term) => fields.some((field) => field.includes(term)))
+  })
+}
 
 /** 角色标签页：左列表右编辑，保存才生效。 */
 export function RolesTab(props: { store: CollaborationStore }): ReactNode {
@@ -134,8 +214,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const [draftName, setDraftName] = useState('')
   const [draftDesc, setDraftDesc] = useState('')
   const [draftModels, setDraftModels] = useState<RoleModelCandidate[]>([])
-  const [catalogProvider, setCatalogProvider] = useState('')
-  const [catalogModel, setCatalogModel] = useState('')
+  const [catalogQuery, setCatalogQuery] = useState('')
+  const [catalogSelection, setCatalogSelection] = useState<Set<string>>(() => new Set())
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
@@ -144,8 +224,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
 
   const select = (name: string | undefined, isDraft = false): void => {
     setSelected(name)
-    setCatalogProvider('')
-    setCatalogModel('')
+    setCatalogQuery('')
+    setCatalogSelection(new Set())
     if (name === undefined || isDraft) {
       setDraftName('')
       setDraftDesc('')
@@ -180,8 +260,22 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const isNew = selected === NEW_SELECTION
   const currentRole = isNew ? undefined : state.templates.find((t) => t.name === selected)
   const canSave = draftName.trim() !== '' && state.rolesError === null
-  const catalogProviders = state.modelCatalog.providers
-  const catalogModels = catalogProviders.find((provider) => provider.id === catalogProvider)?.models ?? []
+  const catalogOptions = collectCatalogOptions(state.modelCatalog)
+  const filteredCatalog = filterCatalogOptions(catalogOptions, catalogQuery)
+
+  /** 「添加所选」：按清单顺序追加已勾选、且当前候选里没有的 provider+model。 */
+  const addSelected = (): void => {
+    const ordered = filteredCatalog.filter((option) => catalogSelection.has(option.key))
+    const toAdd = ordered.filter(
+      (option) => !draftModels.some((candidate) => candidate.provider === option.providerId && candidate.model === option.modelId),
+    )
+    if (toAdd.length > 0) {
+      setDraftModels((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
+      setDirty(true)
+    }
+    setCatalogQuery('')
+    setCatalogSelection(new Set())
+  }
 
   return (
     <div data-router-collab-roles-tab style={LAYOUT_STYLE}>
@@ -280,46 +374,76 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                   添加一行
                 </button>
               </div>
-              <div style={ROW_STYLE}>
-                <select
-                  data-router-collab-catalog-provider
-                  style={{ ...INPUT_STYLE, flex: 1 }}
-                  aria-label="清单 provider"
-                  value={catalogProvider}
-                  onChange={(event) => {
-                    setCatalogProvider(event.target.value)
-                    setCatalogModel('')
-                  }}
-                >
-                  <option value="">{state.modelCatalog.unavailable ? '清单不可用' : '选择 provider'}</option>
-                  {catalogProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>{provider.name}</option>
-                  ))}
-                </select>
-                <select
-                  data-router-collab-catalog-model
-                  style={{ ...INPUT_STYLE, flex: 1 }}
-                  aria-label="清单 model"
-                  value={catalogModel}
-                  onChange={(event) => { setCatalogModel(event.target.value) }}
-                >
-                  <option value="">选择 model</option>
-                  {catalogModels.map((model) => (
-                    <option key={model.id} value={model.id}>{model.name}</option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  data-router-collab-catalog-add
-                  style={SMALL_BUTTON_STYLE}
-                  disabled={catalogProvider === '' || catalogModel === ''}
-                  onClick={() => {
-                    setDraftModels((rows) => [...rows, { provider: catalogProvider, model: catalogModel }])
-                    setDirty(true)
-                  }}
-                >
-                  从清单添加
-                </button>
+              <div data-router-collab-catalog style={CATALOG_STYLE}>
+                <div style={{ fontSize: 12, marginBottom: 6 }}>从清单添加（搜索 provider / model 的名称或 ID）</div>
+                <input
+                  data-router-collab-catalog-query
+                  style={INPUT_STYLE}
+                  placeholder="搜索 provider / model"
+                  aria-label="搜索清单"
+                  value={catalogQuery}
+                  onChange={(event) => { setCatalogQuery(event.target.value) }}
+                />
+                {state.modelCatalog.unavailable ? (
+                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>清单不可用</div>
+                ) : catalogOptions.length === 0 ? (
+                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>清单为空</div>
+                ) : filteredCatalog.length === 0 ? (
+                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>无匹配</div>
+                ) : (
+                  <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
+                    {filteredCatalog.map((option) => (
+                      <label
+                        key={option.key}
+                        data-router-collab-catalog-option
+                        data-router-collab-catalog-provider={option.providerId}
+                        data-router-collab-catalog-model={option.modelId}
+                        style={CATALOG_OPTION_STYLE}
+                      >
+                        <input
+                          type="checkbox"
+                          data-router-collab-catalog-checkbox
+                          checked={catalogSelection.has(option.key)}
+                          onChange={() => {
+                            setCatalogSelection((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(option.key)) next.delete(option.key)
+                              else next.add(option.key)
+                              return next
+                            })
+                          }}
+                        />
+                        <span style={{ fontSize: 12 }}>
+                          <span style={{ fontWeight: 500 }}>{option.providerName}</span>
+                          <span style={{ color: '#6b7078' }}>（{option.providerId}）</span>
+                          <span> / </span>
+                          <span style={{ fontWeight: 500 }}>{option.modelName}</span>
+                          <span style={{ color: '#6b7078' }}>（{option.modelId}）</span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <button
+                    type="button"
+                    data-router-collab-catalog-add
+                    style={SMALL_BUTTON_STYLE}
+                    disabled={catalogSelection.size === 0}
+                    onClick={addSelected}
+                  >
+                    添加所选
+                  </button>
+                  <button
+                    type="button"
+                    data-router-collab-catalog-clear
+                    style={SMALL_BUTTON_STYLE}
+                    disabled={catalogSelection.size === 0}
+                    onClick={() => { setCatalogSelection(new Set()) }}
+                  >
+                    清空选择
+                  </button>
+                </div>
               </div>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
