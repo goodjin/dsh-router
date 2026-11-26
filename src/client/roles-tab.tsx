@@ -150,12 +150,6 @@ const CATALOG_OPTION_STYLE: CSSProperties = {
   overflowWrap: 'anywhere',
 }
 
-const CATALOG_OPTION_DISABLED_STYLE: CSSProperties = {
-  ...CATALOG_OPTION_STYLE,
-  cursor: 'default',
-  opacity: 0.6,
-}
-
 const CATALOG_STATUS_STYLE: CSSProperties = {
   marginTop: 6,
   padding: '6px 8px',
@@ -263,11 +257,11 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const catalogOptions = collectCatalogOptions(state.modelCatalog)
   const filteredCatalog = filterCatalogOptions(catalogOptions, catalogQuery)
 
-  /** 「添加所选」：按清单顺序追加已勾选、且当前候选里没有的 provider+model。 */
+  /** 「添加所选」：按清单顺序追加所有已勾选、且当前候选里没有的 provider+model。 */
   const addSelected = (): void => {
-    const ordered = filteredCatalog.filter((option) => catalogSelection.has(option.key))
+    const ordered = catalogOptions.filter((option) => catalogSelection.has(option.key))
     const toAdd = ordered.filter(
-      (option) => !draftModels.some((candidate) => candidate.provider === option.providerId && candidate.model === option.modelId),
+      (option) => !draftModels.some((candidate) => candidate.provider.trim() === option.providerId.trim() && candidate.model.trim() === option.modelId.trim()),
     )
     if (toAdd.length > 0) {
       setDraftModels((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
@@ -385,11 +379,11 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                   onChange={(event) => { setCatalogQuery(event.target.value) }}
                 />
                 {state.modelCatalog.unavailable ? (
-                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>清单不可用</div>
+                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单不可用</div>
                 ) : catalogOptions.length === 0 ? (
-                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>清单为空</div>
+                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单为空</div>
                 ) : filteredCatalog.length === 0 ? (
-                  <div data-router-collab-catalog-status style={CATALOG_STATUS_STYLE}>无匹配</div>
+                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>无匹配</div>
                 ) : (
                   <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
                     {filteredCatalog.map((option) => (

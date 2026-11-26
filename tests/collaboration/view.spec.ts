@@ -488,8 +488,9 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
 
   it('多选按清单顺序一次追加，添加后清空搜索与选择', async () => {
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
-    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    // 反向点击：证明追加顺序来自清单而非点击顺序。
     click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-reasoner')))
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
     await flush()
     click(container.querySelector('[data-router-collab-catalog-add]')!)
     await flush()
@@ -516,6 +517,48 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelector('[data-router-collab-catalog-add]')!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
+    await act(async () => { root.unmount() })
+  })
+
+  it('勾选后缩小搜索，隐藏的已勾选项与可见项一起按清单顺序追加', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    // 先勾选 deepseek-chat。
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    // 再搜索 openai 并勾选 gpt-4o；此刻可见列表只剩 openai。
+    const query = container.querySelector<HTMLInputElement>('[data-router-collab-catalog-query]')!
+    await act(async () => { setFieldValue(query, 'openai') })
+    await flush()
+    click(catalogCheckbox(catalogOptionRow(container, 'openai', 'gpt-4o')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    const providers = [...container.querySelectorAll('[data-router-collab-model-provider]')].map((el) => (el as HTMLInputElement).value)
+    const models = [...container.querySelectorAll('[data-router-collab-model-model]')].map((el) => (el as HTMLInputElement).value)
+    expect(providers).toEqual(['deepseek', 'openai'])
+    expect(models).toEqual(['deepseek-chat', 'gpt-4o'])
+    await act(async () => { root.unmount() })
+  })
+
+  it('手工候选带首尾空格时，清单添加按 trim 去重且不改保存值', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    // 手工添加一行并填入带空格的 provider/model。
+    click(container.querySelector('[data-router-collab-model-add]')!)
+    await flush()
+    const provider = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-provider]')[0]!
+    const model = container.querySelectorAll<HTMLInputElement>('[data-router-collab-model-model]')[0]!
+    await act(async () => {
+      setFieldValue(provider, ' deepseek ')
+      setFieldValue(model, ' deepseek-chat ')
+    })
+    // 从清单勾选同项并添加：trim 后判为已有，应被跳过。
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
+    // 保存值仍是带空格的原文，不被去重逻辑改动。
+    expect((container.querySelector('[data-router-collab-model-provider]') as HTMLInputElement).value).toBe(' deepseek ')
     await act(async () => { root.unmount() })
   })
 
