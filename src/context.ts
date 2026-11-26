@@ -7,6 +7,10 @@
  * ctx.agent/根 id、不扫历史、不建可变全局 currentSession）；与共享 dataDir 一起交给纯
  * 构建器 buildCollaborationContext 产出面向模型的文本。
  *
+ * 这一段还按会话贡献「你的角色与职责」：被派发的子会话在这里拿到自己的角色职责（职责
+ * 不再拼在派发初始指令里）。职责解析是异步的（盘上会话绑定 → 分工记录 → 角色模板），
+ * text() 是同步回调：命中缓存即渲染，没有就后台解析一次、这一拍宁缺勿错（不渲染）。
+ *
  * 缺少宿主 agent 面（assembly.agent 缺席）时不臆造会话身份：产出一段诊断说明（列出工具
  * 与协作目录、提示当前会话 ID 不可用），绝不抛（组装路径抛错会炸整轮对话）。
  *
@@ -17,6 +21,7 @@ import Schema from '@deepseek-ai/schemastery'
 
 import { buildCollaborationContext } from './collaboration/context.ts'
 import type { ActiveTaskCache, ActiveTaskView } from './collaboration/active-tasks.ts'
+import type { RoleDuty } from './collaboration/role-duty.ts'
 
 /** 本入口的插件名（诊断显示用）。 */
 export const name = 'router-context'
@@ -67,6 +72,14 @@ interface RouterCollaborationFace {
   roles?: { list(): Promise<Array<{ name: string; description: string }>> }
   /** 活跃任务视图缓存（共享单实例）；缺席时任务段降级为「加载中」。 */
   activeTasks?: ActiveTaskCache
+  /**
+   * 角色职责缓存（共享单实例）：被派发的子会话按会话取自己的角色职责，注入系统提示词。
+   * 缺席时不注入职责段（非派发会话本来就没有职责段）。
+   */
+  roleDuties?: {
+    get(sessionId: string): RoleDuty | undefined
+    refresh(sessionId: string): Promise<RoleDuty | undefined>
+  }
 }
 
 /** 从当次组装上下文取真实当前会话 ID（agent.id）；取不到返回 undefined。 */
@@ -145,7 +158,18 @@ export function apply(ctx: ContextHost, config: RouterContextConfig): () => void
       } catch {
         tasks = undefined // 读缓存失败按「加载中」渲染，绝不穿透组装路径
       }
-      return buildCollaborationContext({ sessionId, dataDir, roles: cache.value, tasks })
+      // 角色职责（被派发的子会话才有）：同步读缓存；没有就后台解析一次（fire-and-forget），
+      // 这一拍宁缺勿错——不渲染职责段，绝不穿透组装路径。
+      let duty: RoleDuty | undefined
+      try {
+        duty = ctx.routerCollaboration.roleDuties?.get(sessionId)
+        if (duty === undefined && ctx.routerCollaboration.roleDuties !== undefined) {
+          void ctx.routerCollaboration.roleDuties.refresh(sessionId).catch(() => {})
+        }
+      } catch {
+        duty = undefined
+      }
+      return buildCollaborationContext({ sessionId, dataDir, roles: cache.value, tasks, duty })
     },
   })
   return () => {

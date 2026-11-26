@@ -126,7 +126,7 @@ describe('buildCollaborationContext — 角色清单注入', () => {
     expect(out).toContain('拆解任务并派发汇总')
     expect(out).toContain('执行者')
     expect(out).toContain('router_role_list')
-    expect(out).toContain('初始指令')
+    expect(out).toContain('系统提示词')
   })
 
   it('空角色库：显示暂无并指引用户/模型新建', () => {

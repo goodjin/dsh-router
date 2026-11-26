@@ -154,6 +154,7 @@ D6 按桌面版理解：不传 `agentOptions` 时，子会话用主会话最近�
 职责消费：
 
 - `composeDispatchInstruction`（`dispatch.ts` 68–89 行）把整段 `description` trim 后注入初始指令。
+  （现状更正 2026-11-26：初始指令不再注入职责正文；职责改由上下文行按会话注入子会话的系统提示词。）
 - `renderRoles` / `dutySummary`（`context.ts` 104–126 行）上下文只注入第一个非空行，不注入全文。
 
 候选文本若混进 `description`，会同时污染初始指令和上下文摘要。必须在解析结果里分开。
@@ -285,7 +286,7 @@ interface RoleTemplate {
 
 `continue` 不重置游标，不传 `agentOptions`。对一个没有游标的旧子会话做 `continue`，不会因此开始自动切换。
 
-职责注入仍用解析后的 `description`。分工记录的 `body` 仍是 `composeDispatchInstruction` 的结果，不写入候选 JSON。
+职责注入仍用解析后的 `description`（现状更正 2026-11-26：注入位置从初始指令改为子会话的系统提示词）。分工记录的 `body` 仍是 `composeDispatchInstruction` 的结果，不写入候选 JSON。
 
 ## 一次子会话的状态机
 

@@ -22,6 +22,7 @@ import { createCollaborationRuntime } from './collaboration/runtime.ts'
 import type { CollaborationLlm } from './collaboration/routes.ts'
 import { seedPresetRoles } from './collaboration/roles.ts'
 import { createActiveTaskCache, type ActiveTaskCache } from './collaboration/active-tasks.ts'
+import { createRoleDutyService, type RoleDutyService } from './collaboration/role-duty.ts'
 import {
   createModelSwitch,
   type ChildModelRun,
@@ -52,6 +53,11 @@ export interface RouterCollaborationFace {
   dataDir: string
   /** 活跃任务视图缓存：tools/dispatch 行写后刷新，context 行同步读（见 active-tasks.ts）。 */
   activeTasks: ActiveTaskCache
+  /**
+   * 角色职责服务（共享单实例）：tools/dispatch 行预热缓存与落盘会话绑定，context 行同步读
+   * 并按会话注入「你的角色与职责」段（见 role-duty.ts）。
+   */
+  roleDuties: RoleDutyService
   /** 本次 apply 的子会话候选游标。不落盘，卸载后不重建。 */
   childModelRuns: Map<string, ChildModelRun>
 }
@@ -77,6 +83,11 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
     roles: runtime.roles,
     dataDir: runtime.dataDir,
     activeTasks: createActiveTaskCache(runtime.records),
+    roleDuties: createRoleDutyService({
+      dataDir: runtime.dataDir,
+      records: runtime.records,
+      roles: runtime.roles,
+    }),
     childModelRuns,
   }
   // 服务必须发布到根作用域：预设内部插件（tools/context 行）经 isolate 符号解析服务，

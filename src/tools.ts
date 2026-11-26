@@ -36,6 +36,8 @@ interface ToolsContext {
     activeTasks?: { refresh(rootSessionId: string): Promise<unknown> }
     /** 本次入口 apply 的子会话候选游标；缺席时派发不登记自动切换。 */
     childModelRuns?: Map<string, ChildModelRun>
+    /** 角色职责服务（共享单实例）：派发后预热缓存与落盘会话绑定。 */
+    roleDuties?: Parameters<typeof buildCollaborationTools>[0]['roleDuties']
   }
   subagents?: Parameters<typeof buildCollaborationTools>[0]['subagents']
 }
@@ -53,6 +55,7 @@ export function apply(ctx: ToolsContext): () => void {
           await ctx.routerCollaboration.activeTasks!.refresh(rootSessionId)
         },
     childModelRuns: ctx.routerCollaboration.childModelRuns,
+    roleDuties: ctx.routerCollaboration.roleDuties,
   })
   const disposers = definitions.map((definition) => ctx.tools.register(definition))
   return () => {

@@ -18,7 +18,7 @@ var CollaborationError = class extends Error {
 
 //#endregion
 //#region src/collaboration/path-guard.ts
-function isEnoent$2(error) {
+function isEnoent$3(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
 var PathGuard = class {
@@ -47,7 +47,7 @@ var PathGuard = class {
 			try {
 				stat = await this.fs.lstat(dir);
 			} catch (error) {
-				if (isEnoent$2(error)) continue;
+				if (isEnoent$3(error)) continue;
 				throw new CollaborationError("IO_ERROR", `命名空间目录检查失败: ${dir}`, { cause: error });
 			}
 			if (stat.isSymbolicLink()) throw new CollaborationError("INVALID_INPUT", `命名空间不接受符号链接目录: ${dir}`);
@@ -77,7 +77,7 @@ var PathGuard = class {
 		try {
 			stat = await this.fs.lstat(path);
 		} catch (error) {
-			if (isEnoent$2(error)) throw new CollaborationError("NOT_FOUND", `${what}不存在`);
+			if (isEnoent$3(error)) throw new CollaborationError("NOT_FOUND", `${what}不存在`);
 			throw new CollaborationError("IO_ERROR", `${what}读取失败`, { cause: error });
 		}
 		if (stat.isSymbolicLink()) throw new CollaborationError("INVALID_INPUT", `${what}不接受符号链接: ${path}`);
@@ -100,7 +100,7 @@ const WORK_LABELS = new Set([
 	"已报告"
 ]);
 const RECORD_EXT = ".json";
-const NAMESPACE$1 = "collaboration";
+const NAMESPACE$2 = "collaboration";
 /** UUID v4 形态（含版本位 4、变体位 8/9/a/b）——taskId/recordId 必须匹配，拒绝任意路径。 */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 /** 进程内临时文件序号：与 pid 一起保证同目录临时名唯一，并发写不互踩。 */
@@ -119,19 +119,19 @@ function nodeFs$1() {
 		lstat: (p) => lstat(p)
 	};
 }
-function isEnoent$1(error) {
+function isEnoent$2(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
 function isUuid(value) {
 	return UUID_RE.test(value);
 }
 /** 非空字符串判定（可选字段与必需字段共用同一规则，不 as 虚假类型掩盖检查）。 */
-function isNonEmptyString(value) {
+function isNonEmptyString$1(value) {
 	return typeof value === "string" && value.length > 0;
 }
 /** 非空字符串校验（title/name 等非空必需字段）。 */
 function requireNonEmptyString(value, what) {
-	if (!isNonEmptyString(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
+	if (!isNonEmptyString$1(value)) throw new CollaborationError("INVALID_INPUT", `${what} 必须是非空字符串`);
 	return value;
 }
 /** UUID 校验（taskId/recordId/parentRecordId/roleId）。 */
@@ -146,7 +146,7 @@ function areSessionLinksValid(links) {
 	for (const link of links) {
 		if (typeof link !== "object" || link === null) return false;
 		const l = link;
-		if (!isNonEmptyString(l.sessionId) || !isNonEmptyString(l.label)) return false;
+		if (!isNonEmptyString$1(l.sessionId) || !isNonEmptyString$1(l.label)) return false;
 	}
 	return true;
 }
@@ -157,7 +157,7 @@ function areArtifactRefsValid(refs) {
 	for (const ref of refs) {
 		if (typeof ref !== "object" || ref === null) return false;
 		const r = ref;
-		if (!isNonEmptyString(r.location) || !isNonEmptyString(r.label)) return false;
+		if (!isNonEmptyString$1(r.location) || !isNonEmptyString$1(r.label)) return false;
 	}
 	return true;
 }
@@ -190,7 +190,7 @@ function validatePatch(patch) {
 function isWorkRecordShape(value) {
 	if (typeof value !== "object" || value === null) return false;
 	const r = value;
-	return typeof r.id === "string" && typeof r.taskId === "string" && typeof r.rootSessionId === "string" && isNonEmptyString(r.title) && typeof r.body === "string" && typeof r.createdAt === "number" && typeof r.updatedAt === "number" && RECORD_KINDS.has(r.kind) && (r.workLabel === void 0 || WORK_LABELS.has(r.workLabel)) && areSessionLinksValid(r.sessions) && areArtifactRefsValid(r.artifacts) && (r.parentRecordId === void 0 || typeof r.parentRecordId === "string" && isUuid(r.parentRecordId));
+	return typeof r.id === "string" && typeof r.taskId === "string" && typeof r.rootSessionId === "string" && isNonEmptyString$1(r.title) && typeof r.body === "string" && typeof r.createdAt === "number" && typeof r.updatedAt === "number" && RECORD_KINDS.has(r.kind) && (r.workLabel === void 0 || WORK_LABELS.has(r.workLabel)) && areSessionLinksValid(r.sessions) && areArtifactRefsValid(r.artifacts) && (r.parentRecordId === void 0 || typeof r.parentRecordId === "string" && isUuid(r.parentRecordId));
 }
 function parseRecord(text, path) {
 	let raw;
@@ -226,7 +226,7 @@ async function atomicWrite$1(fs, target, content) {
 }
 /** 创建 RecordStore。dataDir 为插件数据根，内部拼一次 collaboration 命名空间。 */
 function createRecordStore(dataDir, deps = {}) {
-	const base = join(dataDir, NAMESPACE$1);
+	const base = join(dataDir, NAMESPACE$2);
 	const now = deps.now ?? (() => Date.now());
 	const uuid = deps.uuid ?? randomUUID;
 	const fs = deps.fs ?? nodeFs$1();
@@ -247,7 +247,7 @@ function createRecordStore(dataDir, deps = {}) {
 		try {
 			text = await fs.readFile(path);
 		} catch (error) {
-			if (isEnoent$1(error)) throw new CollaborationError("NOT_FOUND", `记录不存在: ${path}`);
+			if (isEnoent$2(error)) throw new CollaborationError("NOT_FOUND", `记录不存在: ${path}`);
 			throw new CollaborationError("IO_ERROR", `记录读取失败: ${path}`, { cause: error });
 		}
 		return parseRecord(text, path);
@@ -339,7 +339,7 @@ function createRecordStore(dataDir, deps = {}) {
 				await guard.assertDirectory(dir);
 				taskNames = await fs.readdir(dir);
 			} catch (error) {
-				if (isEnoent$1(error)) return [];
+				if (isEnoent$2(error)) return [];
 				if (error instanceof CollaborationError) throw error;
 				throw new CollaborationError("IO_ERROR", `列举任务失败: ${rootSessionId}`, { cause: error });
 			}
@@ -352,7 +352,7 @@ function createRecordStore(dataDir, deps = {}) {
 					await guard.assertDirectory(join(dir, taskName));
 					fileNames = await fs.readdir(join(dir, taskName));
 				} catch (error) {
-					if (isEnoent$1(error)) continue;
+					if (isEnoent$2(error)) continue;
 					if (error instanceof CollaborationError) throw error;
 					throw new CollaborationError("IO_ERROR", `列举记录失败: ${taskName}`, { cause: error });
 				}
@@ -906,7 +906,7 @@ const HISTORICAL_PRESET_DESCRIPTIONS = {
 //#region src/collaboration/roles.ts
 const ROLE_EXT = ".md";
 const LEGACY_EXT = ".json";
-const NAMESPACE = "collaboration";
+const NAMESPACE$1 = "collaboration";
 /** 名字（=文件名）长度上限。 */
 const NAME_MAX = 64;
 let tmpSeq = 0;
@@ -924,7 +924,7 @@ function nodeFs() {
 		lstat: (p) => lstat(p)
 	};
 }
-function isEnoent(error) {
+function isEnoent$1(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
 /**
@@ -956,7 +956,7 @@ async function atomicWrite(fs, target, content) {
 }
 /** 创建 RoleStore。dataDir 为插件数据根，内部拼一次 collaboration 命名空间。 */
 function createRoleStore(dataDir, deps = {}) {
-	const base = join(dataDir, NAMESPACE);
+	const base = join(dataDir, NAMESPACE$1);
 	const rolesDir = join(base, "roles");
 	const fs = deps.fs ?? nodeFs();
 	const guard = new PathGuard(fs, base);
@@ -976,7 +976,7 @@ function createRoleStore(dataDir, deps = {}) {
 		try {
 			text = await fs.readFile(path);
 		} catch (error) {
-			if (isEnoent(error)) throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${path}`);
+			if (isEnoent$1(error)) throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${path}`);
 			throw new CollaborationError("IO_ERROR", `角色模板读取失败: ${path}`, { cause: error });
 		}
 		const parsed = parseRoleDocument(name$1, text);
@@ -997,7 +997,7 @@ function createRoleStore(dataDir, deps = {}) {
 				await guard.assertDirectory(rolesDir);
 				names = await fs.readdir(rolesDir);
 			} catch (error) {
-				if (isEnoent(error)) return [];
+				if (isEnoent$1(error)) return [];
 				if (error instanceof CollaborationError) throw error;
 				throw new CollaborationError("IO_ERROR", "列举角色模板失败", { cause: error });
 			}
@@ -1050,7 +1050,7 @@ function createRoleStore(dataDir, deps = {}) {
 				try {
 					await fs.lstat(path);
 				} catch (error) {
-					if (isEnoent(error)) return false;
+					if (isEnoent$1(error)) return false;
 					throw new CollaborationError("IO_ERROR", `角色模板删除前校验失败: ${path}`, { cause: error });
 				}
 				try {
@@ -1067,7 +1067,7 @@ function createRoleStore(dataDir, deps = {}) {
 				await guard.assertDirectory(rolesDir);
 				names = await fs.readdir(rolesDir);
 			} catch (error) {
-				if (isEnoent(error)) return;
+				if (isEnoent$1(error)) return;
 				if (error instanceof CollaborationError) throw error;
 				throw new CollaborationError("IO_ERROR", "迁移旧角色时列举目录失败", { cause: error });
 			}
@@ -1092,7 +1092,7 @@ function createRoleStore(dataDir, deps = {}) {
 					await fs.readFile(rolePath(name$1));
 					continue;
 				} catch (error) {
-					if (!isEnoent(error)) throw error;
+					if (!isEnoent$1(error)) throw error;
 				}
 				await atomicWrite(fs, rolePath(name$1), legacy.description);
 			}
@@ -1202,6 +1202,139 @@ function createActiveTaskCache(records, options = {}) {
 			return cache.get(rootSessionId);
 		},
 		refresh
+	};
+}
+
+//#endregion
+//#region src/collaboration/role-duty.ts
+/** 协作命名空间（与 RecordStore/RoleStore 一致）。 */
+const NAMESPACE = "collaboration";
+/** 会话绑定目录名（collaboration/sessions/）。 */
+const SESSIONS_DIR = "sessions";
+/** 绑定文件路径：会话 id 哈希做文件名（只用于文件名，不产生权限）。 */
+function bindingPath(dataDir, sessionId) {
+	return join(dataDir, NAMESPACE, SESSIONS_DIR, `${createHash("sha256").update(sessionId).digest("hex")}.json`);
+}
+function isNonEmptyString(value) {
+	return typeof value === "string" && value.trim() !== "";
+}
+function isEnoent(error) {
+	return typeof error === "object" && error !== null && error.code === "ENOENT";
+}
+/** 读绑定文件：没有/坏了/形状不对都当「没有绑定」（不抛）。 */
+async function readBinding(dataDir, sessionId) {
+	let text;
+	try {
+		text = await readFile(bindingPath(dataDir, sessionId), "utf8");
+	} catch (error) {
+		if (isEnoent(error)) return void 0;
+		return;
+	}
+	let raw;
+	try {
+		raw = JSON.parse(text);
+	} catch {
+		return;
+	}
+	if (typeof raw !== "object" || raw === null) return void 0;
+	const record = raw;
+	if (!isNonEmptyString(record.sessionId)) return void 0;
+	if (!isNonEmptyString(record.rootSessionId)) return void 0;
+	if (!isNonEmptyString(record.taskId)) return void 0;
+	return {
+		sessionId: record.sessionId,
+		rootSessionId: record.rootSessionId,
+		taskId: record.taskId
+	};
+}
+/** 写绑定文件：临时文件 + rename 原子替换（半截文件不算绑定）。 */
+async function writeBinding(dataDir, binding) {
+	const path = bindingPath(dataDir, binding.sessionId);
+	await mkdir(join(dataDir, NAMESPACE, SESSIONS_DIR), { recursive: true });
+	const tmp = `${path}.tmp-${process.pid}`;
+	try {
+		await writeFile(tmp, JSON.stringify(binding, null, 2), "utf8");
+		await rename(tmp, path);
+	} catch (error) {
+		await rmQuiet(tmp);
+		throw error;
+	}
+}
+async function rmQuiet(path) {
+	try {
+		await rm(path, { force: true });
+	} catch {}
+}
+/**
+* 创建职责服务。缓存是加速层：盘上绑定 + 分工记录 + 角色模板才是事实源。
+*/
+function createRoleDutyService(deps) {
+	const ttlMs = typeof deps.ttlMs === "number" && Number.isFinite(deps.ttlMs) && deps.ttlMs >= 0 ? deps.ttlMs : 3e4;
+	const missTtlMs = typeof deps.missTtlMs === "number" && Number.isFinite(deps.missTtlMs) && deps.missTtlMs >= 0 ? deps.missTtlMs : 5e3;
+	const cache = /* @__PURE__ */ new Map();
+	const loading = /* @__PURE__ */ new Set();
+	/** 反查职责：绑定 → 分工记录（sessions[].label = 角色名）→ 角色模板正文。 */
+	const resolveDuty = async (sessionId) => {
+		const binding = await readBinding(deps.dataDir, sessionId);
+		if (binding === void 0) return void 0;
+		const assignments = await deps.records.list(binding.rootSessionId, {
+			taskId: binding.taskId,
+			kind: "assignment"
+		});
+		let roleName;
+		for (const record of assignments) {
+			for (const link of record.sessions ?? []) if (link.sessionId === sessionId) {
+				roleName = link.label;
+				break;
+			}
+			if (roleName !== void 0) break;
+		}
+		if (roleName === void 0) return void 0;
+		const role = await deps.roles.read(roleName);
+		return {
+			roleName,
+			description: role.description.trim()
+		};
+	};
+	return {
+		get(sessionId) {
+			const entry = cache.get(sessionId);
+			if (entry === void 0) return void 0;
+			return Date.now() - entry.at < (entry.duty === void 0 ? missTtlMs : ttlMs) ? entry.duty : void 0;
+		},
+		async refresh(sessionId) {
+			if (loading.has(sessionId)) return this.get(sessionId);
+			loading.add(sessionId);
+			try {
+				const duty = await resolveDuty(sessionId);
+				cache.set(sessionId, {
+					duty,
+					at: Date.now()
+				});
+				return duty;
+			} catch {
+				cache.set(sessionId, {
+					duty: void 0,
+					at: Date.now()
+				});
+				return;
+			} finally {
+				loading.delete(sessionId);
+			}
+		},
+		prime(sessionId, duty) {
+			cache.set(sessionId, {
+				duty,
+				at: Date.now()
+			});
+		},
+		async bind(input) {
+			await writeBinding(deps.dataDir, {
+				sessionId: input.sessionId,
+				rootSessionId: input.rootSessionId,
+				taskId: input.taskId
+			});
+		}
 	};
 }
 
@@ -1598,6 +1731,11 @@ function apply(ctx, rawConfig) {
 		roles: runtime.roles,
 		dataDir: runtime.dataDir,
 		activeTasks: createActiveTaskCache(runtime.records),
+		roleDuties: createRoleDutyService({
+			dataDir: runtime.dataDir,
+			records: runtime.records,
+			roles: runtime.roles
+		}),
 		childModelRuns
 	};
 	const released = (!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);

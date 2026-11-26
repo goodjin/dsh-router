@@ -82,20 +82,21 @@ async function run(tool: ToolDefinition, args: unknown, exec: unknown = EXEC): P
   return tool.execute(args, exec)
 }
 
-describe('dispatch_composes_duty — 代码拼装初始指令', () => {
-  it('职责说明 + 任务 + 根会话 + 报告链要点都在指令里', () => {
+describe('dispatch_composes_duty — 代码拼装初始指令（职责不在指令里）', () => {
+  it('任务 + taskId + 根会话 + 报告链要点都在指令里；角色名与职责正文不在', () => {
     const text = composeDispatchInstruction({
-      role: { name: '执行者', description: '接受分工后独立完成具体工作。' },
       task: '改造登录模块',
       taskId: 'task-1',
       rootSessionId: 'root-1',
     })
     expect(text).toContain('task-1')
-    expect(text).toContain('执行者')
-    expect(text).toContain('接受分工后独立完成具体工作。')
     expect(text).toContain('改造登录模块')
     expect(text).toContain('root-1')
     expect(text).toContain('报告')
+    // 职责与角色名进的是系统提示词，不是初始指令。
+    expect(text).not.toContain('执行者')
+    expect(text).not.toContain('接受分工后独立完成具体工作。')
+    expect(text).toContain('你的角色与职责')
   })
 })
 
@@ -110,8 +111,10 @@ describe('dispatch_spawns_and_records — 创建子会话并登记分工记录',
     expect(result.childId).toBe('child-9')
     const started = sub.started()!
     expect(started.provider).toBe('spawn')
-    expect(started.promptText).toContain('拆解并汇总。')
+    // 初始指令只有任务与通用约定：角色名与职责正文不在里面（职责进系统提示词）。
     expect(started.promptText).toContain('改造登录模块')
+    expect(started.promptText).not.toContain('拆解并汇总。')
+    expect(started.promptText).not.toContain('执行者')
     expect(started.parent).toBe(EXEC.agent)
     expect(started.maxDepth).toBe(2)
     expect(started.delivery).toBe('parent')
@@ -121,7 +124,8 @@ describe('dispatch_spawns_and_records — 创建子会话并登记分工记录',
     const record = list[0]!
     expect(record.workLabel).toBe('待处理')
     expect(record.sessions).toEqual([{ sessionId: 'child-9', label: '执行者' }])
-    expect(record.body).toContain('拆解并汇总。')
+    expect(record.body).toContain('改造登录模块')
+    expect(record.body).not.toContain('拆解并汇总。')
     expect(result.record.taskId).toBe(taskId)
     expect(result.record.recordId).toBe(record.id)
   })
@@ -374,7 +378,8 @@ describe('dispatch role models', () => {
     expect(Object.keys(request!.agentOptions!)).toEqual(['provider', 'model'])
     expect(request?.prompt[0]!.text).not.toContain('dsh-router:models')
     expect(request?.prompt[0]!.text).not.toContain('deepseek')
-    expect(request?.prompt[0]!.text).toContain('只写职责')
+    // 职责不在初始指令里（它进的是子会话的系统提示词）。
+    expect(request?.prompt[0]!.text).not.toContain('只写职责')
     expect(result.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
     expect(runs.get('child-model')?.parentSessionId).toBe('parent-9')
     expect(runs.get('child-model')?.sequence).toEqual([

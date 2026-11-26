@@ -11,7 +11,7 @@
  */
 
 import { CollaborationError, type RecordDraft, type RecordPatch, type RecordQuery, type RecordStore, type RoleStore } from './types.ts'
-import { buildDispatchTool, type SubagentsFace } from './dispatch.ts'
+import { buildDispatchTool, type RoleDutyBinder, type SubagentsFace } from './dispatch.ts'
 import type { ChildModelRun } from './model-switch.ts'
 import { buildCompactTool } from './compact.ts'
 
@@ -180,6 +180,8 @@ export function buildCollaborationTools(deps: {
   subagents?: SubagentsFace
   afterWrite?: AfterRecordWrite
   childModelRuns?: Map<string, ChildModelRun>
+  /** 角色职责服务：派发后预热缓存与落盘会话绑定（缺席则不做）。 */
+  roleDuties?: RoleDutyBinder
 }): ToolDefinition[] {
   const { records, roles } = deps
   // 写后刷新：失败只告警，绝不把一次成功的写入变成失败（缓存下一拍会自愈）。
@@ -198,6 +200,7 @@ export function buildCollaborationTools(deps: {
       subagents: deps.subagents,
       afterWrite,
       childModelRuns: deps.childModelRuns,
+      roleDuties: deps.roleDuties,
     }),
     {
       name: 'router_record_create',

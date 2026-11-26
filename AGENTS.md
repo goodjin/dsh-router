@@ -53,7 +53,7 @@ patch 现含：裸包名根服务行（`@goodjin2/dsh-router`）+ 独立工作�
 （/router/collaboration/{records,record,roles,models}），与工具行共享同一 RecordStore/RoleStore 单实例，
 工作台行捕获宿主 sessionController（可选能力），/router/collaboration/models 取 sessionController.modelCatalog() 的可路由分组（与界面模型选择器同源），failures 不进清单；拿不到目录时 models 路由返回 unavailable:true，绝不退回全量枚举）+ 一条静态「Router」预设行（`dsh-router`/`Router`，
 persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+ 九条协作工具行（含派发工具
-`router_dispatch`：职责注入由代码完成，内部经 subagents 服务选 spawn/fork/continue，自动登记分工记录；
+`router_dispatch`：职责注入由代码完成（注入被派发子会话的**系统提示词**，初始指令里不再带角色名与职责正文），内部经 subagents 服务选 spawn/fork/continue，自动登记分工记录；
 `taskId` 可选，省略即自动建任务；含压缩工具 `router_compact`：只压上次检查点以来的已闭合回合、原位取代成
 任务列表检查点，走 `session.append(surfaceOp:replace)` 公开 API，**不自动压**）+ 协作上下文行（角色清单 + **活跃任务完整描述**注入）+ DSH 原生
 执行/用户提问/项目指令/默认压缩/子代理控制（仅 `tool-subagent-control`；原生 spawn 工具行已删，
@@ -65,7 +65,7 @@ persona `complete:true`，提示词来自 `collaborationPrompt` 单一来源）+
 Router 预设为静态行（id `dsh-router`），不再运行时动态注册；旧 supervisor/worker/executor
 预设与旧动态服务已退役，不恢复。角色模板是一个角色一个 md 文件（文件名=角色名、正文=职责说明），
 首次启用幂等种入 15 个预置角色（v3：「主管」退役，其余专业角色职责为「首行摘要 + 详细正文」
-两层结构——上下文清单只注入首行摘要，全文随派发注入）、历史预置文本精确升级（内容与某版
+两层结构——上下文清单只注入首行摘要，全文注入被派发子会话的系统提示词）、历史预置文本精确升级（内容与某版
 历史文本一致才覆盖，用户改过的永不动）、**退役预置角色精确删除**（`RETIRED_PRESET_ROLES`：内容
 等于任一版历史文本才删，用户改过的保留）、旧 JSON 自动迁移。改行先跑核查再提交。
 

@@ -35,8 +35,10 @@
 
 - **spawn / fork（新建）**：先读角色（无副作用，角色不存在什么都不写）；再解析归属任务——给了
   `taskId` 用它（任务必须存在），省略则 `records.create(kind=task, parentRecordId=parentTaskId)`
-  自动建一条；然后经 subagents 服务创建子会话（初始指令含职责、任务、**本任务 taskId**、根会话、
-  两级报告链），最后登记分工记录（`assignment.sessions=[childId]`，待处理）。返回
+  自动建一条；然后经 subagents 服务创建子会话（初始指令含任务、**本任务 taskId**、根会话、
+  两级报告链——**不含角色名与职责正文**：职责由上下文行按会话注入子会话的系统提示词，
+  归属从分工记录 `sessions[].label` 反查，见 `src/collaboration/role-duty.ts`），最后登记分工记录
+  （`assignment.sessions=[childId]`，待处理）。返回
   `{childId, taskId, createdTask, record}`；登记失败返回 `childId + recordError`（子会话已存在不丢）。
   spawn 失败时自动建的任务会留下——这是**准确的**（任务存在、尚未派发），模型可带 `taskId` 重派。
 - **continue（追加）**：`expectedChildId` 必填。在所有分工记录里找 `sessions` 含该子会话的，

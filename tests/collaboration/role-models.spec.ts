@@ -121,11 +121,10 @@ describe('role models fence', () => {
     await expect(store.list()).rejects.toMatchObject({ code: 'INVALID_INPUT' })
   })
 
-  it('解析后的 description 进入指令和上下文时不含标记与 provider', () => {
+  it('解析后的 description 进的是上下文与职责段，指令里只有任务；都不含标记与 provider', () => {
     const text = `职责首行\n\n详细正文\n${START}\n{"provider":"deepseek","model":"deepseek-chat"}\n${END}\n`
     const parsed = parseRoleDocument('执行者', text)
     const instruction = composeDispatchInstruction({
-      role: { name: '执行者', description: parsed.description },
       task: '改造登录',
       taskId: 'task-1',
       rootSessionId: 'root-1',
@@ -134,13 +133,17 @@ describe('role models fence', () => {
       sessionId: 'session-1',
       dataDir: '/tmp/router-role-models',
       roles: [{ name: '执行者', description: parsed.description }],
+      duty: { roleName: '执行者', description: parsed.description },
     })
-    expect(instruction).toContain('职责首行')
+    expect(instruction).not.toContain('职责首行')
     expect(instruction).not.toContain('dsh-router:models')
     expect(instruction).not.toContain('deepseek')
     expect(context).toContain('职责首行')
     expect(context).not.toContain('dsh-router:models')
     expect(context).not.toContain('deepseek')
+    // 职责段标明是「你的角色与职责」，并带上角色名。
+    expect(context).toContain('你的角色与职责')
+    expect(context).toContain('执行者')
   })
 })
 

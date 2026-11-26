@@ -2,10 +2,11 @@
  * 派发工具 router_dispatch（两级模型，2026-11-24 起：Router 主会话直接担任主管）。
  *
  * 模型传：角色名、任务内容、派发方式（spawn 轻装 / fork 带父级上下文 / continue 追加）、
- * 归属任务（可选）。职责注入由代码完成——读角色 md、把职责说明连同任务、任务 ID 与根会话
- * 拼成初始指令、经宿主 subagents 服务创建子会话（完成通知 delivery:'parent' 由服务包办）、
- * 再自动登记一条分工记录（关联 childId 会话、待处理标签）。模型跳不过去：不调本工具就
- * 没有子会话，职责与根会话的注入是机制保证，不依赖模型自觉。
+ * 归属任务（可选）。职责注入由代码完成——读角色 md，把**职责注入子会话的系统提示词**
+ * （上下文行按会话贡献，见 role-duty.ts；初始指令里不再带角色名与职责正文）、经宿主
+ * subagents 服务创建子会话（完成通知 delivery:'parent' 由服务包办）、再自动登记一条分工
+ * 记录（关联 childId 会话、待处理标签）。模型跳不过去：不调本工具就没有子会话，职责与
+ * 根会话的注入是机制保证，不依赖模型自觉。
  *
  * 每次派发都能新建任务并把子会话关联到任务（用户诉求 ①）：
  * - 给了 taskId → 在该任务下派发（一个任务可以挂多个子会话）；
@@ -50,6 +51,14 @@ export interface DispatchDeps {
   afterWrite?: (rootSessionId: string) => Promise<void>
   /** 本次 apply 的子会话候选游标。缺席时仍按序列传 agentOptions，只是不登记切换。 */
   childModelRuns?: Map<string, ChildModelRun>
+  /** 角色职责服务：预热子会话的职责缓存 + 落盘会话绑定（缺席则不做，系统提示词不注入职责段）。 */
+  roleDuties?: RoleDutyBinder
+}
+
+/** 派发侧用到的职责服务面（窄接口：预热 + 绑定）。 */
+export interface RoleDutyBinder {
+  prime(sessionId: string, duty: { roleName: string; description: string }): void
+  bind(input: { sessionId: string; rootSessionId: string; taskId: string }): Promise<void>
 }
 
 /** 工具执行上下文的最小面（宿主 execute(args, exec) 的 exec）。 */
@@ -69,25 +78,23 @@ const dispatchLifetime = new AbortController()
 /** continue 追加要求时拼进任务描述的分隔标记（便于人读、也便于测试断言）。 */
 export const APPEND_MARKER = '[追加要求]'
 
-/** 拼装给子会话的初始指令：职责 + 任务 + 任务/根会话 + 报告链要点（纯函数）。 */
+/** 拼装给子会话的初始指令：任务 + 任务/根会话 + 报告链要点（纯函数）。
+ *
+ *  职责与角色名**不在这里**：职责由上下文行按会话注入子会话的系统提示词（见 role-duty.ts），
+ *  初始指令只说「去系统提示词里看自己的角色与职责」，不带角色名与职责正文。
+ */
 export function composeDispatchInstruction(input: {
-  role: { name: string; description: string }
   task: string
   taskId: string
   rootSessionId: string
 }): string {
-  const duty = input.role.description.trim() === '' ? '（该角色模板未写职责说明）' : input.role.description.trim()
   return [
-    `你是轻量团队协作中的「${input.role.name}」。`,
-    '',
-    '你的职责说明：',
-    duty,
-    '',
     '本次任务：',
     input.task,
     '',
     `本任务 taskId：${input.taskId}——你的分工记录与工作报告都挂在这个任务下。`,
     `根会话（rootSessionId）：${input.rootSessionId}——之后每次保存工作记录都必须显式带上它，不要用你自己的会话 ID 充当。`,
+    '你的角色与职责在系统提示词的「你的角色与职责」段里，按它行事。',
     '工作资料用记录工具保存（task/assignment/report/summary）；进度、问题与结果按报告链报给上级（worker→Router→用户）。',
     '完成后保存报告记录（标注工作标签），并把结果与产物位置写清楚；不要等待额外系统确认。',
   ].join('\n')
@@ -98,7 +105,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
   return {
     name: 'router_dispatch',
     description:
-      '按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；' +
+      '按角色派发子会话（职责由代码注入子会话的系统提示词，不在初始指令里）。传入角色名（须已存在于角色库）、任务内容与派发方式；' +
       '创建成功自动登记一条分工记录（关联子会话、待处理标签）。' +
       '归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；' +
       'parentTaskId 可选，新任务作为它的子任务，通常传主任务）。' +
@@ -250,7 +257,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
         taskId = created.record.taskId
         createdTask = true
       }
-      const instruction = composeDispatchInstruction({ role, task, taskId, rootSessionId })
+      const instruction = composeDispatchInstruction({ task, taskId, rootSessionId })
       // 创建子会话；失败原样上抛（不落记录，也不替剩下的候选再循环创建）。
       // signal 必传：宿主 startActivation 会 spec.signal.throwIfAborted()，缺席即 TypeError。
       // 序列为空时 request 不出现 agentOptions 键（D6，保持今天的调用形状）。
@@ -282,6 +289,9 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           failures: [],
         })
       }
+      // 职责进系统提示词：先同步预热共享缓存（子会话首轮组装系统提示词时就能命中），
+      // 再在分工记录登记成功后落盘「子会话 → 根会话/任务」映射（跨重启仍能反查角色）。
+      deps.roleDuties?.prime(childId, { roleName: role.name, description: role.description.trim() })
       const sentModel = first === undefined ? {} : { model: { provider: first.provider, model: first.model } }
       // 登记分工记录；失败不丢 childId（返回 recordError，让模型补记）。
       try {
@@ -294,6 +304,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           sessions: [{ sessionId: childId, label: role.name }],
         })
         await afterWrite()
+        await bindRoleDuty(deps, childId, rootSessionId, taskId)
         return { childId, taskId, createdTask, record: { taskId: saved.record.taskId, recordId: saved.record.id, path: saved.path }, ...sentModel }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -321,6 +332,16 @@ function agentId(agent: unknown): string {
     return (agent as { id: string }).id
   }
   return ''
+}
+
+/** 落盘会话绑定（跨重启仍能反查角色）。失败只告警：派发已经成功，不能因绑定失败翻脸。 */
+async function bindRoleDuty(deps: DispatchDeps, childId: string, rootSessionId: string, taskId: string): Promise<void> {
+  if (deps.roleDuties === undefined) return
+  try {
+    await deps.roleDuties.bind({ sessionId: childId, rootSessionId, taskId })
+  } catch (error) {
+    console.warn('[dsh-router] role duty binding failed:', error instanceof Error ? error.message : String(error))
+  }
 }
 
 /** 派发不能指定模型：出现 provider/model 一律拒绝（模型由角色自己的候选决定）。 */

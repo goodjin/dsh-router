@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { CollaborationError } from './types.ts'
 import { COLLABORATION_TOOL_NAMES } from './tools.ts'
 import type { ActiveTaskView } from './active-tasks.ts'
+import type { RoleDuty } from './role-duty.ts'
 
 /** 协作目录名（与 RecordStore/RoleStore 的命名空间一致；只拼一次）。 */
 const COLLABORATION_DIR = 'collaboration'
@@ -32,6 +33,11 @@ export interface CollaborationContextInput {
    * 空数组 = 没有活跃任务。纯函数不取数，由调用方喂入（见 active-tasks.ts）。
    */
   tasks?: readonly ActiveTaskView[]
+  /**
+   * 当前会话的角色职责（角色名 + 职责正文）：undefined = 这不是被派发的子会话，或职责
+   * 还没解析出来（宁缺勿错，不渲染职责段）。纯函数不取数，由调用方喂入（见 role-duty.ts）。
+   */
+  duty?: RoleDuty
 }
 
 /** 非空字符串校验（坏入参直接拒绝，不产出误导文本）。 */
@@ -65,12 +71,33 @@ export function buildCollaborationContext(input: CollaborationContextInput): str
     '根会话（rootSessionId）必须由父级会话随每次操作显式传入；',
     '如果你拿不到 rootSessionId，请向上级会话询问，不要自行推断或猜测。',
     '',
+    ...renderDuty(input.duty),
     '可用的协作工具（共 ' + String(COLLABORATION_TOOL_NAMES.length) + ' 个）：' + toolList,
     '记录种类：task（任务说明）、assignment（分工记录）、report（工作报告）、summary（汇总报告）。',
     '',
     ...renderTasks(input.tasks),
     ...renderRoles(input.roles),
   ].join('\n')
+}
+
+/**
+ * 角色职责段：被派发的子会话才有的「你的角色与职责」。职责由角色模板设定，在系统提示词
+ * 里注入——初始指令里不再重复角色名与职责正文。非派发会话（根会话等）没有这一段。
+ */
+function renderDuty(duty: RoleDuty | undefined): string[] {
+  if (duty === undefined) return []
+  const lines = [
+    '## 你的角色与职责',
+    '你的角色：' + duty.roleName + '。',
+    '下面是你的职责说明（你的角色设定，按它行事）：',
+  ]
+  if (duty.description.trim() === '') {
+    lines.push('（该角色模板未写职责说明）')
+  } else {
+    lines.push(duty.description.trim())
+  }
+  lines.push('')
+  return lines
 }
 
 /**
@@ -102,7 +129,7 @@ function renderTasks(tasks: readonly ActiveTaskView[] | undefined): string[] {
 
 /** 角色清单段：注入名称与首行摘要（v2 两层结构）+ 用法指引；缺失/为空各自如实说明并指向工具。 */
 function renderRoles(roles: ReadonlyArray<{ name: string; description: string }> | undefined): string[] {
-  const header = '角色模板（专业类型）：派子会话时，把选中角色的职责说明连同任务要求一起写进给子会话的初始指令。'
+  const header = '角色模板（专业类型）：派子会话时只写任务要求；选中角色的职责说明由代码注入子会话的系统提示词。'
   if (roles === undefined) {
     return [header, '角色清单暂不可用（尚未加载完成）：用 router_role_list 查询最新。']
   }

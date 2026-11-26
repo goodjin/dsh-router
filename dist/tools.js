@@ -49,20 +49,19 @@ const DISPATCH_MODES = [
 const dispatchLifetime = new AbortController();
 /** continue 追加要求时拼进任务描述的分隔标记（便于人读、也便于测试断言）。 */
 const APPEND_MARKER = "[追加要求]";
-/** 拼装给子会话的初始指令：职责 + 任务 + 任务/根会话 + 报告链要点（纯函数）。 */
+/** 拼装给子会话的初始指令：任务 + 任务/根会话 + 报告链要点（纯函数）。
+*
+*  职责与角色名**不在这里**：职责由上下文行按会话注入子会话的系统提示词（见 role-duty.ts），
+*  初始指令只说「去系统提示词里看自己的角色与职责」，不带角色名与职责正文。
+*/
 function composeDispatchInstruction(input) {
-	const duty = input.role.description.trim() === "" ? "（该角色模板未写职责说明）" : input.role.description.trim();
 	return [
-		`你是轻量团队协作中的「${input.role.name}」。`,
-		"",
-		"你的职责说明：",
-		duty,
-		"",
 		"本次任务：",
 		input.task,
 		"",
 		`本任务 taskId：${input.taskId}——你的分工记录与工作报告都挂在这个任务下。`,
 		`根会话（rootSessionId）：${input.rootSessionId}——之后每次保存工作记录都必须显式带上它，不要用你自己的会话 ID 充当。`,
+		"你的角色与职责在系统提示词的「你的角色与职责」段里，按它行事。",
 		"工作资料用记录工具保存（task/assignment/report/summary）；进度、问题与结果按报告链报给上级（worker→Router→用户）。",
 		"完成后保存报告记录（标注工作标签），并把结果与产物位置写清楚；不要等待额外系统确认。"
 	].join("\n");
@@ -71,7 +70,7 @@ function composeDispatchInstruction(input) {
 function buildDispatchTool(deps) {
 	return {
 		name: "router_dispatch",
-		description: "按角色派发子会话（职责注入由代码完成）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏）的第一项，没配候选则按宿主默认；派发时不能指定模型（本工具不接受 provider/model）。rootSessionId 必须显式传入。",
+		description: "按角色派发子会话（职责由代码注入子会话的系统提示词，不在初始指令里）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏）的第一项，没配候选则按宿主默认；派发时不能指定模型（本工具不接受 provider/model）。rootSessionId 必须显式传入。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -236,7 +235,6 @@ function buildDispatchTool(deps) {
 				createdTask = true;
 			}
 			const instruction = composeDispatchInstruction({
-				role,
 				task,
 				taskId,
 				rootSessionId
@@ -274,6 +272,10 @@ function buildDispatchTool(deps) {
 					failures: []
 				});
 			}
+			deps.roleDuties?.prime(childId, {
+				roleName: role.name,
+				description: role.description.trim()
+			});
 			const sentModel = first === void 0 ? {} : { model: {
 				provider: first.provider,
 				model: first.model
@@ -291,6 +293,7 @@ function buildDispatchTool(deps) {
 					}]
 				});
 				await afterWrite();
+				await bindRoleDuty(deps, childId, rootSessionId, taskId);
 				return {
 					childId,
 					taskId,
@@ -322,6 +325,19 @@ function nonEmpty(value, what) {
 function agentId(agent) {
 	if (typeof agent === "object" && agent !== null && typeof agent.id === "string") return agent.id;
 	return "";
+}
+/** 落盘会话绑定（跨重启仍能反查角色）。失败只告警：派发已经成功，不能因绑定失败翻脸。 */
+async function bindRoleDuty(deps, childId, rootSessionId, taskId) {
+	if (deps.roleDuties === void 0) return;
+	try {
+		await deps.roleDuties.bind({
+			sessionId: childId,
+			rootSessionId,
+			taskId
+		});
+	} catch (error) {
+		console.warn("[dsh-router] role duty binding failed:", error instanceof Error ? error.message : String(error));
+	}
 }
 /** 派发不能指定模型：出现 provider/model 一律拒绝（模型由角色自己的候选决定）。 */
 function rejectDispatchModelOverride(args) {
@@ -810,7 +826,8 @@ function buildCollaborationTools(deps) {
 			roles,
 			subagents: deps.subagents,
 			afterWrite,
-			childModelRuns: deps.childModelRuns
+			childModelRuns: deps.childModelRuns,
+			roleDuties: deps.roleDuties
 		}),
 		{
 			name: "router_record_create",
@@ -1147,7 +1164,8 @@ function apply(ctx) {
 		afterWrite: ctx.routerCollaboration.activeTasks === void 0 ? void 0 : async (rootSessionId) => {
 			await ctx.routerCollaboration.activeTasks.refresh(rootSessionId);
 		},
-		childModelRuns: ctx.routerCollaboration.childModelRuns
+		childModelRuns: ctx.routerCollaboration.childModelRuns,
+		roleDuties: ctx.routerCollaboration.roleDuties
 	}).map((definition) => ctx.tools.register(definition));
 	return () => {
 		for (const dispose of disposers) dispose?.();
