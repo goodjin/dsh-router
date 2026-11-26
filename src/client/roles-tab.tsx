@@ -191,13 +191,76 @@ function collectCatalogOptions(catalog: CollaborationState['modelCatalog']): Cat
   return options
 }
 
-function filterCatalogOptions(options: CatalogOption[], query: string): CatalogOption[] {
+/** trim 后拼接的候选键（与派发序列去重同一口径）。 */
+function candidateKey(provider: string, model: string): string {
+  return `${provider.trim()}\0${model.trim()}`
+}
+
+/** 搜索口径：关键字同时匹配 provider/model 的名称与 ID，多词 AND。 */
+function matchesCatalogQuery(option: CatalogOption, terms: string[]): boolean {
+  if (terms.length === 0) return true
+  const fields = [option.providerId, option.providerName, option.modelId, option.modelName].map((field) => field.toLowerCase())
+  return terms.every((term) => fields.some((field) => field.includes(term)))
+}
+
+interface CatalogGroup {
+  providerId: string
+  providerName: string
+  options: CatalogOption[]
+}
+
+/** 按提供方分组并过滤：组顺序 = 清单顺序，组内只列该提供方自己宣告的模型。 */
+function collectCatalogGroups(catalog: CollaborationState['modelCatalog'], query: string): CatalogGroup[] {
   const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
-  if (terms.length === 0) return options
-  return options.filter((option) => {
-    const fields = [option.providerId, option.providerName, option.modelId, option.modelName].map((field) => field.toLowerCase())
-    return terms.every((term) => fields.some((field) => field.includes(term)))
-  })
+  const groups: CatalogGroup[] = []
+  const seen = new Set<string>()
+  for (const provider of catalog.providers) {
+    const options: CatalogOption[] = []
+    for (const model of provider.models) {
+      const key = modelKey(provider.id, model.id)
+      if (seen.has(key)) continue
+      seen.add(key)
+      const option: CatalogOption = {
+        key,
+        providerId: provider.id,
+        providerName: provider.name,
+        modelId: model.id,
+        modelName: model.name,
+      }
+      if (matchesCatalogQuery(option, terms)) options.push(option)
+    }
+    if (options.length > 0) groups.push({ providerId: provider.id, providerName: provider.name, options })
+  }
+  return groups
+}
+
+/** 候选行文本态名称：清单里有就显示名称（ID），查不到只显示 ID，空行显示（未填写）。 */
+function resolveModelLabel(candidate: RoleModelCandidate, catalog: CollaborationState['modelCatalog']): ReactNode {
+  const providerId = candidate.provider.trim()
+  const modelId = candidate.model.trim()
+  if (providerId === '' && modelId === '') {
+    return <span style={{ color: '#6b7078' }}>（未填写）</span>
+  }
+  const provider = catalog.providers.find((entry) => entry.id === providerId)
+  const model = provider?.models.find((entry) => entry.id === modelId)
+  if (provider !== undefined && model !== undefined) {
+    return (
+      <>
+        <span style={{ fontWeight: 500 }}>{provider.name}</span>
+        <span style={{ color: '#6b7078' }}>（{provider.id}）</span>
+        <span> / </span>
+        <span style={{ fontWeight: 500 }}>{model.name}</span>
+        <span style={{ color: '#6b7078' }}>（{model.id}）</span>
+      </>
+    )
+  }
+  return (
+    <>
+      <span>{providerId}</span>
+      <span> / </span>
+      <span>{modelId}</span>
+    </>
+  )
 }
 
 /** 角色标签页：左列表右编辑，保存才生效。 */
@@ -210,6 +273,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const [draftModels, setDraftModels] = useState<RoleModelCandidate[]>([])
   const [catalogQuery, setCatalogQuery] = useState('')
   const [catalogSelection, setCatalogSelection] = useState<Set<string>>(() => new Set())
+  const [catalogOpen, setCatalogOpen] = useState(false)
+  const [editingIndex, setEditingIndex] = useState<number | undefined>(undefined)
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
@@ -220,6 +285,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     setSelected(name)
     setCatalogQuery('')
     setCatalogSelection(new Set())
+    setCatalogOpen(false)
+    setEditingIndex(undefined)
     if (name === undefined || isDraft) {
       setDraftName('')
       setDraftDesc('')
@@ -240,24 +307,47 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   }
 
   const moveModel = (index: number, delta: number): void => {
+    const target = index + delta
     setDraftModels((rows) => {
-      const target = index + delta
       if (target < 0 || target >= rows.length) return rows
       const next = rows.slice()
       const [item] = next.splice(index, 1)
       next.splice(target, 0, item!)
       return next
     })
+    setEditingIndex((current) => {
+      if (current === undefined) return current
+      if (current === index) return target
+      if (current === target) return index
+      return current
+    })
     setDirty(true)
+  }
+
+  const deleteModel = (index: number): void => {
+    setDraftModels((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
+    setEditingIndex((current) => {
+      if (current === undefined) return current
+      if (current === index) return undefined
+      if (current > index) return current - 1
+      return current
+    })
+    setDirty(true)
+  }
+
+  const toggleEdit = (index: number): void => {
+    setEditingIndex((current) => (current === index ? undefined : index))
   }
 
   const isNew = selected === NEW_SELECTION
   const currentRole = isNew ? undefined : state.templates.find((t) => t.name === selected)
   const canSave = draftName.trim() !== '' && state.rolesError === null
   const catalogOptions = collectCatalogOptions(state.modelCatalog)
-  const filteredCatalog = filterCatalogOptions(catalogOptions, catalogQuery)
+  const catalogGroups = collectCatalogGroups(state.modelCatalog, catalogQuery)
+  const totalFiltered = catalogGroups.reduce((sum, group) => sum + group.options.length, 0)
+  const addedKeys = new Set(draftModels.map((candidate) => candidateKey(candidate.provider, candidate.model)))
 
-  /** 「添加所选」：按清单顺序追加所有已勾选、且当前候选里没有的 provider+model。 */
+  /** 「添加所选」：按清单顺序（组顺序 + 组内顺序）追加，跳过与已有候选重复的 provider+model（trim 比较）。 */
   const addSelected = (): void => {
     const ordered = catalogOptions.filter((option) => catalogSelection.has(option.key))
     const toAdd = ordered.filter(
@@ -269,6 +359,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     }
     setCatalogQuery('')
     setCatalogSelection(new Set())
+    setCatalogOpen(false)
   }
 
   return (
@@ -322,39 +413,45 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
             />
             <div data-router-collab-role-models style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, marginBottom: 6 }}>候选模型</div>
-              {draftModels.map((candidate, index) => (
-                <div key={index} data-router-collab-model-row style={ROW_STYLE}>
-                  <input
-                    data-router-collab-model-provider
-                    style={{ ...INPUT_STYLE, flex: 1 }}
-                    placeholder="provider"
-                    aria-label={`候选 ${index + 1} provider`}
-                    value={candidate.provider}
-                    onChange={(event) => { patchModel(index, { provider: event.target.value }) }}
-                  />
-                  <input
-                    data-router-collab-model-model
-                    style={{ ...INPUT_STYLE, flex: 1 }}
-                    placeholder="model"
-                    aria-label={`候选 ${index + 1} model`}
-                    value={candidate.model}
-                    onChange={(event) => { patchModel(index, { model: event.target.value }) }}
-                  />
-                  <button type="button" data-router-collab-model-up style={SMALL_BUTTON_STYLE} disabled={index === 0} onClick={() => { moveModel(index, -1) }}>上移</button>
-                  <button type="button" data-router-collab-model-down style={SMALL_BUTTON_STYLE} disabled={index === draftModels.length - 1} onClick={() => { moveModel(index, 1) }}>下移</button>
-                  <button
-                    type="button"
-                    data-router-collab-model-delete
-                    style={SMALL_BUTTON_STYLE}
-                    onClick={() => {
-                      setDraftModels((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
-                      setDirty(true)
-                    }}
-                  >
-                    删除
-                  </button>
-                </div>
-              ))}
+              {draftModels.map((candidate, index) => {
+                const isEditing = editingIndex === index
+                return (
+                  <div key={index} data-router-collab-model-row style={ROW_STYLE}>
+                    {isEditing ? (
+                      <>
+                        <input
+                          data-router-collab-model-provider
+                          style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
+                          placeholder="provider"
+                          aria-label={`候选 ${index + 1} provider`}
+                          value={candidate.provider}
+                          onChange={(event) => { patchModel(index, { provider: event.target.value }) }}
+                        />
+                        <input
+                          data-router-collab-model-model
+                          style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
+                          placeholder="model"
+                          aria-label={`候选 ${index + 1} model`}
+                          value={candidate.model}
+                          onChange={(event) => { patchModel(index, { model: event.target.value }) }}
+                        />
+                      </>
+                    ) : (
+                      <span data-router-collab-model-text style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: 'anywhere' }}>
+                        {resolveModelLabel(candidate, state.modelCatalog)}
+                      </span>
+                    )}
+                    <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }}>
+                      <button type="button" data-router-collab-model-up style={SMALL_BUTTON_STYLE} disabled={index === 0} onClick={() => { moveModel(index, -1) }}>上移</button>
+                      <button type="button" data-router-collab-model-down style={SMALL_BUTTON_STYLE} disabled={index === draftModels.length - 1} onClick={() => { moveModel(index, 1) }}>下移</button>
+                      <button type="button" data-router-collab-model-delete style={SMALL_BUTTON_STYLE} onClick={() => { deleteModel(index) }}>删除</button>
+                      <button type="button" data-router-collab-model-edit style={SMALL_BUTTON_STYLE} onClick={() => { toggleEdit(index) }}>
+                        {isEditing ? '收起' : '编辑'}
+                      </button>
+                    </span>
+                  </div>
+                )
+              })}
               <div style={ROW_STYLE}>
                 <button
                   type="button"
@@ -365,80 +462,114 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                     setDirty(true)
                   }}
                 >
-                  添加一行
+                  添加空行
+                </button>
+                <button
+                  type="button"
+                  data-router-collab-catalog-open
+                  style={SMALL_BUTTON_STYLE}
+                  onClick={() => { setCatalogOpen((open) => !open) }}
+                >
+                  添加模型
                 </button>
               </div>
-              <div data-router-collab-catalog style={CATALOG_STYLE}>
-                <div style={{ fontSize: 12, marginBottom: 6 }}>从清单添加（搜索 provider / model 的名称或 ID）</div>
-                <input
-                  data-router-collab-catalog-query
-                  style={INPUT_STYLE}
-                  placeholder="搜索 provider / model"
-                  aria-label="搜索清单"
-                  value={catalogQuery}
-                  onChange={(event) => { setCatalogQuery(event.target.value) }}
-                />
-                {state.modelCatalog.unavailable ? (
-                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单不可用</div>
-                ) : catalogOptions.length === 0 ? (
-                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单为空</div>
-                ) : filteredCatalog.length === 0 ? (
-                  <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>无匹配</div>
-                ) : (
-                  <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
-                    {filteredCatalog.map((option) => (
-                      <label
-                        key={option.key}
-                        data-router-collab-catalog-option
-                        data-router-collab-catalog-provider={option.providerId}
-                        data-router-collab-catalog-model={option.modelId}
-                        style={CATALOG_OPTION_STYLE}
-                      >
-                        <input
-                          type="checkbox"
-                          data-router-collab-catalog-checkbox
-                          checked={catalogSelection.has(option.key)}
-                          onChange={() => {
-                            setCatalogSelection((prev) => {
-                              const next = new Set(prev)
-                              if (next.has(option.key)) next.delete(option.key)
-                              else next.add(option.key)
-                              return next
-                            })
-                          }}
-                        />
-                        <span style={{ fontSize: 12 }}>
-                          <span style={{ fontWeight: 500 }}>{option.providerName}</span>
-                          <span style={{ color: '#6b7078' }}>（{option.providerId}）</span>
-                          <span> / </span>
-                          <span style={{ fontWeight: 500 }}>{option.modelName}</span>
-                          <span style={{ color: '#6b7078' }}>（{option.modelId}）</span>
-                        </span>
-                      </label>
-                    ))}
+              {catalogOpen ? (
+                <div data-router-collab-catalog-panel style={CATALOG_STYLE}>
+                  <div style={{ fontSize: 12, marginBottom: 6 }}>从清单添加（搜索 provider / model 的名称或 ID）</div>
+                  <input
+                    data-router-collab-catalog-query
+                    style={INPUT_STYLE}
+                    placeholder="搜索 provider / model"
+                    aria-label="搜索清单"
+                    value={catalogQuery}
+                    onChange={(event) => { setCatalogQuery(event.target.value) }}
+                  />
+                  {state.modelCatalog.unavailable ? (
+                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单不可用</div>
+                  ) : catalogOptions.length === 0 ? (
+                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单为空</div>
+                  ) : totalFiltered === 0 ? (
+                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>无匹配</div>
+                  ) : (
+                    <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
+                      {catalogGroups.map((group) => (
+                        <div key={group.providerId} data-router-collab-catalog-group data-router-collab-catalog-provider={group.providerId}>
+                          <div style={{ padding: '6px 8px', fontWeight: 500, fontSize: 12, background: 'var(--dsw-alias-bg-l2, #f5f7fa)', borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)' }}>
+                            {group.providerName}
+                            <span style={{ color: '#6b7078', fontWeight: 400 }}>（{group.providerId}）</span>
+                            <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.options.length} 个模型</span>
+                          </div>
+                          {group.options.map((option) => {
+                            const isAdded = addedKeys.has(candidateKey(option.providerId, option.modelId))
+                            return (
+                              <label
+                                key={option.key}
+                                data-router-collab-catalog-option
+                                data-router-collab-catalog-model={option.modelId}
+                                style={{ ...CATALOG_OPTION_STYLE, cursor: isAdded ? 'default' : 'pointer' }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  data-router-collab-catalog-checkbox
+                                  checked={catalogSelection.has(option.key)}
+                                  disabled={isAdded}
+                                  onChange={() => {
+                                    setCatalogSelection((prev) => {
+                                      const next = new Set(prev)
+                                      if (next.has(option.key)) next.delete(option.key)
+                                      else next.add(option.key)
+                                      return next
+                                    })
+                                  }}
+                                />
+                                <span style={{ fontSize: 12 }}>
+                                  <span style={{ fontWeight: 500 }}>{option.modelName}</span>
+                                  <span style={{ color: '#6b7078' }}>（{option.modelId}）</span>
+                                </span>
+                                {isAdded ? (
+                                  <span data-router-collab-catalog-added style={{ marginLeft: 'auto', fontSize: 12, color: '#6b7078' }}>已加入</span>
+                                ) : null}
+                              </label>
+                            )
+                          })}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                    <button
+                      type="button"
+                      data-router-collab-catalog-add
+                      style={SMALL_BUTTON_STYLE}
+                      disabled={catalogSelection.size === 0}
+                      onClick={addSelected}
+                    >
+                      添加所选（{catalogSelection.size}）
+                    </button>
+                    <button
+                      type="button"
+                      data-router-collab-catalog-clear
+                      style={SMALL_BUTTON_STYLE}
+                      disabled={catalogSelection.size === 0}
+                      onClick={() => { setCatalogSelection(new Set()) }}
+                    >
+                      清空选择
+                    </button>
+                    <button
+                      type="button"
+                      data-router-collab-catalog-close
+                      style={SMALL_BUTTON_STYLE}
+                      onClick={() => {
+                        setCatalogOpen(false)
+                        setCatalogQuery('')
+                        setCatalogSelection(new Set())
+                      }}
+                    >
+                      收起
+                    </button>
                   </div>
-                )}
-                <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                  <button
-                    type="button"
-                    data-router-collab-catalog-add
-                    style={SMALL_BUTTON_STYLE}
-                    disabled={catalogSelection.size === 0}
-                    onClick={addSelected}
-                  >
-                    添加所选
-                  </button>
-                  <button
-                    type="button"
-                    data-router-collab-catalog-clear
-                    style={SMALL_BUTTON_STYLE}
-                    disabled={catalogSelection.size === 0}
-                    onClick={() => { setCatalogSelection(new Set()) }}
-                  >
-                    清空选择
-                  </button>
                 </div>
-              </div>
+              ) : null}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
               <button
