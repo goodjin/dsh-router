@@ -10,16 +10,16 @@
  * 修复：把工作台路由拆成**独立一行**，模块级声明 `inject = ['webServer', 'connection',
  * 'routerCollaboration']`（必需依赖，缺失即 PENDING/失败，可见而非静默），由宿主装载器
  * 接线。路由与模型工具行共用同一 RecordStore/RoleStore 单实例（routes_reuse_store 语义
- * 不变）。llm 是可选依赖（models 路由用），用 ctx.inject?.(['llm'], …) 捕获并缓存，
- * 取不到时 models 路由返回 unavailable:true（降级不致命）。
+ * 不变）。sessionController 是可选依赖（models 路由用），用 ctx.inject?.(['sessionController'], …)
+ * 捕获并缓存，取不到时 models 路由返回 unavailable:true（降级不致命）。
  */
 
 import Schema from '@deepseek-ai/schemastery'
 
 import {
   registerCollaborationRoutes,
-  type CollaborationLlm,
   type CollaborationRouteContext,
+  type CollaborationSessionController,
 } from './collaboration/routes.ts'
 import type { RecordStore, RoleStore } from './collaboration/types.ts'
 
@@ -46,19 +46,20 @@ interface WorkbenchContext {
 
 /**
  * 注册四条工作台路由（records / record / roles / models），与工具行共享同一
- * RecordStore/RoleStore 单实例。llm 可选注入（models 路由用）；取不到时 models
- * 路由返回 unavailable:true。返回联合注销器交给宿主 effect 生命周期。
+ * RecordStore/RoleStore 单实例。sessionController 可选注入（models 路由用）；取不到时
+ * models 路由返回 unavailable:true。返回联合注销器交给宿主 effect 生命周期。
  */
 export function apply(ctx: WorkbenchContext): () => void {
-  // llm 是可选依赖：捕获并缓存，models 路由在请求时再读。捕获不到（ctx.inject 不可用，
-  // 或注入回调里 llm 形状不符）就打一条一次性警告（只打一次、不刷屏），说明 models
-  // 路由会返回 unavailable:true；路由仍注册、models 降级不致命。
-  let llmFace: CollaborationLlm | undefined
-  let llmWarned = false
-  const warnLlmUnavailable = (): void => {
-    if (llmWarned) return
-    llmWarned = true
-    console.warn('[dsh-router] workbench: llm 不可用，models 路由将返回 unavailable:true')
+  // sessionController 是可选依赖：捕获并缓存，models 路由在请求时再读。捕获不到
+  // （ctx.inject 不可用，或注入回调里 sessionController 缺 modelCatalog）就打一次性警告
+  // （只打一次、不刷屏），说明 models 路由会返回 unavailable:true；路由仍注册、models
+  // 降级不致命。
+  let scFace: CollaborationSessionController | undefined
+  let scWarned = false
+  const warnScUnavailable = (): void => {
+    if (scWarned) return
+    scWarned = true
+    console.warn('[dsh-router] workbench: sessionController.modelCatalog 不可用，models 路由将返回 unavailable:true')
   }
 
   const fibers: Array<{ dispose?: () => void | Promise<void> }> = []
@@ -67,15 +68,15 @@ export function apply(ctx: WorkbenchContext): () => void {
   }
   const injectFn = ctx.inject
   if (typeof injectFn !== 'function') {
-    // 宿主没有 inject 通道：llm 必然捕获不到，models 路由只能 unavailable。
-    warnLlmUnavailable()
+    // 宿主没有 inject 通道：sessionController 必然捕获不到，models 路由只能 unavailable。
+    warnScUnavailable()
   } else {
-    track(injectFn(['llm'], (child) => {
-      const llm = (child as { llm?: CollaborationLlm }).llm
-      if (llm !== undefined && typeof llm.listProviders === 'function' && typeof llm.listModels === 'function') {
-        llmFace = llm
+    track(injectFn(['sessionController'], (child) => {
+      const sc = (child as { sessionController?: CollaborationSessionController }).sessionController
+      if (sc !== undefined && typeof sc.modelCatalog === 'function') {
+        scFace = sc
       } else {
-        warnLlmUnavailable()
+        warnScUnavailable()
       }
     }))
   }
@@ -85,7 +86,7 @@ export function apply(ctx: WorkbenchContext): () => void {
     registerCollaborationRoutes(ctx, {
       records: ctx.routerCollaboration.records,
       roles: ctx.routerCollaboration.roles,
-      llm: () => llmFace,
+      sessionController: () => scFace,
     })
     console.log(
       '[dsh-router] workbench routes registered: /router/collaboration/records, /router/collaboration/record, /router/collaboration/roles, /router/collaboration/models',

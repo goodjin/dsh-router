@@ -192,8 +192,8 @@ function registerCollaborationRoutes(ctx, deps) {
 		};
 	});
 	handle(COLLABORATION_MODELS_PATH, ["GET"], async () => {
-		const llm = deps.llm?.();
-		if (llm === void 0 || typeof llm.listProviders !== "function" || typeof llm.listModels !== "function") return {
+		const sc = deps.sessionController?.();
+		if (sc === void 0 || typeof sc.modelCatalog !== "function") return {
 			status: 200,
 			body: JSON.stringify({
 				unavailable: true,
@@ -201,38 +201,27 @@ function registerCollaborationRoutes(ctx, deps) {
 			})
 		};
 		try {
-			const listed = await llm.listProviders();
-			if (!Array.isArray(listed)) return {
+			const catalog = await sc.modelCatalog();
+			if (catalog === null || typeof catalog !== "object" || !Array.isArray(catalog.groups)) return {
 				status: 200,
 				body: JSON.stringify({
 					unavailable: true,
 					providers: []
 				})
 			};
-			const providers = [];
-			for (const provider of listed) {
-				if (typeof provider?.id !== "string") continue;
-				const name$1 = typeof provider.name === "string" ? provider.name : provider.id;
-				try {
-					const models = await llm.listModels(provider.id);
-					if (!Array.isArray(models)) throw new Error("listModels 返回的不是数组");
-					providers.push({
-						id: provider.id,
-						name: name$1,
-						models: models.flatMap((item) => item !== null && typeof item === "object" && typeof item.id === "string" && typeof item.name === "string" ? [{
-							id: item.id,
-							name: item.name
-						}] : [])
-					});
-				} catch (error) {
-					providers.push({
-						id: provider.id,
-						name: name$1,
-						models: [],
-						error: error instanceof Error ? error.message : String(error)
-					});
-				}
-			}
+			const providers = catalog.groups.flatMap((group) => {
+				if (group === null || typeof group !== "object" || typeof group.id !== "string") return [];
+				const name$1 = typeof group.name === "string" ? group.name : group.id;
+				const models = Array.isArray(group.models) ? group.models.flatMap((item) => item !== null && typeof item === "object" && typeof item.id === "string" && typeof item.name === "string" ? [{
+					id: item.id,
+					name: item.name
+				}] : []) : [];
+				return [{
+					id: group.id,
+					name: name$1,
+					models
+				}];
+			});
 			return {
 				status: 200,
 				body: JSON.stringify({
@@ -266,33 +255,33 @@ const inject = [
 const Config = Schema.object({});
 /**
 * 注册四条工作台路由（records / record / roles / models），与工具行共享同一
-* RecordStore/RoleStore 单实例。llm 可选注入（models 路由用）；取不到时 models
-* 路由返回 unavailable:true。返回联合注销器交给宿主 effect 生命周期。
+* RecordStore/RoleStore 单实例。sessionController 可选注入（models 路由用）；取不到时
+* models 路由返回 unavailable:true。返回联合注销器交给宿主 effect 生命周期。
 */
 function apply(ctx) {
-	let llmFace;
-	let llmWarned = false;
-	const warnLlmUnavailable = () => {
-		if (llmWarned) return;
-		llmWarned = true;
-		console.warn("[dsh-router] workbench: llm 不可用，models 路由将返回 unavailable:true");
+	let scFace;
+	let scWarned = false;
+	const warnScUnavailable = () => {
+		if (scWarned) return;
+		scWarned = true;
+		console.warn("[dsh-router] workbench: sessionController.modelCatalog 不可用，models 路由将返回 unavailable:true");
 	};
 	const fibers = [];
 	const track = (fiber) => {
 		if (typeof fiber === "object" && fiber !== null) fibers.push(fiber);
 	};
 	const injectFn = ctx.inject;
-	if (typeof injectFn !== "function") warnLlmUnavailable();
-	else track(injectFn(["llm"], (child) => {
-		const llm = child.llm;
-		if (llm !== void 0 && typeof llm.listProviders === "function" && typeof llm.listModels === "function") llmFace = llm;
-		else warnLlmUnavailable();
+	if (typeof injectFn !== "function") warnScUnavailable();
+	else track(injectFn(["sessionController"], (child) => {
+		const sc = child.sessionController;
+		if (sc !== void 0 && typeof sc.modelCatalog === "function") scFace = sc;
+		else warnScUnavailable();
 	}));
 	try {
 		registerCollaborationRoutes(ctx, {
 			records: ctx.routerCollaboration.records,
 			roles: ctx.routerCollaboration.roles,
-			llm: () => llmFace
+			sessionController: () => scFace
 		});
 		console.log("[dsh-router] workbench routes registered: /router/collaboration/records, /router/collaboration/record, /router/collaboration/roles, /router/collaboration/models");
 	} catch (error) {

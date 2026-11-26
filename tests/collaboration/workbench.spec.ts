@@ -7,7 +7,7 @@
  *  - (b) apply 后假 webServer 上恰好注册四条路由，路径与方法集合正确（用 405 allow 头验证）；
  *  - (c) 路由用的是注入的 routerCollaboration 同一 store（与工具行同实例：注入 store 存进去、
  *    路由读出来，证明不是新建副本）；
- *  - (d) llm 缺席时 models 路由返回 unavailable:true（降级不致命）；
+ *  - (d) sessionController 缺席时 models 路由返回 unavailable:true（降级不致命）；
  *  - (f) 真实 @deepseek-ai/cordis Context 挂 entry + workbench + 假 webServer/connection，
  *    路由真的注册成功（而非静默跳过）。
  */
@@ -78,8 +78,8 @@ function fakeRequest(method: string, url = '/') {
   return { method, url }
 }
 
-/** 构造 workbench 的假 ctx：effect 立即执行工厂；inject 默认不触发 body（llm 缺席）。 */
-function workbenchCtx(runtime: ReturnType<typeof createCollaborationRuntime>, opts?: { invokeLlm?: boolean }) {
+/** 构造 workbench 的假 ctx：effect 立即执行工厂；inject 默认不触发 body（sessionController 缺席）。 */
+function workbenchCtx(runtime: ReturnType<typeof createCollaborationRuntime>, opts?: { invokeSessionController?: boolean }) {
   const { webServer, routes } = fakeWebServer()
   const injected: string[][] = []
   const ctx = {
@@ -89,8 +89,8 @@ function workbenchCtx(runtime: ReturnType<typeof createCollaborationRuntime>, op
     routerCollaboration: runtime,
     inject(deps: string[], body: (child: unknown) => unknown) {
       injected.push([...deps])
-      if (opts?.invokeLlm) {
-        body({ llm: { listProviders: async () => [], listModels: async () => [] } })
+      if (opts?.invokeSessionController) {
+        body({ sessionController: { modelCatalog: async () => ({ default: {}, routableProviders: [], groups: [], failures: [] }) } })
       }
       return { dispose() {} }
     },
@@ -152,10 +152,10 @@ describe('workbench apply — 路由用注入的 routerCollaboration 同一 stor
   })
 })
 
-describe('workbench apply — llm 缺席时 models 路由降级', () => {
+describe('workbench apply — sessionController 缺席时 models 路由降级', () => {
   it('models 路由返回 unavailable:true（降级不致命）', async () => {
-    const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-nollm' })
-    const { ctx, routes } = workbenchCtx(runtime) // 默认不 invokeLlm → llm 缺席
+    const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-nosessioncontroller' })
+    const { ctx, routes } = workbenchCtx(runtime) // 默认不 invokeSessionController → sessionController 缺席
     workbenchApply(ctx as never)
 
     const modelsRoute = routes.find((r) => r.path === COLLABORATION_MODELS_PATH)!
@@ -191,7 +191,7 @@ describe('workbench 真实 cordis 挂载（entry + workbench + 假 webServer/con
   })
 })
 
-describe('workbench apply — llm 捕获不到打一次性警告（不静默、不刷屏）', () => {
+describe('workbench apply — sessionController 捕获不到打一次性警告（不静默、不刷屏）', () => {
   it('ctx.inject 不可用 → 打一次警告，models 会 unavailable，路由仍注册', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
@@ -202,22 +202,22 @@ describe('workbench apply — llm 捕获不到打一次性警告（不静默、�
         webServer,
         connection: fakeConnection(),
         routerCollaboration: runtime,
-        // 无 inject 通道：llm 必然捕获不到。
+        // 无 inject 通道：sessionController 必然捕获不到。
       }
       workbenchApply(ctx as never)
       expect(warnSpy).toHaveBeenCalledTimes(1)
       expect(String(warnSpy.mock.calls[0]?.[0])).toContain('unavailable')
-      // llm 缺席不挡挂载：四条路由照常注册。
+      // sessionController 缺席不挡挂载：四条路由照常注册。
       expect(routes).toHaveLength(4)
     } finally {
       warnSpy.mockRestore()
     }
   })
 
-  it('注入回调里 llm 形状不符 → 打一次警告（不重复）', () => {
+  it('注入回调里 sessionController 形状不符 → 打一次警告（不重复）', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     try {
-      const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-bad-llm' })
+      const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-bad-sessioncontroller' })
       const { webServer, routes } = fakeWebServer()
       const ctx = {
         effect(factory: () => unknown) { return factory() },
@@ -225,8 +225,8 @@ describe('workbench apply — llm 捕获不到打一次性警告（不静默、�
         connection: fakeConnection(),
         routerCollaboration: runtime,
         inject(_deps: string[], body: (child: unknown) => unknown) {
-          // llm 服务存在但缺 listProviders/listModels：形状不符。
-          body({ llm: { listProviders: undefined, listModels: undefined } })
+          // sessionController 服务存在但缺 modelCatalog：形状不符。
+          body({ sessionController: { modelCatalog: undefined } })
           return { dispose() {} }
         },
       }

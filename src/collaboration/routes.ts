@@ -6,7 +6,7 @@
  *   GET  /record?rootSessionId=&taskId=&recordId= → SavedRecord（复用 RecordStore.read）
  *   GET  /roles                                 → RoleTemplate[]（复用 RoleStore.list）
  *   POST /roles {name,description,models?}      → RoleTemplate（按名 upsert，复用 RoleStore.save）
- *   GET  /models                                → 已注册模型清单（llm 缺失时 200 且 unavailable）
+ *   GET  /models                                → 可路由模型清单（sessionController.modelCatalog；缺席时 200 且 unavailable）
  *
  * 第一版工作台只读任务资料：记录修改由模型工具负责，宿主不挂任务写/控制路由
  * （旧 /router/tasks/control 等一概不注册）。本文件只折叠 HTTP，逻辑全部在注入的
@@ -31,10 +31,45 @@ export const COLLABORATION_RECORD_PATH = '/router/collaboration/record'
 export const COLLABORATION_ROLES_PATH = '/router/collaboration/roles'
 export const COLLABORATION_MODELS_PATH = '/router/collaboration/models'
 
-/** 页面清单用的 llm 最小面。不要放进 webServer 那组必需 inject。 */
+/** 模型切换（派发时自动选模型）用的 llm 最小面。不要放进 webServer 那组必需 inject。 */
 export interface CollaborationLlm {
   listProviders(): Promise<ReadonlyArray<{ id: string; name: string }>> | ReadonlyArray<{ id: string; name: string }>
   listModels(provider: string): Promise<ReadonlyArray<{ id: string; name: string }>> | ReadonlyArray<{ id: string; name: string }>
+}
+
+/** Host 模型目录里的一个可路由模型（只取 id/name，其余宿主字段忽略）。 */
+export interface ModelCatalogModel {
+  id: string
+  name: string
+  description?: string
+  reasoning?: unknown
+}
+
+/** Host 模型目录里的一个可路由提供方分组（界面模型选择器同一份）。 */
+export interface ModelProviderGroup {
+  id: string
+  name: string
+  models: readonly ModelCatalogModel[]
+}
+
+/** Host 模型目录里拿不到的提供方（界面模型选择器不显示）。 */
+export interface ModelCatalogFailure {
+  id: string
+  name: string
+  message: string
+}
+
+/** sessionController.modelCatalog() 的返回（宿主类型定义；界面模型选择器同一份）。 */
+export interface ModelCatalog {
+  default: unknown
+  routableProviders: readonly string[]
+  groups: readonly ModelProviderGroup[]
+  failures: readonly ModelCatalogFailure[]
+}
+
+/** 会话控制器最小面（models 路由用；可选依赖，缺席即清单 unavailable）。 */
+export interface CollaborationSessionController {
+  modelCatalog(): Promise<ModelCatalog> | ModelCatalog
 }
 
 /** POST 体上限：1MiB（1024×1024）简单 UI 传输限（非源存储约束）；按累计字节计，非 string 长度。 */
@@ -70,8 +105,8 @@ export interface CollaborationRouteContext {
 export interface CollaborationRouteDeps {
   records: RecordStore
   roles: RoleStore
-  /** 请求时再读，好让 llm 的机会式 inject 晚于路由注册也能用。缺席则清单 unavailable。 */
-  llm?: () => CollaborationLlm | undefined
+  /** 请求时再读，好让 sessionController 的机会式 inject 晚于路由注册也能用。缺席则清单 unavailable。 */
+  sessionController?: () => CollaborationSessionController | undefined
 }
 
 /** CollaborationError.code → HTTP 状态。 */
@@ -257,40 +292,29 @@ export function registerCollaborationRoutes(
   })
 
   handle(COLLABORATION_MODELS_PATH, ['GET'], async () => {
-    const llm = deps.llm?.()
-    if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    const sc = deps.sessionController?.()
+    if (sc === undefined || typeof sc.modelCatalog !== 'function') {
       return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }
     }
     try {
-      const listed = await llm.listProviders()
-      if (!Array.isArray(listed)) {
+      // 目录与界面模型选择器同一份：只取可路由的 groups，failures 不进清单，绝不回退全集。
+      const catalog: unknown = await sc.modelCatalog()
+      if (catalog === null || typeof catalog !== 'object' || !Array.isArray((catalog as { groups?: unknown }).groups)) {
         return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }
       }
-      const providers: Array<{ id: string; name: string; models: Array<{ id: string; name: string }>; error?: string }> = []
-      for (const provider of listed) {
-        if (typeof provider?.id !== 'string') continue
-        const name = typeof provider.name === 'string' ? provider.name : provider.id
-        try {
-          const models = await llm.listModels(provider.id)
-          if (!Array.isArray(models)) throw new Error('listModels 返回的不是数组')
-          providers.push({
-            id: provider.id,
-            name,
-            models: models.flatMap((item) => (
-              item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.name === 'string'
-                ? [{ id: item.id, name: item.name }]
-                : []
-            )),
-          })
-        } catch (error) {
-          providers.push({
-            id: provider.id,
-            name,
-            models: [],
-            error: error instanceof Error ? error.message : String(error),
-          })
-        }
-      }
+      const groups = (catalog as { groups: readonly ModelProviderGroup[] }).groups
+      const providers = groups.flatMap((group) => {
+        if (group === null || typeof group !== 'object' || typeof group.id !== 'string') return []
+        const name = typeof group.name === 'string' ? group.name : group.id
+        const models = Array.isArray(group.models)
+          ? group.models.flatMap((item) => (
+            item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.name === 'string'
+              ? [{ id: item.id, name: item.name }]
+              : []
+          ))
+          : []
+        return [{ id: group.id, name, models }]
+      })
       return { status: 200, body: JSON.stringify({ unavailable: false, providers }) }
     } catch {
       return { status: 200, body: JSON.stringify({ unavailable: true, providers: [] }) }

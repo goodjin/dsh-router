@@ -21,7 +21,7 @@ import { createRecordStore } from '../../src/collaboration/records.ts'
 import { createRoleStore } from '../../src/collaboration/roles.ts'
 import { CollaborationError, type RecordStore, type RoleStore } from '../../src/collaboration/types.ts'
 import { registerCollaborationRoutes, type CollaborationRouteContext } from '../../src/collaboration/routes.ts'
-import { COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH, COLLABORATION_MODELS_PATH, type CollaborationLlm } from '../../src/collaboration/routes.ts'
+import { COLLABORATION_RECORDS_PATH, COLLABORATION_RECORD_PATH, COLLABORATION_ROLES_PATH, COLLABORATION_MODELS_PATH, type CollaborationSessionController } from '../../src/collaboration/routes.ts'
 
 const scratch: string[] = []
 afterAll(async () => {
@@ -86,7 +86,7 @@ interface RegisteredRoute {
 function harness(opts: {
   records: RecordStore
   roles: RoleStore
-  llm?: () => CollaborationLlm | undefined
+  sessionController?: () => CollaborationSessionController | undefined
   admit?: (request: unknown) => { rejection: number } | { peer: unknown }
 }): {
   ctx: CollaborationRouteContext
@@ -106,7 +106,7 @@ function harness(opts: {
       admit: (request) => opts.admit?.(request) ?? { peer: {} },
     },
   }
-  registerCollaborationRoutes(ctx, { records: opts.records, roles: opts.roles, llm: opts.llm })
+  registerCollaborationRoutes(ctx, { records: opts.records, roles: opts.roles, sessionController: opts.sessionController })
   const invoke = async (method: string, pathAndQuery: string, body?: string | Buffer[]) => {
     const [path, query] = pathAndQuery.split('?')
     const route = routes.find((r) => r.path === path)
@@ -393,7 +393,7 @@ describe('POST body transport — 跨块多字节解码 + 1MiB 累计字节上�
 })
 
 describe('GET /router/collaboration/models', () => {
-  it('没有 llm 时 200 且 unavailable', async () => {
+  it('没有 sessionController 时 200 且 unavailable', async () => {
     const dataDir = await freshDir()
     const { invoke } = harness({ records: createRecordStore(dataDir), roles: createRoleStore(dataDir) })
     const res = await invoke('GET', COLLABORATION_MODELS_PATH)
@@ -401,15 +401,14 @@ describe('GET /router/collaboration/models', () => {
     expect(JSON.parse(res.body)).toEqual({ unavailable: true, providers: [] })
   })
 
-  it('listProviders 抛错时仍是 200 unavailable，不让角色路由整组失败', async () => {
+  it('modelCatalog() 抛错时仍是 200 unavailable，不让角色路由整组失败', async () => {
     const dataDir = await freshDir()
     const roles = createRoleStore(dataDir)
     const { invoke } = harness({
       records: createRecordStore(dataDir),
       roles,
-      llm: () => ({
-        listProviders: async () => { throw new Error('llm down') },
-        listModels: async () => [],
+      sessionController: () => ({
+        modelCatalog: async () => { throw new Error('catalog down') },
       }),
     })
     const res = await invoke('GET', COLLABORATION_MODELS_PATH)
@@ -419,17 +418,21 @@ describe('GET /router/collaboration/models', () => {
     expect(saved.status).toBe(200)
   })
 
-  it('单个 listModels 失败保留该 provider 和其他 provider', async () => {
+  it('sessionController 提供 groups 时只返回这些分组里的模型，failures 不进清单', async () => {
     const dataDir = await freshDir()
     const { invoke } = harness({
       records: createRecordStore(dataDir),
       roles: createRoleStore(dataDir),
-      llm: () => ({
-        listProviders: async () => [{ id: 'broken', name: 'Broken' }, { id: 'ok', name: 'Ok' }],
-        listModels: (async (provider: string) => {
-          if (provider === 'broken') throw new Error('list failed')
-          return [{ id: 'gpt', name: 'GPT' }, { id: 1, name: '丢弃' }]
-        }) as CollaborationLlm['listModels'],
+      sessionController: () => ({
+        modelCatalog: async () => ({
+          default: { provider: 'deepseek', model: 'deepseek-chat' },
+          routableProviders: ['deepseek', 'openai'],
+          groups: [
+            { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }, { id: 'deepseek-reasoner', name: 'Reasoner' }] },
+            { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] },
+          ],
+          failures: [{ id: 'blocked', name: 'Blocked', message: 'no route' }],
+        }),
       }),
     })
     const res = await invoke('GET', COLLABORATION_MODELS_PATH)
@@ -437,10 +440,22 @@ describe('GET /router/collaboration/models', () => {
     expect(JSON.parse(res.body)).toEqual({
       unavailable: false,
       providers: [
-        { id: 'broken', name: 'Broken', models: [], error: 'list failed' },
-        { id: 'ok', name: 'Ok', models: [{ id: 'gpt', name: 'GPT' }] },
+        { id: 'deepseek', name: 'DeepSeek', models: [{ id: 'deepseek-chat', name: 'Chat' }, { id: 'deepseek-reasoner', name: 'Reasoner' }] },
+        { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] },
       ],
     })
+  })
+
+  it('modelCatalog() 返回坏形状（无 groups）→ 200 unavailable，绝不退回全集', async () => {
+    const dataDir = await freshDir()
+    const { invoke } = harness({
+      records: createRecordStore(dataDir),
+      roles: createRoleStore(dataDir),
+      sessionController: () => ({ modelCatalog: async () => ({ notGroups: true }) } as unknown as CollaborationSessionController),
+    })
+    const res = await invoke('GET', COLLABORATION_MODELS_PATH)
+    expect(res.status).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ unavailable: true, providers: [] })
   })
 })
 
