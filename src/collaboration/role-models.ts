@@ -107,10 +107,9 @@ export function serializeRoleFile(description: string, models: readonly RoleMode
   return `${body}${MODEL_FENCE_START}\n${rows.join('\n')}\n${MODEL_FENCE_END}\n`
 }
 
-/** 一次派发的候选：临时指定在前，再接角色候选，按 provider+NUL+model 去重（先出现的保留）。 */
+/** 一次派发的候选：角色自己的候选，按 provider+NUL+model 去重（先出现的保留）。 */
 export function resolveDispatchSequence(
   models: readonly RoleModelCandidate[] | undefined,
-  override?: RoleModelCandidate,
 ): RoleModelCandidate[] {
   const sequence: RoleModelCandidate[] = []
   const seen = new Set<string>()
@@ -120,7 +119,6 @@ export function resolveDispatchSequence(
     seen.add(key)
     sequence.push({ provider: candidate.provider, model: candidate.model })
   }
-  if (override !== undefined) push(override)
   if (models !== undefined) {
     for (const candidate of models) push(candidate)
   }

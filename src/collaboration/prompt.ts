@@ -34,8 +34,6 @@ export const collaborationPrompt = [
   '- 归属任务两种给法：给 taskId 就在该任务下派发（一个任务可以挂多个子会话）；省略 taskId 就自动新建一条任务（taskTitle 必填；parentTaskId 可选，通常传主任务，新任务作为它的子任务）。想「一个子会话一条任务」就省略 taskId，想「一个需求多条分工共用一条任务」就给 taskId；',
   '- 派发方式：默认 spawn（轻装新建，任务说明材料自足）；确需子会话看到你当前对话的完整背景时才用 fork（每个子会话带一份父级已完成轮次，成本更高）；continue 是向既有子会话追加要求（见下）；',
   '- 追加或修改需求时，先用 router_record_list(taskId=归属任务, kind=assignment) 查出该任务下登记的子会话（assignment.sessions），再用 router_dispatch(mode=continue, expectedChildId=那个子会话) 投递；continue 会把追加要求自动拼进该任务的描述，任务描述始终是「现在要做什么」的权威来源，不要再手动重复更新；',
-  '- 子会话的模型：默认沿用主会话当前模型（spawn/fork 不指定 provider/model 就继承主会话路由），',
-  '  不要擅自改用 pro 之类更重的模型；确需换模型（换到 flash 等更轻的）由用户明确指示再覆盖；',
   '- 成员把进度/问题/结果用 send_message 报给 Router，Router 把需用户决定的事项交给用户；',
   '- list_agents 仅供查看其工具说明支持的成员。Router 向成员转达用户决定、澄清或追加需求一律走上面的 continue 只投递模式；',
   '- 需要中断某个活着的子会话时用 interrupt_agent（按父子邻接授权，不可越权）；',

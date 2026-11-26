@@ -347,12 +347,15 @@ describe('dispatch role models', () => {
     expect(result).not.toHaveProperty('model')
   })
 
-  it('序列非空时 agentOptions 只有 provider 与 model，成功和 recordError 都带 model', async () => {
+  it('角色候选的第一项作为子会话初始模型；序列非空时 agentOptions 只有 provider 与 model，成功和 recordError 都带 model', async () => {
     const { records, roles } = await makeDeps()
     await roles.save({
       name: '执行者',
       description: '只写职责',
-      models: [{ provider: 'deepseek', model: 'deepseek-chat' }],
+      models: [
+        { provider: 'deepseek', model: 'deepseek-chat' },
+        { provider: 'openai', model: 'gpt-4.1' },
+      ],
     })
     const taskId = await makeTask(records)
     const runs = new Map<string, { parentSessionId: string; sequence: Array<{ provider: string; model: string }> }>()
@@ -366,6 +369,7 @@ describe('dispatch role models', () => {
     const tool = buildDispatchTool({ records, roles, subagents, childModelRuns: runs as never })
     const result = await run(tool, { ...BASE_ARGS, taskId }, { agent: { id: 'parent-9', session: 'other' } }) as { model?: { provider: string; model: string } }
     expect(Object.keys(request ?? {}).sort()).toEqual(['agentOptions', 'maxDepth', 'parent', 'prompt'])
+    // 候选第一项 = 子会话初始模型；后面的候选留给失败回退。
     expect(request?.agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
     expect(Object.keys(request!.agentOptions!)).toEqual(['provider', 'model'])
     expect(request?.prompt[0]!.text).not.toContain('dsh-router:models')
@@ -373,7 +377,10 @@ describe('dispatch role models', () => {
     expect(request?.prompt[0]!.text).toContain('只写职责')
     expect(result.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
     expect(runs.get('child-model')?.parentSessionId).toBe('parent-9')
-    expect(runs.get('child-model')?.sequence).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+    expect(runs.get('child-model')?.sequence).toEqual([
+      { provider: 'deepseek', model: 'deepseek-chat' },
+      { provider: 'openai', model: 'gpt-4.1' },
+    ])
 
     const failing = {
       ...records,
@@ -388,7 +395,7 @@ describe('dispatch role models', () => {
     expect(errored.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
   })
 
-  it('临时指定在角色候选前面并按 provider+NUL+model 去重；坏形状在建任务和读角色之前拒绝', async () => {
+  it('派发不能指定模型：带 provider/model 一律 INVALID_INPUT，且在建任务和读角色之前拒绝', async () => {
     const { records, roles } = await makeDeps()
     await roles.save({
       name: '执行者',
@@ -421,17 +428,29 @@ describe('dispatch role models', () => {
     })
     await expect(run(tool, { ...BASE_ARGS, provider: 'only-provider' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
     await expect(run(tool, { ...BASE_ARGS, model: 'only-model' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
-    await expect(run(tool, { ...BASE_ARGS, provider: '  ', model: 'gpt' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
+    await expect(run(tool, { ...BASE_ARGS, provider: 'deepseek', model: 'deepseek-chat' })).rejects.toMatchObject({ code: 'INVALID_INPUT' })
     expect(reads).toBe(0)
     expect(await records.list('root-1', { kind: 'task' })).toEqual([])
     expect(runs.size).toBe(0)
+    expect(agentOptions).toBeUndefined()
 
-    await run(tool, { ...BASE_ARGS, provider: ' deepseek ', model: ' deepseek-chat ' })
-    expect(agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+    // 不带模型参数正常派发：初始模型就是角色候选的第一项。
+    await run(tool, { ...BASE_ARGS })
+    expect(agentOptions).toEqual({ provider: 'openai', model: 'gpt-4.1' })
     expect(runs.get('child-override')?.sequence).toEqual([
-      { provider: 'deepseek', model: 'deepseek-chat' },
       { provider: 'openai', model: 'gpt-4.1' },
+      { provider: 'deepseek', model: 'deepseek-chat' },
     ])
+  })
+
+  it('工具参数里没有 provider/model；工具说明写明模型由角色自己决定', async () => {
+    const { records, roles } = await makeDeps()
+    const tool = buildDispatchTool({ records, roles })
+    const properties = (tool.parameters as { properties: Record<string, unknown> }).properties
+    expect(properties).not.toHaveProperty('provider')
+    expect(properties).not.toHaveProperty('model')
+    expect(tool.description).toContain('不能指定模型')
+    expect(tool.description).not.toContain('仅这一次')
   })
 
   it('continue 带 provider 或 model 时 INVALID_INPUT，不投递也不改任务正文', async () => {
