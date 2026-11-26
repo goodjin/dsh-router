@@ -206,6 +206,8 @@ function matchesCatalogQuery(option: CatalogOption, terms: string[]): boolean {
 interface CatalogGroup {
   providerId: string
   providerName: string
+  /** 该提供方自己宣告的模型总数（不随搜索变化）。 */
+  total: number
   options: CatalogOption[]
 }
 
@@ -229,7 +231,7 @@ function collectCatalogGroups(catalog: CollaborationState['modelCatalog'], query
       }
       if (matchesCatalogQuery(option, terms)) options.push(option)
     }
-    if (options.length > 0) groups.push({ providerId: provider.id, providerName: provider.name, options })
+    if (options.length > 0) groups.push({ providerId: provider.id, providerName: provider.name, total: provider.models.length, options })
   }
   return groups
 }
@@ -347,6 +349,18 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const totalFiltered = catalogGroups.reduce((sum, group) => sum + group.options.length, 0)
   const addedKeys = new Set(draftModels.map((candidate) => candidateKey(candidate.provider, candidate.model)))
 
+  /** 收起清单面板并清空搜索词与勾选（两种收起方式共用同一行为）。 */
+  const closeCatalog = (): void => {
+    setCatalogOpen(false)
+    setCatalogQuery('')
+    setCatalogSelection(new Set())
+  }
+
+  const toggleCatalog = (): void => {
+    if (catalogOpen) closeCatalog()
+    else setCatalogOpen(true)
+  }
+
   /** 「添加所选」：按清单顺序（组顺序 + 组内顺序）追加，跳过与已有候选重复的 provider+model（trim 比较）。 */
   const addSelected = (): void => {
     const ordered = catalogOptions.filter((option) => catalogSelection.has(option.key))
@@ -357,9 +371,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       setDraftModels((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
       setDirty(true)
     }
-    setCatalogQuery('')
-    setCatalogSelection(new Set())
-    setCatalogOpen(false)
+    closeCatalog()
   }
 
   return (
@@ -468,7 +480,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                   type="button"
                   data-router-collab-catalog-open
                   style={SMALL_BUTTON_STYLE}
-                  onClick={() => { setCatalogOpen((open) => !open) }}
+                  onClick={toggleCatalog}
                 >
                   添加模型
                 </button>
@@ -497,7 +509,10 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                           <div style={{ padding: '6px 8px', fontWeight: 500, fontSize: 12, background: 'var(--dsw-alias-bg-l2, #f5f7fa)', borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)' }}>
                             {group.providerName}
                             <span style={{ color: '#6b7078', fontWeight: 400 }}>（{group.providerId}）</span>
-                            <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.options.length} 个模型</span>
+                            <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.total} 个模型</span>
+                            {group.options.length < group.total ? (
+                              <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.options.length} 个匹配</span>
+                            ) : null}
                           </div>
                           {group.options.map((option) => {
                             const isAdded = addedKeys.has(candidateKey(option.providerId, option.modelId))
@@ -559,11 +574,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                       type="button"
                       data-router-collab-catalog-close
                       style={SMALL_BUTTON_STYLE}
-                      onClick={() => {
-                        setCatalogOpen(false)
-                        setCatalogQuery('')
-                        setCatalogSelection(new Set())
-                      }}
+                      onClick={closeCatalog}
                     >
                       收起
                     </button>

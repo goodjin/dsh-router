@@ -666,6 +666,32 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await act(async () => { root.unmount() })
   })
 
+  it('候选已存在同 provider+model（带首尾空格）时，从清单再添加同项被跳过、不产生重复行', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    // 先在清单里勾选 deepseek-chat。
+    openCatalog(container)
+    await flush()
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    // 勾选后手工加一个带首尾空格的同项候选（面板仍展开，勾选未被清掉）。
+    click(container.querySelector('[data-router-collab-model-add]')!)
+    await flush()
+    click(container.querySelector('[data-router-collab-model-edit]')!)
+    await flush()
+    await act(async () => {
+      setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-model-provider]')!, ' deepseek ')
+      setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-model-model]')!, ' deepseek-chat ')
+    })
+    click(container.querySelector('[data-router-collab-model-edit]')!)
+    await flush()
+    // 添加所选：trim 后判为已有同项，应被去重跳过，不产生重复行。
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
+    expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
   it('清空选择：勾选后一键清空，不追加任何候选', async () => {
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
     openCatalog(container)
