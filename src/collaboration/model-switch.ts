@@ -372,7 +372,7 @@ export function createModelSwitch(deps: ModelSwitchDeps): ModelSwitchController 
           `已从 ${from.provider}/${from.model} 换到 ${to.provider}/${to.model}。`,
           `错误码：${reported?.code ?? ''}`,
           `${statusLine}错误信息：${reported?.message ?? ''}`,
-          `本次序列：${formatSequence(run.sequence)}`,
+          `本次序列（本次随机起点轮转后的实际顺序）：${formatSequence(run.sequence)}`,
           `已经放弃的前缀：${formatSequence(run.sequence.slice(0, chosen))}`,
           '未退回主会话模型。',
         ].join('\n'),

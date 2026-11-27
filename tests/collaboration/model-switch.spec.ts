@@ -464,3 +464,50 @@ describe('model switch state machine', () => {
     warn.mockRestore()
   })
 })
+
+describe('回退沿旋转后的序列走（随机起点已在派发时排好）', () => {
+  it('序列是 [m3, m1, m2]：失败后依次换到 m1、m2，绕回起点之前的那几项', async () => {
+    const h = await harness({
+      sequence: [
+        { provider: 'p', model: 'm3' },
+        { provider: 'p', model: 'm1' },
+        { provider: 'p', model: 'm2' },
+      ],
+    })
+    await endTurn(h, 'QUOTA', 1, { message: '第一次' })
+    expect(h.select).toHaveBeenLastCalledWith({ provider: 'p', model: 'm1' })
+    await endTurn(h, 'SERVER', 2, { status: 502, message: '第二次' })
+    expect(h.select).toHaveBeenLastCalledWith({ provider: 'p', model: 'm2' })
+    expect(h.select.mock.calls.map((call) => call[0])).toEqual([
+      { provider: 'p', model: 'm1' },
+      { provider: 'p', model: 'm2' },
+    ])
+    // 走完整条序列（含绕回的两项）后停：每个候选只试一次。
+    await endTurn(h, 'TRANSPORT', 3, { message: '最后一次断了' })
+    expect(h.select).toHaveBeenCalledTimes(2)
+    expect(h.runs.get(CHILD)?.phase).toBe('stopped')
+    expect(await taskLabel(h)).toBe('受阻')
+    const written = await reports(h)
+    const blocked = written.find((report) => report.body.includes('候选已用完'))
+    expect(blocked).toBeTruthy()
+    expect(blocked!.body).toContain('p/m3')
+    expect(blocked!.body).toContain('p/m1')
+    expect(blocked!.body).toContain('p/m2')
+  })
+
+  it('切换报告里打印的是本次实际的序列顺序（人看得懂实际会用什么）', async () => {
+    const h = await harness({
+      sequence: [
+        { provider: 'p', model: 'm3' },
+        { provider: 'p', model: 'm1' },
+        { provider: 'p', model: 'm2' },
+      ],
+    })
+    await endTurn(h, 'QUOTA', 1, { message: '第一次' })
+    const written = await reports(h)
+    const switched = written.find((report) => report.body.includes('已从 p/m3 换到 p/m1'))
+    expect(switched).toBeTruthy()
+    expect(switched!.body).toContain('本次序列')
+    expect(switched!.body).toContain('p/m3、p/m1、p/m2')
+  })
+})

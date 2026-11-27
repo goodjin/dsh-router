@@ -18,6 +18,10 @@
  *
  * 失败口径：角色不存在/参数坏 → 拒绝且不创建；创建失败 → 错误上抛、不落记录；
  * 创建成功但登记失败 → 返回 childId + recordError（子会话已存在，不能丢编号）。
+ *
+ * 模型选取：角色 md 候选围栏里的候选先去重（先出现者保留），再按随机起点旋转成轮转顺序；
+ * 子会话初始模型 = 旋转后的第一项，失败回退沿这条序列往后走，到头即回到开头。
+ * 随机源可注入（deps.random，缺席用 Math.random），只为让测试能钉死起点。
  */
 
 import { CollaborationError, type RecordStore, type RoleStore } from './types.ts'
@@ -53,6 +57,11 @@ export interface DispatchDeps {
   childModelRuns?: Map<string, ChildModelRun>
   /** 角色职责服务：预热子会话的职责缓存 + 落盘会话绑定（缺席则不做，系统提示词不注入职责段）。 */
   roleDuties?: RoleDutyBinder
+  /**
+   * 候选模型的随机源：决定这次派发从候选序列的哪一项起步（缺席用 Math.random）。
+   * 注入是为了让测试能钉死起点，不是为了让模型选择变成可配置项。
+   */
+  random?: () => number
 }
 
 /** 派发侧用到的职责服务面（窄接口：预热 + 绑定）。 */
@@ -111,8 +120,9 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       'parentTaskId 可选，新任务作为它的子任务，通常传主任务）。' +
       'spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；' +
       'continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。' +
-      '子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏）的第一项，' +
-      '没配候选则按宿主默认；派发时不能指定模型（本工具不接受 provider/model）。' +
+      '子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏），随机挑一个起点排成轮转顺序' +
+      '（从这一位开始逐个试，到头回到开头，第一个真正跑通的就是它），没配候选则按宿主默认；' +
+      '派发时不能指定模型（本工具不接受 provider/model）。' +
       'rootSessionId 必须显式传入。',
     parameters: {
       type: 'object',
@@ -151,7 +161,7 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
           model: {
             type: 'object',
             additionalProperties: false,
-            description: '实际传给子会话的第一个候选；没配候选时不出现',
+            description: '实际传给子会话的第一个候选（本次随机起点轮转后的第一项）；没配候选时不出现',
             properties: {
               provider: { type: 'string' },
               model: { type: 'string' },
@@ -237,7 +247,8 @@ export function buildDispatchTool(deps: DispatchDeps): ToolDefinition {
       // ── spawn / fork：新建子会话 ────────────────────────────────────────────
       // 先读角色（无副作用）：角色不存在就什么都不写，不会留下自动建的孤儿任务。
       const role = await deps.roles.read(roleName)
-      const sequence = resolveDispatchSequence(role.models)
+      // 候选序列：去重（先出现者保留）后按随机起点旋转。起点随机，往后走自然形成环绕。
+      const sequence = resolveDispatchSequence(role.models, deps.random)
       // 解析归属任务：给了 taskId 用它；省略则自动新建（taskTitle 必填，parentTaskId 可选）。
       let taskId: string
       let createdTask = false

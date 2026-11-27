@@ -8,21 +8,23 @@
 
 | 决定 | 本方案做什么 | 明确不做 |
 | --- | --- | --- |
-| D1 | 每个角色一份有序候选 `{provider, model}[]`，挂在角色模板上 | 不建「模型」实体，不做跨角色共享名单 |
+| D1 | 每个角色一份有序候选 `{provider, model}[]`，挂在角色模板上（保存顺序是轮转的基准顺序） | 不建「模型」实体，不做跨角色共享名单 |
 | D2 | 子会话某一轮结束后：记下失败、`agent.model.select` 换到下一个、再投递一条固定「继续」。报告里另写一条切换记录 | 不在同一步里换模型重试；不返回 `{kind:'retry'}`；不走 `agent/request` 替换配置 |
-| D3 | 候选写在角色 md；协作页可从已注册清单选，也可手工改；`router_dispatch` 可带仅这一次的首选 | 临时指定不写回角色文件；下次新派发不沿用 |
+| D3 | 候选写在角色 md；协作页可从已注册清单选，也可手工改。（`router_dispatch` 的临时指定已退役：派发不接受 `provider`/`model`） | 临时指定不写回角色文件；下次新派发不沿用 |
 | D4 | 只给派出去的子会话传模型、只对那些子会话切换 | 不改 Router 主会话自己的模型；不调用会写部署默认模型的 `session.selectModel` |
 | D5 | 分类与切换都在本插件内用稳定字段自己写 | 不改、不装、不 import `dsh-model-fallback` |
 | D6 | 没配候选：派发对象不出现 `agentOptions`，不登记游标，不做自动切换 | 不拒绝这种派发，不替它填主会话模型 |
 | D7 | 通道故障（额度、限流、超时断网、服务端）等宿主重试放弃、轮次结束后再切；适配器未注册（`NO_ADAPTER`）在第一次 `turn/end` 后切。`INVALID_REQUEST` 只按 D11 切 | 内容被拒、参数错误、用户中断不切。不得把整个 `INVALID_REQUEST` 无条件当成切换条件 |
-| D8 | 同一次子会话的游标只前进。用通的候选一直用到它自己再失败。已经失败的候选这次不再试。下一次新派发从该角色列表第一个重新开始（再叠加当次临时指定） | 不在同一次子会话里回头试首选；不做跨角色冷却 |
+| D8 | 同一次子会话的游标只前进。用通的候选一直用到它自己再失败。已经失败的候选这次不再试。下一次新派发重新随机取一个起点，按轮转顺序走（起点随机 + 到头绕回） | 不在同一次子会话里回头试首选；不做跨角色冷却 |
 | D9 | 可切换失败把序列走完：停下。任务 `workLabel` 改为 `受阻`。报告写试过谁、最后一次错误，并写明没有退回主会话模型 | 不空转、不再投递继续、不用主会话模型再试一次 |
 | D10 | `routerCollaboration` 仍 `provide` 在根作用域；`apply` 返回的注销函数调用 `provide` 交回的释放函数，把这条登记卸掉 | 不把服务挪出根作用域；不重做隔离实验（现码仍是根发布 + 空注销器，上次结论成立） |
 | D11 | `code === 'INVALID_REQUEST'` 时，当场读该 provider 已注册的 `listModels`。读成功且失败的 model id 不在其中：当成模型不存在，前进到下一个候选 | 读成功且 id 在清单里：当成参数错误，不切、不标受阻、不写切换报告。清单读不到（没有 `llm`、`listModels` 抛错、或该 provider 不在已注册列表里）：不靠这条，同样不切 |
 
 由上述决定直接推出、实现必须照做的规则：
 
-- 一次派发的候选序列 = 临时指定（若有，且只这一次）在前，然后该角色已保存的候选，按 `provider` 与 `model` 的精确字符串去重（先出现的保留）。临时指定失败后继续往后走。序列不写回模板。
+- 一次派发的候选序列 = 该角色已保存的候选，按 `provider` 与 `model` 的精确字符串去重（先出现的保留），再**随机取一个起点旋转成轮转顺序**（起点 k → `[k, k+1, …, 末尾, 1, …, k-1]`）。序列的第一项就是子会话初始模型，失败后继续往后走，走完一圈即穷尽。序列不写回模板，也不写回角色文件。
+  - 随机源可注入（派发依赖里的 `random?: () => number`，缺席用 `Math.random`），只为让测试能钉死起点。
+  - 候选只有一个时序列不变；角色没配候选时不传 `agentOptions`（D6 不变）。
 - 保存时拒绝形状不合法的条目（缺 `provider` 或 `model`，或不是 trim 后的非空字符串，或带多余键）。形状合法但宿主当前没有的模型，保存放行；运行时若表现为 `NO_ADAPTER` 则按 D7 换下一个。不在 `listModels` 里不等于「不存在」。
 - 不设计 `reasoningEffort`。不设计 `maxTokens` 覆盖。不改主会话模型。
 
@@ -250,7 +252,7 @@ interface RoleTemplate {
 - `models: []`：明确清空，文件只写职责，不留围栏。
 - `models` 为数组：逐条校验。`provider`、`model` 必须是字符串，trim 后非空，存 trim 后的值。多余键、非对象、非数组，整次保存拒绝，不写文件。
 - 不因为宿主当前 `listModels` 里没有这个 id 而拒绝。
-- 保存顺序就是优先级。存储时不去重；派发序列才去重。
+- 保存顺序是**轮转的基准顺序**，不是严格优先级：派发时起点随机，起点之前的那些候选会被排到序列末尾。存储时不去重；派发序列才去重。
 - 校验失败码用现有 `INVALID_INPUT`。不新增错误码。
 
 工具 schema 与 POST 体都允许可选 `models`。`additionalProperties` 仍为 false。
@@ -258,6 +260,8 @@ interface RoleTemplate {
 ## 派发
 
 ### 临时指定落在哪个字段
+
+> 已退役：派发工具不再接受 `provider` / `model`（出现即 `INVALID_INPUT`）。下面的写法是当初的设计记录，现行口径见「序列」。
 
 `router_dispatch` 增加两个可选参数，仅 `spawn` / `fork`：
 
@@ -270,11 +274,16 @@ interface RoleTemplate {
 
 ### 序列
 
-`resolveDispatchSequence(role.models, override)`：
+`resolveDispatchSequence(role.models, random)`：
 
-1. 若有临时指定，先放它。
-2. 再放角色候选（没有则为空）。
-3. 按 `provider + '\0' + model` 精确去重，保留先出现的。
+1. 放角色候选（没有则为空）。
+2. 按 `provider + '\0' + model` 精确去重，保留先出现的。
+3. **随机取起点并旋转**：起点 `k = floor(random() * n)`（夹在 `[0, n-1]`），序列变成 `[k, k+1, …, 末尾, 1, …, k-1]`。随机源缺席用 `Math.random`；随机源给出坏值（NaN、越界、抛错）时退回 `k = 0`，不让派发因随机源坏了而失败。
+
+   - 轮转后的第一项 = 子会话初始模型；失败回退沿这条序列往后走，于是「到头就从头」天然成立——起点之前的那几项正排在序列末尾。
+   - 一个候选时没有可轮转的余地，序列不变。
+
+临时指定（`override`）已随「派发工具去掉指定模型的能力」退役：派发出现 `provider` / `model` 一律 `INVALID_INPUT`。模型完全由角色自己的候选决定。
 
 序列为空：不登记游标。`startActivation` 的参数对象与今天 235–241 行相同，键集合不含 `agentOptions`。返回值键也不变：成功是 `childId`、`taskId`、`createdTask`、`record`；登记失败是 `childId`、`taskId`、`createdTask`、`recordError`（253–261 行）。
 
@@ -393,7 +402,7 @@ interface ChildModelRun {
 
 - 不调用 `select`，不把正在跑的子会话拨回列表第一个。宿主日志里的 `model/selection` 还在，冷恢复后 `current()` 仍是重启前选中的候选（除非别的代码再 `select`；本插件不这样做）。
 - 不根据角色文件重建游标。临时指定和「哪些已经失败」都没落盘，重建会把已失败候选再试一遍，违反 D8。
-- 因此这条已经存在的子会话，后续失败不再自动换、不再自动标 `受阻`、不再另写切换报告。宿主原有结束通知仍到父会话。用户要再换，就重新派发一次。新的 spawn/fork 从该角色列表第一个开始，并可再带当次的临时指定。
+- 因此这条已经存在的子会话，后续失败不再自动换、不再自动标 `受阻`、不再另写切换报告。宿主原有结束通知仍到父会话。用户要再换，就重新派发一次。新的 spawn/fork 重新随机取一个起点，按轮转顺序走（起点随机 + 到头绕回）。
 - 卸载时 abort 监听，并释放根服务（D10）。表随 face 丢掉。
 
 `router_dispatch` `continue` 不恢复、不重置已丢失的游标。
@@ -467,7 +476,7 @@ return () => {
 - `models` 缺省的保存保留旧候选；`models: []` 清空且文件不再含标记。
 - 有围栏的预置角色名：`seedPresetRoles` 不升级、不删除。无围栏且等于历史文本：仍升级，写出的文件没有围栏。用户改过的职责仍不覆盖。
 - `renderRoles` / `composeDispatchInstruction` 的输入用解析后的 `description` 时，输出不含 `dsh-router:models` 和 provider id。
-- 派发：序列空时 `startActivation` 参数深比较没有 `agentOptions`，返回键与现在相同。序列非空时 `agentOptions` 只有 `provider` 和 `model`。临时指定在前、去重、失败形状在建任务前拒绝。`continue` 拒绝 `provider`/`model`，且不调用 `startActivation`。
+- 派发：序列空时 `startActivation` 参数深比较没有 `agentOptions`，返回键与现在相同。序列非空时 `agentOptions` 只有 `provider` 和 `model`。去重（先出现者保留）+ 随机起点旋转的顺序正确；候选数为 1 时不变；不同起点得到不同顺序但仍是同一集合的轮转；带 `provider`/`model` 一律在建任务前拒绝。`continue` 同样拒绝，且不调用 `startActivation`。
 - 状态机（假的 `session/event`、`agent/status`、`agent.model.select`、`sendMessage`、`listModels`）：`agent/request-error` 不触发切换；`llm/retry` 期间不切换；`turn/end` `RATE_LIMIT` 在 idle 之后 `select` 下一个并送出固定中文句；`aborted`、`EMPTY_RESPONSE`、`HTTP_404` 不 `select`；`INVALID_REQUEST` 且 `listModels` 成功不含该 id（含成功的空列表）会前进；`INVALID_REQUEST` 且 id 在列表中不 `select`；`INVALID_REQUEST` 且 `listModels` 抛错或不存在该 provider 不 `select`、不标受阻；`NO_ADAPTER` 不看清单也会前进；下标不回头；最后一个也失败时任务 `workLabel` 为 `受阻`，报告含试过的候选和最后错误，且没有 `sendMessage`；`select` 成功但 `sendMessage` 失败时不再试下一个；没有 `agent.model` 时不调用 `selectModel`。
 - 游标在 face 上：注销后再 `apply`，旧 childId 的失败不会打到新 face 的表。
 - 模型路由：无 `sessionController`、`modelCatalog()` 抛错或返回无 groups 时 200 且 `unavailable: true`（绝不退回 llm 全量枚举）；有 groups 时只返回 groups 里的模型，failures 不进清单。
@@ -496,7 +505,7 @@ return () => {
 ## 替代方案与不采用原因
 
 - 去改 `dsh-model-fallback`。D5 要求只做在 `dsh-router`，插件互不依赖。该插件的运行时是 `agent/request` 里替换路由，再在 `agent/request-error` 返回 `{kind:'retry'}`（`dsh-model-fallback/src/index.ts` 1–14 行），在同一步里重试，违反 D2。它的范围是日程投递开出来的会话，不是角色模板。它的 `classify.ts` 只借用四类名字：额度、限流、网络、服务端。本插件按稳定 `code` / `status` 自己判断，不链接它的冷却和正则。
-- 每一步都回头试首选。违反 D8。同一次子会话留在用通的候选上，失败过的不再试；新派发才从列表头开始。
+- 每一步都回头试首选。违反 D8。同一次子会话留在用通的候选上，失败过的不再试；新派发重新随机取起点、按轮转顺序走（起点之前的那几项排在末尾，走完一圈即穷尽）。
 - 没配候选就拒绝派发。违反 D6。没配就保持今天的调用形状。
 - 用 `session.selectModel` 给子会话换模型。桌面版会 `saveSelection` 写部署默认，违反 D4。官方 869–874 行也写了后台保存默认。
 - 把候选写进 `description` 正文或 YAML front matter 并把正文仍当整文件。会污染 `composeDispatchInstruction` 和 `dutySummary`，也会让 `seedPresetRoles` 的精确比较把「只加了模型的预置角色」当成用户改过或反过来在升级时抹掉候选。
@@ -522,9 +531,9 @@ return () => {
 | --- | --- |
 | 角色 md 文末候选围栏，`RoleTemplate.models` | D1、D3 |
 | 无围栏则派发不带 `agentOptions` | D6 |
-| `router_dispatch` 的可选 `provider` + `model`，不写回文件 | D3 的临时指定 |
+| `router_dispatch` 拒绝 `provider` + `model`（模型由角色候选决定） | D3 的临时指定已退役 |
 | 只对子会话 `startActivation` 传 `{provider, model}` | D4 |
-| face 上的进程内游标，只前进，新派发重新从列表头取 | D8 |
+| face 上的进程内游标，只前进，新派发重新随机取起点并轮转 | D8 |
 | 入口 `session/event` 监听，等 `turn/end` 再 `select` 再 `sendMessage`；无定时器 | D2 |
 | 固定继续句 + `kind: 'report'` 的切换记录 | D2 |
 | 序列走完或无法安全继续时任务 `受阻` | D9 |

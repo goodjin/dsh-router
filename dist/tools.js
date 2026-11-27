@@ -18,21 +18,50 @@ var CollaborationError = class extends Error {
 
 //#endregion
 //#region src/collaboration/role-models.ts
-/** 一次派发的候选：角色自己的候选，按 provider+NUL+model 去重（先出现的保留）。 */
-function resolveDispatchSequence(models) {
-	const sequence = [];
+/**
+* 随机起点：返回 [0, length-1] 的下标。
+*
+* 随机源缺席用 Math.random；随机源给出坏值（NaN、Infinity、越界、抛错）时退回 0，
+* 也就是「从第一个候选开始」——派发不能因为随机源坏了就不派。
+*/
+function pickRotationStart(length, random = Math.random) {
+	if (length <= 1) return 0;
+	let value;
+	try {
+		value = random();
+	} catch {
+		return 0;
+	}
+	if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+	const scaled = Math.floor(value * length);
+	if (scaled < 0) return 0;
+	if (scaled >= length) return length - 1;
+	return scaled;
+}
+/**
+* 一次派发的候选：角色自己的候选，按 provider+NUL+model 去重（先出现的保留），
+* 再按随机起点旋转成轮转顺序（k, k+1, …, 末尾, 1, …, k-1）。
+*
+* 旋转后的第一项就是子会话的初始模型；失败回退沿这条序列往后走，于是
+* 「到头就从头」天然成立——排在末尾的正是起点之前的那些候选。
+* 候选只有一个时序列不变（没有可轮转的余地）。
+*/
+function resolveDispatchSequence(models, random = Math.random) {
+	const deduped = [];
 	const seen = /* @__PURE__ */ new Set();
 	const push = (candidate) => {
 		const key = `${candidate.provider}\0${candidate.model}`;
 		if (seen.has(key)) return;
 		seen.add(key);
-		sequence.push({
+		deduped.push({
 			provider: candidate.provider,
 			model: candidate.model
 		});
 	};
 	if (models !== void 0) for (const candidate of models) push(candidate);
-	return sequence;
+	const start = pickRotationStart(deduped.length, random);
+	if (start === 0) return deduped;
+	return [...deduped.slice(start), ...deduped.slice(0, start)];
 }
 
 //#endregion
@@ -70,7 +99,7 @@ function composeDispatchInstruction(input) {
 function buildDispatchTool(deps) {
 	return {
 		name: "router_dispatch",
-		description: "按角色派发子会话（职责由代码注入子会话的系统提示词，不在初始指令里）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏）的第一项，没配候选则按宿主默认；派发时不能指定模型（本工具不接受 provider/model）。rootSessionId 必须显式传入。",
+		description: "按角色派发子会话（职责由代码注入子会话的系统提示词，不在初始指令里）。传入角色名（须已存在于角色库）、任务内容与派发方式；创建成功自动登记一条分工记录（关联子会话、待处理标签）。归属任务两种给法：给 taskId → 在该任务下派发；省略 taskId → 自动新建一条任务（taskTitle 必填；parentTaskId 可选，新任务作为它的子任务，通常传主任务）。spawn=轻装新建（默认，材料自足）；fork=带父级已完成轮次（子会话能看到你的对话历史，令牌成本更高）；continue=向既有子会话追加要求（expectedChildId 必填，从该任务的分工记录取；追加要求会自动拼进它归属的任务描述）。子会话用哪个模型由角色自己决定：取该角色模板的候选模型（角色 md 候选围栏），随机挑一个起点排成轮转顺序（从这一位开始逐个试，到头回到开头，第一个真正跑通的就是它），没配候选则按宿主默认；派发时不能指定模型（本工具不接受 provider/model）。rootSessionId 必须显式传入。",
 		parameters: {
 			type: "object",
 			additionalProperties: false,
@@ -147,7 +176,7 @@ function buildDispatchTool(deps) {
 					model: {
 						type: "object",
 						additionalProperties: false,
-						description: "实际传给子会话的第一个候选；没配候选时不出现",
+						description: "实际传给子会话的第一个候选（本次随机起点轮转后的第一项）；没配候选时不出现",
 						properties: {
 							provider: { type: "string" },
 							model: { type: "string" }
@@ -216,7 +245,7 @@ function buildDispatchTool(deps) {
 				}
 			}
 			const role = await deps.roles.read(roleName);
-			const sequence = resolveDispatchSequence(role.models);
+			const sequence = resolveDispatchSequence(role.models, deps.random);
 			let taskId;
 			let createdTask = false;
 			if (a.taskId !== void 0) {
@@ -827,7 +856,8 @@ function buildCollaborationTools(deps) {
 			subagents: deps.subagents,
 			afterWrite,
 			childModelRuns: deps.childModelRuns,
-			roleDuties: deps.roleDuties
+			roleDuties: deps.roleDuties,
+			random: deps.random
 		}),
 		{
 			name: "router_record_create",

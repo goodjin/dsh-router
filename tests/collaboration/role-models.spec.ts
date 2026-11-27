@@ -10,7 +10,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { buildCollaborationContext } from '../../src/collaboration/context.ts'
 import { composeDispatchInstruction } from '../../src/collaboration/dispatch.ts'
 import { HISTORICAL_PRESET_DESCRIPTIONS, PRESET_ROLE_TEMPLATES, RETIRED_PRESET_ROLES } from '../../src/collaboration/preset-roles.ts'
-import { parseRoleDocument, serializeRoleFile } from '../../src/collaboration/role-models.ts'
+import { parseRoleDocument, pickRotationStart, resolveDispatchSequence, serializeRoleFile } from '../../src/collaboration/role-models.ts'
 import { createRoleStore, seedPresetRoles } from '../../src/collaboration/roles.ts'
 import type { RoleStore, RoleTemplate } from '../../src/collaboration/types.ts'
 import { makeCollabFs } from './collab-test-fs.ts'
@@ -199,5 +199,88 @@ describe('seedPresetRoles 与围栏', () => {
     }
     await seedPresetRoles(store)
     expect(saved).not.toContain('执行者')
+  })
+})
+
+describe('派发候选序列：随机起点 + 环绕轮转', () => {
+  const FIVE = [
+    { provider: 'p1', model: 'm1' },
+    { provider: 'p2', model: 'm2' },
+    { provider: 'p3', model: 'm3' },
+    { provider: 'p4', model: 'm4' },
+    { provider: 'p5', model: 'm5' },
+  ]
+
+  it('随机起点决定轮转顺序：起点 k → [k, k+1, …, 末尾, 1, …, k-1]', () => {
+    // k = floor(0.4 * 5) = 2 → 第三项起步，到末尾后绕回第一、二项。
+    expect(resolveDispatchSequence(FIVE, () => 0.4)).toEqual([
+      { provider: 'p3', model: 'm3' },
+      { provider: 'p4', model: 'm4' },
+      { provider: 'p5', model: 'm5' },
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2' },
+    ])
+    // k = 0 → 与原顺序相同。
+    expect(resolveDispatchSequence(FIVE, () => 0)).toEqual(FIVE)
+    // k = 4 → 最后一项起步，其余顺次绕到前面。
+    expect(resolveDispatchSequence(FIVE, () => 0.99)).toEqual([
+      { provider: 'p5', model: 'm5' },
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2' },
+      { provider: 'p3', model: 'm3' },
+      { provider: 'p4', model: 'm4' },
+    ])
+  })
+
+  it('每一种起点都得到同一集合的轮转：顺序各不相同，长度与成员不变', () => {
+    const seen = new Set<string>()
+    for (let k = 0; k < FIVE.length; k++) {
+      // 固定随机源精确落在第 k 格：floor((k + 0.5) / 5 * 5) = k
+      const rotated = resolveDispatchSequence(FIVE, () => (k + 0.5) / FIVE.length)
+      expect(rotated).toHaveLength(FIVE.length)
+      expect([...rotated].sort((a, b) => a.model.localeCompare(b.model))).toEqual([...FIVE].sort((a, b) => a.model.localeCompare(b.model)))
+      expect(rotated[0]!.model).toBe(`m${k + 1}`)
+      expect(rotated[rotated.length - 1]!.model).toBe(`m${k === 0 ? FIVE.length : k}`)
+      seen.add(rotated.map((item) => item.model).join(','))
+    }
+    expect(seen.size).toBe(FIVE.length)
+  })
+
+  it('候选只有一个时序列不变；没有候选时是空序列', () => {
+    const one = [{ provider: 'p', model: 'm' }]
+    expect(resolveDispatchSequence(one, () => 0.7)).toEqual(one)
+    expect(resolveDispatchSequence(undefined, () => 0.7)).toEqual([])
+    expect(resolveDispatchSequence([], () => 0.7)).toEqual([])
+  })
+
+  it('去重语义不变（先出现者保留），去重后再轮转', () => {
+    const models = [
+      { provider: 'p', model: 'm1' },
+      { provider: 'p', model: 'm2' },
+      { provider: 'p', model: 'm1' },
+      { provider: 'p', model: 'm3' },
+    ]
+    // 去重后是 [m1, m2, m3]；k = floor(0.5 * 3) = 1 → [m2, m3, m1]
+    expect(resolveDispatchSequence(models, () => 0.5)).toEqual([
+      { provider: 'p', model: 'm2' },
+      { provider: 'p', model: 'm3' },
+      { provider: 'p', model: 'm1' },
+    ])
+  })
+
+  it('随机源坏值（NaN、越界、抛错）不让派发失败：退回起点 0 或夹到末尾', () => {
+    expect(resolveDispatchSequence(FIVE, () => Number.NaN)).toEqual(FIVE)
+    expect(resolveDispatchSequence(FIVE, () => 1)).toEqual([
+      { provider: 'p5', model: 'm5' },
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2' },
+      { provider: 'p3', model: 'm3' },
+      { provider: 'p4', model: 'm4' },
+    ])
+    expect(resolveDispatchSequence(FIVE, () => -1)).toEqual(FIVE)
+    expect(resolveDispatchSequence(FIVE, () => { throw new Error('随机源坏了') })).toEqual(FIVE)
+    expect(pickRotationStart(5, () => 0.4)).toBe(2)
+    expect(pickRotationStart(1, () => 0.9)).toBe(0)
+    expect(pickRotationStart(0, () => 0.9)).toBe(0)
   })
 })

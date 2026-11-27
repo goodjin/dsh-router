@@ -107,20 +107,51 @@ export function serializeRoleFile(description: string, models: readonly RoleMode
   return `${body}${MODEL_FENCE_START}\n${rows.join('\n')}\n${MODEL_FENCE_END}\n`
 }
 
-/** 一次派发的候选：角色自己的候选，按 provider+NUL+model 去重（先出现的保留）。 */
+/**
+ * 随机起点：返回 [0, length-1] 的下标。
+ *
+ * 随机源缺席用 Math.random；随机源给出坏值（NaN、Infinity、越界、抛错）时退回 0，
+ * 也就是「从第一个候选开始」——派发不能因为随机源坏了就不派。
+ */
+export function pickRotationStart(length: number, random: () => number = Math.random): number {
+  if (length <= 1) return 0
+  let value: number
+  try {
+    value = random()
+  } catch {
+    return 0
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0
+  const scaled = Math.floor(value * length)
+  if (scaled < 0) return 0
+  if (scaled >= length) return length - 1
+  return scaled
+}
+
+/**
+ * 一次派发的候选：角色自己的候选，按 provider+NUL+model 去重（先出现的保留），
+ * 再按随机起点旋转成轮转顺序（k, k+1, …, 末尾, 1, …, k-1）。
+ *
+ * 旋转后的第一项就是子会话的初始模型；失败回退沿这条序列往后走，于是
+ * 「到头就从头」天然成立——排在末尾的正是起点之前的那些候选。
+ * 候选只有一个时序列不变（没有可轮转的余地）。
+ */
 export function resolveDispatchSequence(
   models: readonly RoleModelCandidate[] | undefined,
+  random: () => number = Math.random,
 ): RoleModelCandidate[] {
-  const sequence: RoleModelCandidate[] = []
+  const deduped: RoleModelCandidate[] = []
   const seen = new Set<string>()
   const push = (candidate: RoleModelCandidate): void => {
     const key = `${candidate.provider}\0${candidate.model}`
     if (seen.has(key)) return
     seen.add(key)
-    sequence.push({ provider: candidate.provider, model: candidate.model })
+    deduped.push({ provider: candidate.provider, model: candidate.model })
   }
   if (models !== undefined) {
     for (const candidate of models) push(candidate)
   }
-  return sequence
+  const start = pickRotationStart(deduped.length, random)
+  if (start === 0) return deduped
+  return [...deduped.slice(start), ...deduped.slice(0, start)]
 }

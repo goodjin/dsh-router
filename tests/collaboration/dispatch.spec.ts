@@ -351,7 +351,7 @@ describe('dispatch role models', () => {
     expect(result).not.toHaveProperty('model')
   })
 
-  it('角色候选的第一项作为子会话初始模型；序列非空时 agentOptions 只有 provider 与 model，成功和 recordError 都带 model', async () => {
+  it('随机起点为 0 时角色候选的第一项作为子会话初始模型；序列非空时 agentOptions 只有 provider 与 model，成功和 recordError 都带 model', async () => {
     const { records, roles } = await makeDeps()
     await roles.save({
       name: '执行者',
@@ -370,10 +370,10 @@ describe('dispatch role models', () => {
         return { childId: 'child-model' }
       },
     }
-    const tool = buildDispatchTool({ records, roles, subagents, childModelRuns: runs as never })
+    const tool = buildDispatchTool({ records, roles, subagents, childModelRuns: runs as never, random: () => 0 })
     const result = await run(tool, { ...BASE_ARGS, taskId }, { agent: { id: 'parent-9', session: 'other' } }) as { model?: { provider: string; model: string } }
     expect(Object.keys(request ?? {}).sort()).toEqual(['agentOptions', 'maxDepth', 'parent', 'prompt'])
-    // 候选第一项 = 子会话初始模型；后面的候选留给失败回退。
+    // 起点 0 → 候选第一项 = 子会话初始模型；后面的候选留给失败回退。
     expect(request?.agentOptions).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
     expect(Object.keys(request!.agentOptions!)).toEqual(['provider', 'model'])
     expect(request?.prompt[0]!.text).not.toContain('dsh-router:models')
@@ -394,10 +394,118 @@ describe('dispatch role models', () => {
         return records.create(root, input)
       },
     }
-    const tool2 = buildDispatchTool({ records: failing, roles, subagents, childModelRuns: runs as never })
+    const tool2 = buildDispatchTool({ records: failing, roles, subagents, childModelRuns: runs as never, random: () => 0 })
     const errored = await run(tool2, { ...BASE_ARGS, taskId, task: '另一件' }, { agent: { id: 'parent-9' } }) as { recordError?: string; model?: { provider: string; model: string } }
     expect(errored.recordError).toContain('disk full')
     expect(errored.model).toEqual({ provider: 'deepseek', model: 'deepseek-chat' })
+  })
+
+  it('随机起点决定初始模型与回退序列：起点 k → 序列是 [k, …, 末尾, 1, …, k-1]', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '职责',
+      models: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' },
+        { provider: 'p3', model: 'm3' },
+        { provider: 'p4', model: 'm4' },
+        { provider: 'p5', model: 'm5' },
+      ],
+    })
+    const taskId = await makeTask(records)
+    const runs = new Map<string, { sequence: Array<{ provider: string; model: string }> }>()
+    let agentOptions: { provider: string; model: string } | undefined
+    const subagents = {
+      async startActivation(input: { request: { agentOptions?: { provider: string; model: string } } }) {
+        agentOptions = input.request.agentOptions
+        return { childId: 'child-rotated' }
+      },
+    }
+    // k = floor(0.4 * 5) = 2 → 第三项起步。
+    const tool = buildDispatchTool({ records, roles, subagents, childModelRuns: runs as never, random: () => 0.4 })
+    const result = await run(tool, { ...BASE_ARGS, taskId }) as { model?: { provider: string; model: string } }
+    expect(agentOptions).toEqual({ provider: 'p3', model: 'm3' })
+    expect(result.model).toEqual({ provider: 'p3', model: 'm3' })
+    // 游标里的序列就是旋转后的实际顺序：失败回退沿它往后走，最后绕回起点之前的那几项。
+    expect(runs.get('child-rotated')?.sequence).toEqual([
+      { provider: 'p3', model: 'm3' },
+      { provider: 'p4', model: 'm4' },
+      { provider: 'p5', model: 'm5' },
+      { provider: 'p1', model: 'm1' },
+      { provider: 'p2', model: 'm2' },
+    ])
+  })
+
+  it('随机起点不同 → 顺序相应不同，但仍是同一集合的轮转', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '职责',
+      models: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' },
+        { provider: 'p3', model: 'm3' },
+      ],
+    })
+    const taskId = await makeTask(records)
+    const orders = new Set<string>()
+    for (const [k, value] of [0.1, 0.4, 0.8].entries()) {
+      const runs = new Map<string, { sequence: Array<{ provider: string; model: string }> }>()
+      let agentOptions: { provider: string; model: string } | undefined
+      const tool = buildDispatchTool({
+        records,
+        roles,
+        childModelRuns: runs as never,
+        random: () => value,
+        subagents: {
+          async startActivation(input: { request: { agentOptions?: { provider: string; model: string } } }) {
+            agentOptions = input.request.agentOptions
+            return { childId: `child-k${k}` }
+        },
+        },
+      })
+      await run(tool, { ...BASE_ARGS, taskId })
+      const sequence = runs.get(`child-k${k}`)!.sequence
+      expect(sequence).toHaveLength(3)
+      expect([...sequence].map((item) => item.model).sort()).toEqual(['m1', 'm2', 'm3'])
+      // 初始模型 = 旋转后的第一项。
+      expect(agentOptions).toEqual({ provider: sequence[0]!.provider, model: sequence[0]!.model })
+      orders.add(sequence.map((item) => item.model).join(','))
+    }
+    expect(orders.size).toBe(3)
+  })
+
+  it('不注入随机源时初始模型也是候选之一（默认 Math.random）', async () => {
+    const { records, roles } = await makeDeps()
+    await roles.save({
+      name: '执行者',
+      description: '职责',
+      models: [
+        { provider: 'p1', model: 'm1' },
+        { provider: 'p2', model: 'm2' },
+        { provider: 'p3', model: 'm3' },
+      ],
+    })
+    const taskId = await makeTask(records)
+    const runs = new Map<string, { sequence: Array<{ provider: string; model: string }> }>()
+    let agentOptions: { provider: string; model: string } | undefined
+    const tool = buildDispatchTool({
+      records,
+      roles,
+      childModelRuns: runs as never,
+      subagents: {
+        async startActivation(input: { request: { agentOptions?: { provider: string; model: string } } }) {
+          agentOptions = input.request.agentOptions
+          return { childId: 'child-default-random' }
+        },
+      },
+    })
+    await run(tool, { ...BASE_ARGS, taskId })
+    expect(['m1', 'm2', 'm3']).toContain(agentOptions!.model)
+    const sequence = runs.get('child-default-random')!.sequence
+    expect(sequence).toHaveLength(3)
+    expect(sequence[0]!.model).toBe(agentOptions!.model)
   })
 
   it('派发不能指定模型：带 provider/model 一律 INVALID_INPUT，且在建任务和读角色之前拒绝', async () => {
@@ -424,6 +532,7 @@ describe('dispatch role models', () => {
       records,
       roles: wrapped,
       childModelRuns: runs as never,
+      random: () => 0,
       subagents: {
         async startActivation(input) {
           agentOptions = (input.request as { agentOptions?: { provider: string; model: string } }).agentOptions
@@ -439,7 +548,7 @@ describe('dispatch role models', () => {
     expect(runs.size).toBe(0)
     expect(agentOptions).toBeUndefined()
 
-    // 不带模型参数正常派发：初始模型就是角色候选的第一项。
+    // 不带模型参数正常派发：随机起点为 0 时初始模型就是角色候选的第一项。
     await run(tool, { ...BASE_ARGS })
     expect(agentOptions).toEqual({ provider: 'openai', model: 'gpt-4.1' })
     expect(runs.get('child-override')?.sequence).toEqual([

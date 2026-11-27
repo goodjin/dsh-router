@@ -182,6 +182,8 @@ export function buildCollaborationTools(deps: {
   childModelRuns?: Map<string, ChildModelRun>
   /** 角色职责服务：派发后预热缓存与落盘会话绑定（缺席则不做）。 */
   roleDuties?: RoleDutyBinder
+  /** 候选模型的随机源（缺席用 Math.random）：决定这次派发从候选序列的哪一项起步。 */
+  random?: () => number
 }): ToolDefinition[] {
   const { records, roles } = deps
   // 写后刷新：失败只告警，绝不把一次成功的写入变成失败（缓存下一拍会自愈）。
@@ -201,6 +203,7 @@ export function buildCollaborationTools(deps: {
       afterWrite,
       childModelRuns: deps.childModelRuns,
       roleDuties: deps.roleDuties,
+      random: deps.random,
     }),
     {
       name: 'router_record_create',
