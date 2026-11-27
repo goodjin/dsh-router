@@ -424,6 +424,27 @@ function createRecordStore(dataDir, deps = {}) {
 //#region src/collaboration/role-models.ts
 const MODEL_FENCE_START = "<!-- dsh-router:models -->";
 const MODEL_FENCE_END = "<!-- /dsh-router:models -->";
+/** 角色元数据围栏：记 id 与 name（文件名是 id，name 可变）。 */
+const ROLE_FENCE_START = "<!-- dsh-router:role -->";
+const ROLE_FENCE_END = "<!-- /dsh-router:role -->";
+/**
+* 按角色原始名称派生稳定 ID：同一名称永远得到同一 ID（改名不变）。
+* 形式是「名字的可读片段 + 名称哈希前 6 位」——可读片段方便用户认文件，
+* 哈希保证不同名字几乎不会撞；真撞了由存储层加后缀避让。
+*/
+function deriveRoleId(name$1) {
+	const trimmed = name$1.trim();
+	const hash = createHash("sha256").update(trimmed).digest("hex").slice(0, 6);
+	const slug = trimmed.toLowerCase().replace(/[^\p{L}\p{N}\-_]+/gu, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32).replace(/-+$/g, "");
+	return `${slug === "" ? "role" : slug}-${hash}`;
+}
+/** 角色围栏块（写文件时放在最前面）。 */
+function roleFenceBlock(id, name$1) {
+	return `${ROLE_FENCE_START}\n${JSON.stringify({
+		id,
+		name: name$1
+	})}\n${ROLE_FENCE_END}\n`;
+}
 function linesOf(text) {
 	const lines = [];
 	let start = 0;
@@ -461,15 +482,52 @@ function validateRoleModels(name$1, raw) {
 	if (!Array.isArray(raw)) throw new CollaborationError("INVALID_INPUT", `角色 ${name$1} 的候选模型无效：models 必须是数组`);
 	return raw.map((item, index) => parseCandidate(name$1, item, `models[${index}]`));
 }
-/** 读角色文件字节。没有单独成行的开始标记时 models 缺省，description 等于原文。 */
-function parseRoleDocument(name$1, text) {
+/** 读角色文件字节。fileBase 是文件名主干（新格式是 id，旧格式是角色名）。 */
+function parseRoleDocument(fileBase, text) {
+	const lines = linesOf(text);
+	let body = text;
+	let id;
+	let name$1;
+	const roleStart = lines.findIndex((line) => line.text === ROLE_FENCE_START);
+	if (roleStart >= 0) {
+		const roleEnd = lines.findIndex((line, index) => index > roleStart && line.text === ROLE_FENCE_END);
+		if (roleEnd < 0) throw invalid(fileBase, "缺少角色围栏的结束标记");
+		const payload = lines.slice(roleStart + 1, roleEnd).map((line) => line.text).join("\n").trim();
+		let parsed;
+		try {
+			parsed = JSON.parse(payload);
+		} catch (error) {
+			throw invalid(fileBase, `角色围栏不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw invalid(fileBase, "角色围栏必须是对象");
+		const record = parsed;
+		if (typeof record.id !== "string" || record.id.trim() === "") throw invalid(fileBase, "角色围栏缺 id");
+		if (typeof record.name !== "string" || record.name.trim() === "") throw invalid(fileBase, "角色围栏缺 name");
+		id = record.id.trim();
+		name$1 = record.name.trim();
+		body = roleEnd + 1 < lines.length ? text.slice(lines[roleEnd + 1].start) : "";
+	}
+	const { description, models } = parseModelsSection(fileBase, body);
+	if (id === void 0) return {
+		description,
+		models
+	};
+	return {
+		id,
+		name: name$1,
+		description,
+		models
+	};
+}
+/** 正文段与候选围栏：没有围栏时正文就是全部字节。 */
+function parseModelsSection(fileBase, text) {
 	const lines = linesOf(text);
 	const startIndex = lines.findIndex((line) => line.text === MODEL_FENCE_START);
 	if (startIndex < 0) return { description: text };
 	const start = lines[startIndex];
 	const endIndex = lines.findIndex((line, index) => index > startIndex && line.text === MODEL_FENCE_END);
-	if (endIndex < 0) throw invalid(name$1, "缺少结束标记");
-	if (lines.slice(endIndex + 1).length > 0) throw invalid(name$1, "结束标记之后还有内容");
+	if (endIndex < 0) throw invalid(fileBase, "缺少结束标记");
+	if (lines.slice(endIndex + 1).length > 0) throw invalid(fileBase, "结束标记之后还有内容");
 	const models = [];
 	for (let index = startIndex + 1; index < endIndex; index++) {
 		const line = lines[index].text;
@@ -477,14 +535,9 @@ function parseRoleDocument(name$1, text) {
 		try {
 			parsed = JSON.parse(line);
 		} catch (error) {
-			throw invalid(name$1, `第 ${index - startIndex} 行不是合法 JSON（${error instanceof Error ? error.message : String(error)}）`);
+			throw invalid(fileBase, `第 ${index - startIndex} 行不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
 		}
-		try {
-			models.push(parseCandidate(name$1, parsed, `围栏第 ${index - startIndex} 行`));
-		} catch (error) {
-			if (error instanceof CollaborationError) throw invalid(name$1, error.message);
-			throw error;
-		}
+		models.push(parseCandidate(fileBase, parsed, `models[${index - startIndex}]`));
 	}
 	return {
 		description: text.slice(0, start.start),
@@ -492,12 +545,15 @@ function parseRoleDocument(name$1, text) {
 	};
 }
 /**
-* 写回文件字节。无候选不写围栏。有候选时正文不以换行结尾就先补一个，
-* 再写独占一行的标记。读出来的 description 再写回是稳定的。
+* 写回文件字节。角色围栏在最前面（id + name）；无候选不写候选围栏。
+* 有候选时正文不以换行结尾就先补一个，再写独占一行的标记。
+* 读出来的 description 再写回是稳定的。
 */
-function serializeRoleFile(description, models) {
-	if (models === void 0 || models.length === 0) return description;
-	return `${description.endsWith("\n") ? description : `${description}\n`}${MODEL_FENCE_START}\n${models.map((candidate) => JSON.stringify({
+function serializeRoleFile(input) {
+	const head = roleFenceBlock(input.id, input.name);
+	const body = input.description;
+	if (input.models === void 0 || input.models.length === 0) return `${head}${body}`;
+	return `${head}${body.endsWith("\n") ? body : `${body}\n`}${MODEL_FENCE_START}\n${input.models.map((candidate) => JSON.stringify({
 		provider: candidate.provider,
 		model: candidate.model
 	})).join("\n")}\n${MODEL_FENCE_END}\n`;
@@ -907,8 +963,12 @@ const HISTORICAL_PRESET_DESCRIPTIONS = {
 const ROLE_EXT = ".md";
 const LEGACY_EXT = ".json";
 const NAMESPACE$1 = "collaboration";
-/** 名字（=文件名）长度上限。 */
+/** 名字长度上限。 */
 const NAME_MAX = 64;
+/** ID 长度上限（ID 是文件名主干）。 */
+const ID_MAX = 64;
+/** 备份目录名前缀（collaboration/roles.bak-<时间戳>/）。 */
+const BACKUP_PREFIX = "roles.bak-";
 let tmpSeq = 0;
 /** 生产用 node:fs/promises 适配器。 */
 function nodeFs() {
@@ -928,7 +988,7 @@ function isEnoent$1(error) {
 	return typeof error === "object" && error !== null && error.code === "ENOENT";
 }
 /**
-* 校验角色名（=文件名）：去两端空白后必须非空、长度 ≤ 64、无路径分隔符/空字节、
+* 校验角色名：去两端空白后必须非空、长度 ≤ 64、无路径分隔符/空字节、
 * 不以点开头、不是 . / ..、无控制字符。中文与常见标点合法。
 */
 function validateRoleName(raw, what = "name") {
@@ -938,9 +998,21 @@ function validateRoleName(raw, what = "name") {
 	if (name$1.startsWith(".") || name$1 === "." || name$1 === "..") throw new CollaborationError("INVALID_INPUT", `${what} 不得以点开头`);
 	for (const ch of name$1) {
 		const code = ch.codePointAt(0);
-		if (ch === "/" || ch === "\\" || ch === "\0" || code < 32) throw new CollaborationError("INVALID_INPUT", `${what} 含非法字符（路径分隔符或控制字符）`);
+		if (code === 47 || code === 92 || code === 0 || code < 32) throw new CollaborationError("INVALID_INPUT", `${what} 含非法字符（路径分隔符或控制字符）`);
 	}
 	return name$1;
+}
+/** 校验角色 ID（=文件名主干）：非空、长度受限、不含路径分隔符与控制字符、不以点开头。 */
+function validateRoleId(raw) {
+	if (typeof raw !== "string") throw new CollaborationError("INVALID_INPUT", "id 必须是字符串");
+	const id = raw.trim();
+	if (id.length === 0 || id.length > ID_MAX) throw new CollaborationError("INVALID_INPUT", `id 长度须在 1..${ID_MAX} 之间（去空白后）`);
+	if (id.startsWith(".") || id === "." || id === "..") throw new CollaborationError("INVALID_INPUT", "id 不得以点开头");
+	for (const ch of id) {
+		const code = ch.codePointAt(0);
+		if (code === 47 || code === 92 || code === 0 || code < 32) throw new CollaborationError("INVALID_INPUT", "id 含非法字符（路径分隔符或控制字符）");
+	}
+	return id;
 }
 /** 原子写：同目录临时文件 → rename 覆盖；目录准备也纳入 IO_ERROR 包装。 */
 async function atomicWrite(fs, target, content) {
@@ -954,13 +1026,28 @@ async function atomicWrite(fs, target, content) {
 		throw new CollaborationError("IO_ERROR", `写入失败: ${target}`, { cause: error });
 	}
 }
+/** 对外模板：models 为空数组时不出现（与存储口径一致）。 */
+function toTemplate(file) {
+	if (file.models !== void 0 && file.models.length > 0) return {
+		id: file.id,
+		name: file.name,
+		description: file.description,
+		models: file.models
+	};
+	return {
+		id: file.id,
+		name: file.name,
+		description: file.description
+	};
+}
 /** 创建 RoleStore。dataDir 为插件数据根，内部拼一次 collaboration 命名空间。 */
 function createRoleStore(dataDir, deps = {}) {
 	const base = join(dataDir, NAMESPACE$1);
 	const rolesDir = join(base, "roles");
 	const fs = deps.fs ?? nodeFs();
+	const now = deps.now ?? (() => Date.now());
 	const guard = new PathGuard(fs, base);
-	const rolePath = (name$1) => join(rolesDir, `${name$1}${ROLE_EXT}`);
+	const rolePath = (id) => join(rolesDir, `${id}${ROLE_EXT}`);
 	/** 进程内写队列：完整写操作从调用入口排队，按提交顺序而非 IO 完成时刻排序。 */
 	let writeChain = Promise.resolve();
 	const enqueue = (task) => {
@@ -968,8 +1055,9 @@ function createRoleStore(dataDir, deps = {}) {
 		writeChain = run.then(() => void 0, () => void 0);
 		return run;
 	};
-	const readRoleFile = async (name$1) => {
-		const path = rolePath(name$1);
+	/** 读一个角色文件（按文件名主干）。 */
+	const readRoleFile = async (base$1) => {
+		const path = rolePath(base$1);
 		await guard.assertDirChain(path);
 		await guard.assertRegularFile(path, "角色模板");
 		let text;
@@ -979,85 +1067,144 @@ function createRoleStore(dataDir, deps = {}) {
 			if (isEnoent$1(error)) throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${path}`);
 			throw new CollaborationError("IO_ERROR", `角色模板读取失败: ${path}`, { cause: error });
 		}
-		const parsed = parseRoleDocument(name$1, text);
-		if (parsed.models !== void 0) return {
-			name: name$1,
+		const parsed = parseRoleDocument(base$1, text);
+		if (parsed.id !== void 0 && parsed.name !== void 0) {
+			const file = {
+				id: parsed.id,
+				name: parsed.name,
+				description: parsed.description,
+				legacy: false
+			};
+			if (parsed.models !== void 0) file.models = parsed.models;
+			return file;
+		}
+		const legacy = {
+			id: base$1,
+			name: base$1,
 			description: parsed.description,
-			models: parsed.models
+			legacy: true
 		};
-		return {
-			name: name$1,
-			description: parsed.description
-		};
+		if (parsed.models !== void 0) legacy.models = parsed.models;
+		return legacy;
+	};
+	/** 读出全部角色文件（不做名字映射，不排序）。 */
+	const readAll = async () => {
+		let names;
+		try {
+			await guard.assertDirectory(rolesDir);
+			names = await fs.readdir(rolesDir);
+		} catch (error) {
+			if (isEnoent$1(error)) return [];
+			if (error instanceof CollaborationError) throw error;
+			throw new CollaborationError("IO_ERROR", "列举角色模板失败", { cause: error });
+		}
+		const files = [];
+		for (const filename of names) {
+			if (!filename.endsWith(ROLE_EXT)) continue;
+			const base$1 = filename.slice(0, -3);
+			if (base$1 === "") continue;
+			files.push(await readRoleFile(base$1));
+		}
+		return files;
+	};
+	/** 取一个未被占用的 ID（冲突时加 -2、-3 后缀）。 */
+	const uniqueId = (taken, base$1) => {
+		if (!taken.has(base$1)) return base$1;
+		let n = 2;
+		while (taken.has(`${base$1}-${n}`)) n += 1;
+		return `${base$1}-${n}`;
+	};
+	/** 迁移前的整目录备份：只备一次（已有 roles.bak-* 就不再备）。 */
+	const backupRolesDir = async (fileNames) => {
+		let existing = [];
+		try {
+			existing = await fs.readdir(base);
+		} catch (error) {
+			if (!isEnoent$1(error)) throw new CollaborationError("IO_ERROR", `读取协作目录失败: ${base}`, { cause: error });
+		}
+		const previous = existing.filter((name$1) => name$1.startsWith(BACKUP_PREFIX)).sort();
+		if (previous.length > 0) return join(base, previous[0]);
+		const dir = join(base, `${BACKUP_PREFIX}${new Date(now()).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`);
+		await fs.mkdirp(dir);
+		for (const file of fileNames) try {
+			const content = await fs.readFile(join(rolesDir, file));
+			await fs.writeFile(join(dir, file), content);
+		} catch {}
+		return dir;
 	};
 	return {
 		async list() {
-			let names;
-			try {
-				await guard.assertDirectory(rolesDir);
-				names = await fs.readdir(rolesDir);
-			} catch (error) {
-				if (isEnoent$1(error)) return [];
-				if (error instanceof CollaborationError) throw error;
-				throw new CollaborationError("IO_ERROR", "列举角色模板失败", { cause: error });
-			}
-			const roles = [];
-			for (const filename of names) {
-				if (!filename.endsWith(ROLE_EXT)) continue;
-				const name$1 = filename.slice(0, -3);
-				if (name$1 === "") continue;
-				roles.push(await readRoleFile(name$1));
-			}
+			const roles = (await readAll()).map(toTemplate);
 			roles.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 			return roles;
 		},
-		async read(name$1) {
-			return readRoleFile(validateRoleName(name$1));
+		async read(key) {
+			if (typeof key !== "string" || key.trim() === "") throw new CollaborationError("INVALID_INPUT", "角色名或 id 不能为空");
+			const wanted = key.trim();
+			const files = await readAll();
+			const byName = files.find((file) => file.name === wanted);
+			if (byName !== void 0) return toTemplate(byName);
+			const byId = files.find((file) => file.id === wanted);
+			if (byId !== void 0) return toTemplate(byId);
+			throw new CollaborationError("NOT_FOUND", `角色模板不存在: ${wanted}`);
 		},
 		async save(input) {
 			const name$1 = validateRoleName(input.name);
 			if (typeof input.description !== "string") throw new CollaborationError("INVALID_INPUT", "description 必须是字符串");
 			const explicit = input.models === void 0 ? void 0 : validateRoleModels(name$1, input.models);
+			const wantedId = input.id === void 0 ? void 0 : validateRoleId(input.id);
 			return enqueue(async () => {
-				let models = explicit;
-				if (models === void 0) try {
-					models = (await readRoleFile(name$1)).models ?? [];
-				} catch (error) {
-					if (!(error instanceof CollaborationError) || error.code !== "NOT_FOUND") throw error;
-					models = [];
+				const files = await readAll();
+				if (wantedId !== void 0) {
+					const target = files.find((file) => file.id === wantedId);
+					if (target === void 0) throw new CollaborationError("NOT_FOUND", `角色不存在: ${wantedId}`);
+					if (files.find((file) => file.id !== wantedId && file.name === name$1) !== void 0) throw new CollaborationError("INVALID_INPUT", `角色名称已被占用: ${name$1}`);
+					const models$1 = explicit !== void 0 ? explicit : target.models;
+					const content$1 = serializeRoleFile({
+						id: target.id,
+						name: name$1,
+						description: input.description,
+						models: models$1
+					});
+					await atomicWrite(fs, rolePath(target.id), content$1);
+					const saved$1 = {
+						id: target.id,
+						name: name$1,
+						description: input.description,
+						legacy: false
+					};
+					if (models$1 !== void 0) saved$1.models = models$1;
+					return toTemplate(saved$1);
 				}
-				const path = rolePath(name$1);
-				await guard.assertDirChain(path);
-				const content = serializeRoleFile(input.description, models);
-				await atomicWrite(fs, path, content);
-				const parsed = parseRoleDocument(name$1, content);
-				if (parsed.models !== void 0 && parsed.models.length > 0) return {
+				if (files.find((file) => file.name === name$1) !== void 0) throw new CollaborationError("INVALID_INPUT", `角色名称已存在: ${name$1}`);
+				const id = uniqueId(new Set(files.map((file) => file.id)), deriveRoleId(name$1));
+				const models = explicit ?? [];
+				const content = serializeRoleFile({
+					id,
 					name: name$1,
-					description: parsed.description,
-					models: parsed.models
-				};
-				return {
+					description: input.description,
+					models
+				});
+				await atomicWrite(fs, rolePath(id), content);
+				const saved = {
+					id,
 					name: name$1,
-					description: parsed.description
+					description: input.description,
+					legacy: false
 				};
+				if (models.length > 0) saved.models = models;
+				return toTemplate(saved);
 			});
 		},
-		async remove(name$1) {
-			const validated = validateRoleName(name$1);
+		async remove(key) {
+			if (typeof key !== "string" || key.trim() === "") throw new CollaborationError("INVALID_INPUT", "角色名或 id 不能为空");
+			const wanted = key.trim();
+			if (wanted === "." || wanted === ".." || wanted.startsWith(".") || /[/\\\0]/.test(wanted)) throw new CollaborationError("INVALID_INPUT", `非法角色名或 id: ${wanted}`);
 			return enqueue(async () => {
-				const path = rolePath(validated);
-				await guard.assertDirChain(path);
-				try {
-					await fs.lstat(path);
-				} catch (error) {
-					if (isEnoent$1(error)) return false;
-					throw new CollaborationError("IO_ERROR", `角色模板删除前校验失败: ${path}`, { cause: error });
-				}
-				try {
-					await fs.remove(path);
-				} catch (error) {
-					throw new CollaborationError("IO_ERROR", `角色模板删除失败: ${path}`, { cause: error });
-				}
+				const target = (await readAll()).find((file) => file.id === wanted || file.name === wanted);
+				if (target === void 0) return false;
+				await guard.assertDirChain(rolePath(target.id));
+				await fs.remove(rolePath(target.id));
 				return true;
 			});
 		},
@@ -1071,55 +1218,139 @@ function createRoleStore(dataDir, deps = {}) {
 				if (error instanceof CollaborationError) throw error;
 				throw new CollaborationError("IO_ERROR", "迁移旧角色时列举目录失败", { cause: error });
 			}
-			for (const filename of names) {
-				if (!filename.endsWith(LEGACY_EXT)) continue;
+			const legacyFiles = names.filter((filename) => filename.endsWith(LEGACY_EXT));
+			if (legacyFiles.length === 0) return;
+			const existing = await readAll();
+			const taken = new Set(existing.map((file) => file.id));
+			for (const filename of legacyFiles) {
+				const path = join(rolesDir, filename);
 				let parsed;
 				try {
-					parsed = JSON.parse(await fs.readFile(join(rolesDir, filename)));
+					parsed = JSON.parse(await fs.readFile(path));
 				} catch {
 					continue;
 				}
 				if (typeof parsed !== "object" || parsed === null) continue;
-				const legacy = parsed;
-				if (typeof legacy.name !== "string" || typeof legacy.description !== "string") continue;
+				const record = parsed;
+				if (typeof record.name !== "string" || typeof record.description !== "string") continue;
 				let name$1;
 				try {
-					name$1 = validateRoleName(legacy.name);
+					name$1 = validateRoleName(record.name);
 				} catch {
 					continue;
 				}
-				try {
-					await fs.readFile(rolePath(name$1));
-					continue;
-				} catch (error) {
-					if (!isEnoent$1(error)) throw error;
-				}
-				await atomicWrite(fs, rolePath(name$1), legacy.description);
+				if (existing.some((file) => file.name === name$1)) continue;
+				const id = uniqueId(taken, deriveRoleId(name$1));
+				taken.add(id);
+				await atomicWrite(fs, rolePath(id), serializeRoleFile({
+					id,
+					name: name$1,
+					description: record.description
+				}));
 			}
+		},
+		async migrateToIds() {
+			return enqueue(async () => {
+				let names;
+				try {
+					await guard.assertDirectory(rolesDir);
+					names = await fs.readdir(rolesDir);
+				} catch (error) {
+					if (isEnoent$1(error)) return {
+						migrated: 0,
+						removed: 0
+					};
+					if (error instanceof CollaborationError) throw error;
+					throw new CollaborationError("IO_ERROR", "迁移旧角色时列举目录失败", { cause: error });
+				}
+				const mdNames = names.filter((filename) => filename.endsWith(ROLE_EXT));
+				const entries = [];
+				for (const file of mdNames) {
+					const base$1 = file.slice(0, -3);
+					if (base$1 === "") continue;
+					const path = join(rolesDir, file);
+					let text;
+					try {
+						text = await fs.readFile(path);
+					} catch {
+						continue;
+					}
+					let parsed;
+					try {
+						parsed = parseRoleDocument(base$1, text);
+					} catch {
+						continue;
+					}
+					entries.push({
+						file,
+						base: base$1,
+						text,
+						parsed
+					});
+				}
+				const legacy = entries.filter((entry) => entry.parsed.id === void 0);
+				if (legacy.length === 0) return {
+					migrated: 0,
+					removed: 0
+				};
+				const backupPath = await backupRolesDir(names);
+				const ids = /* @__PURE__ */ new Map();
+				for (const entry of entries) if (entry.parsed.id !== void 0) ids.set(entry.parsed.id, entry.parsed.name ?? entry.parsed.id);
+				let migrated = 0;
+				let removed = 0;
+				for (const entry of legacy) {
+					const name$1 = entry.base;
+					const baseId = deriveRoleId(name$1);
+					let id = baseId;
+					const taken = ids.get(id);
+					if (taken !== void 0) {
+						if (taken === name$1) {
+							await fs.remove(join(rolesDir, entry.file));
+							removed += 1;
+							continue;
+						}
+						id = uniqueId(new Set(ids.keys()), baseId);
+					}
+					const content = roleFenceBlock(id, name$1) + entry.text;
+					await atomicWrite(fs, rolePath(id), content);
+					const written = await fs.readFile(rolePath(id));
+					const check = parseRoleDocument(id, written);
+					if (check.id !== id || check.name !== name$1) throw new CollaborationError("IO_ERROR", `角色迁移后校验失败: ${name$1}`);
+					if (check.description !== entry.parsed.description) throw new CollaborationError("IO_ERROR", `角色迁移后职责正文不一致: ${name$1}`);
+					if (JSON.stringify(check.models ?? null) !== JSON.stringify(entry.parsed.models ?? null)) throw new CollaborationError("IO_ERROR", `角色迁移后候选不一致: ${name$1}`);
+					await fs.remove(join(rolesDir, entry.file));
+					ids.set(id, name$1);
+					migrated += 1;
+				}
+				return backupPath === void 0 ? {
+					migrated,
+					removed
+				} : {
+					migrated,
+					removed,
+					backupPath
+				};
+			});
 		}
 	};
 }
 /**
-* 幂等种入预置角色，带「历史文本精确升级」：
-* - 缺失 → 新建（并发双开最坏是同路径同内容覆盖，不产生重复角色）；
-* - 现有内容等于最新预置 → 跳过；
-* - 现有内容等于某版历史预置文本（= 用户没改过）→ 升级到最新；
-* - 现有内容与任何历史文本都不一致（用户改过）→ 永远不动。
-* - 文件带候选围栏（models 已出现，含空围栏）视为用户改过：不升级、不删除。
-*
-* 退役预置角色（RETIRED_PRESET_ROLES）在种入前先处理：没有围栏且磁盘内容等于它
-* 任一版历史文本（= 用户没改过）→ 删除；用户改过的永远不动（宁可留一个孤立角色）。
-* 相等比较只对没有围栏的文件用 description（此时它就是文件字节）。
+* 幂等种入预置角色，与被替换文本都精确比较：
+* - 按**名称**找已有角色（不论它的 ID）——迁移后 ID 变了也不会重复种入。
+* - 「用户有没有改过」只看职责正文（忽略围栏）：正文等于某版历史预置文本 = 用户没改过，
+*   可安全升级到最新；与任何一版都不一致 = 用户改过，永不覆盖。
+* - 退役预置角色：正文等于任一版历史文本就删（用户改过的保留，宁可留一个孤立角色）。
+* - 新建预置角色用确定性 ID（与迁移派生规则一致）——迁移过来的预置角色与新建的 ID 相同，
+*   不会因为迁移而多出一份。
 */
 async function seedPresetRoles(store) {
 	const existing = new Map((await store.list()).map((role) => [role.name, role]));
 	for (const [name$1, texts] of Object.entries(RETIRED_PRESET_ROLES)) {
 		const current = existing.get(name$1);
-		if (current === void 0 || current.models !== void 0) continue;
-		if (texts.includes(current.description)) {
-			await store.remove(name$1);
-			existing.delete(name$1);
-		}
+		if (current === void 0) continue;
+		if (!texts.includes(current.description)) continue;
+		await store.remove(current.id);
+		existing.delete(name$1);
 	}
 	for (const preset of PRESET_ROLE_TEMPLATES) {
 		const current = existing.get(preset.name);
@@ -1130,10 +1361,10 @@ async function seedPresetRoles(store) {
 			});
 			continue;
 		}
-		if (current.models !== void 0) continue;
 		if (current.description === preset.description) continue;
 		const history = HISTORICAL_PRESET_DESCRIPTIONS[preset.name];
 		if (history !== void 0 && history.includes(current.description)) await store.save({
+			id: current.id,
 			name: preset.name,
 			description: preset.description
 		});
@@ -1740,7 +1971,9 @@ function apply(ctx, rawConfig) {
 	};
 	const released = (!!ctx.root?.provide ? ctx.root.provide.bind(ctx.root) : ctx.provide.bind(ctx))("routerCollaboration", face);
 	const disposeService = typeof released === "function" ? released : () => {};
-	runtime.roles.migrateLegacyJson().then(() => seedPresetRoles(runtime.roles)).catch((error) => {
+	runtime.roles.migrateLegacyJson().then(() => runtime.roles.migrateToIds()).then((report) => {
+		if (report.migrated > 0 || report.removed > 0) console.log(`[dsh-router] roles migrated to id-named files: ${report.migrated} migrated, ${report.removed} leftovers removed` + (report.backupPath !== void 0 ? `, backup: ${report.backupPath}` : ""));
+	}).then(() => seedPresetRoles(runtime.roles)).catch((error) => {
 		console.warn("[dsh-router] migrate/seed roles failed:", error instanceof Error ? error.message : String(error));
 	});
 	const watcher = new AbortController();

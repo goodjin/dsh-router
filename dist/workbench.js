@@ -184,6 +184,7 @@ function registerCollaborationRoutes(ctx, deps) {
 			name: typeof body.name === "string" ? body.name : "",
 			description: typeof body.description === "string" ? body.description : ""
 		};
+		if (typeof body.id === "string" && body.id.trim() !== "") input.id = body.id.trim();
 		if (Object.prototype.hasOwnProperty.call(body, "models")) input.models = body.models;
 		const saved = await deps.roles.save(input);
 		return {

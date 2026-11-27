@@ -188,7 +188,12 @@ function catalogApi(catalog: CollaborationModelCatalog, overrides?: Partial<Coll
     readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
     listRoles: async () => [],
     listModelCatalog: async () => catalog,
-    saveRole: async (input) => ({ name: input.name, description: input.description, models: input.models }),
+    saveRole: async (input) => ({
+      id: input.id ?? `id-${input.name}`,
+      name: input.name,
+      description: input.description,
+      ...(input.models !== undefined ? { models: input.models } : {}),
+    }),
     ...overrides,
   }
 }
@@ -299,17 +304,23 @@ describe('view_task_selection — 多任务切换', () => {
 
 describe('role edit shared manual/model — 角色编辑区分块独立编辑与保存', () => {
   interface RolePost {
+    id?: string
     name: string
     description: string
     models?: Array<{ provider: string; model: string }>
   }
 
-  /** 角色列表可变、保存请求留痕的 API（复刻服务端语义：models 缺省时保留盘上候选）。 */
+  /** 角色列表可变、保存请求留痕的 API（复刻服务端语义：带 id 按 ID 更新、models 缺省保留盘上候选）。 */
   function rolesApi(
-    initial: RoleTemplate[],
+    initial: Array<Omit<RoleTemplate, 'id'> & { id?: string }>,
     catalog: CollaborationModelCatalog = { unavailable: true, providers: [] },
   ): { api: CollaborationApi; posts: RolePost[]; roles: RoleTemplate[] } {
-    const roles: RoleTemplate[] = [...initial]
+    const roles: RoleTemplate[] = initial.map((role) => ({
+      id: role.id ?? `id-${role.name}`,
+      name: role.name,
+      description: role.description,
+      ...(role.models !== undefined ? { models: role.models } : {}),
+    }))
     const posts: RolePost[] = []
     const api: CollaborationApi = {
       listRecords: async () => [],
@@ -318,18 +329,22 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
       listModelCatalog: async () => catalog,
       saveRole: async (input) => {
         posts.push({
+          ...(input.id !== undefined ? { id: input.id } : {}),
           name: input.name,
           description: input.description,
           ...(input.models !== undefined ? { models: input.models } : {}),
         })
-        const merged = input.models !== undefined ? input.models : roles.find((r) => r.name === input.name)?.models
+        const target = input.id !== undefined
+          ? roles.find((role) => role.id === input.id)
+          : roles.find((role) => role.name === input.name)
+        const merged = input.models !== undefined ? input.models : target?.models
         const next: RoleTemplate = {
+          id: target?.id ?? `id-${input.name}`,
           name: input.name,
           description: input.description,
-          ...(merged !== undefined ? { models: merged } : {}),
+          ...(merged !== undefined && merged.length > 0 ? { models: merged } : {}),
         }
-        const index = roles.findIndex((r) => r.name === input.name)
-        if (index >= 0) roles[index] = next
+        if (target !== undefined) roles[roles.indexOf(target)] = next
         else roles.push(next)
         return next
       },
@@ -416,11 +431,56 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
     expect(posts[0]!.name).toBe('新名字')
     expect(posts[0]!.description).toBe('旧说明')
     expect('models' in posts[0]!).toBe(false)
-    // 原角色的候选没被动过（服务端保留既有候选）。
-    expect(roles.find((r) => r.name === '主管')?.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+    // 角色还是那个角色（ID 不变），候选没被动过（服务端保留既有候选）。
+    expect(roles).toHaveLength(1)
+    expect(roles[0]!.id).toBe('id-主管')
+    expect(roles[0]!.name).toBe('新名字')
+    expect(roles[0]!.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
     // 保存后该块回到只读，显示新名字。
     expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
     expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('新名字')
+    await act(async () => { root.unmount() })
+  })
+
+  it('名称块保存带角色 id：改名只改名字，列表里不多出角色', async () => {
+    const { api, posts, roles } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'name')
+    await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '高级主管') })
+    saveBlock(container, 'name')
+    await flush()
+    await flush()
+    // 请求体带 id（按 ID 更新，服务端文件路径不动）。
+    expect(posts[0]!.id).toBe('id-主管')
+    expect(posts[0]!.name).toBe('高级主管')
+    // 没有多出角色：还是一条，ID 不变。
+    expect(roles).toHaveLength(1)
+    expect(roles[0]!.id).toBe('id-主管')
+    expect(roles[0]!.name).toBe('高级主管')
+    expect(container.querySelectorAll('[data-router-collab-role-item]')).toHaveLength(1)
+    // 列表项仍指向同一个 ID（改名不孤儿化）。
+    expect(container.querySelector('[data-router-collab-role-id="id-主管"]')).toBeTruthy()
+    await act(async () => { root.unmount() })
+  })
+
+  it('说明块与候选块的保存请求都带角色 id', async () => {
+    const { api, posts } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'desc')
+    await act(async () => { setFieldValue(container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!, '新说明') })
+    saveBlock(container, 'desc')
+    await flush()
+    await flush()
+    expect(posts[0]!.id).toBe('id-主管')
+    expect('models' in posts[0]!).toBe(false)
+    startEdit(container, 'models')
+    click(container.querySelectorAll('[data-router-collab-model-delete]')[0]!)
+    await flush()
+    saveBlock(container, 'models')
+    await flush()
+    await flush()
+    expect(posts[1]!.id).toBe('id-主管')
+    expect(posts[1]!.models).toEqual([])
     await act(async () => { root.unmount() })
   })
 
@@ -524,6 +584,8 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
     saveBlock(container, 'name')
     await flush()
     await flush()
+    // 新建：第一次不带 id（服务端派生）；之后带 id。
+    expect(posts[0]!.id).toBeUndefined()
     expect(roles.map((r) => r.name)).toContain('执行者')
     expect(container.querySelector('[data-router-collab-role-item="执行者"]')).toBeTruthy()
     expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('执行者')
@@ -534,6 +596,7 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
     await flush()
     await flush()
     expect(posts[1]).toMatchObject({ name: '执行者', description: '做执行' })
+    expect(posts[1]!.id).toBe('id-执行者')
     expect('models' in posts[1]!).toBe(false)
     // 候选块保存。
     startEdit(container, 'models')
@@ -546,6 +609,7 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
     saveBlock(container, 'models')
     await flush()
     await flush()
+    expect(posts[2]!.id).toBe('id-执行者')
     expect(posts[2]!.name).toBe('执行者')
     expect(posts[2]!.description).toBe('做执行')
     expect(posts[2]!.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
@@ -719,7 +783,12 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
       ...api,
       saveRole: async (input) => {
         if (fail) throw new Error('候选无效')
-        return { name: input.name, description: input.description, models: input.models }
+        return {
+          id: input.id ?? `id-${input.name}`,
+          name: input.name,
+          description: input.description,
+          ...(input.models !== undefined ? { models: input.models } : {}),
+        }
       },
     }
     const { root, container } = await mountRoles(failingApi, '执行者')
@@ -905,7 +974,7 @@ describe('role edit shared manual/model — 角色编辑区分块独立编辑与
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => { throw new Error('角色列表坏了') },
       listModelCatalog: async () => ({ unavailable: true, providers: [] }),
-      saveRole: async (input) => { saves += 1; return { name: input.name, description: input.description } },
+      saveRole: async (input) => { saves += 1; return { id: input.id ?? `id-${input.name}`, name: input.name, description: input.description } },
     }
     const store = startCollaborationStore({ api })
     const props = baseProps(store)
@@ -937,7 +1006,7 @@ describe('staleasyncresultsignored — 切换根后旧响应不落地', () => {
       listRecords: (id) => id === 'root-A' ? new Promise<WorkRecord[]>((resolve) => { resolveA = resolve }) : Promise.resolve([]),
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => [],
-      saveRole: async (input) => ({ name: input.name, description: input.description }),
+      saveRole: async (input) => ({ id: input.id ?? `id-${input.name}`, name: input.name, description: input.description }),
       listModelCatalog: async () => ({ unavailable: true, providers: [] }),
     }
     const store = startCollaborationStore({ api })

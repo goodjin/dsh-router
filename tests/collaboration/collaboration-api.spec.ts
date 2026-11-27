@@ -79,7 +79,7 @@ describe('createCollaborationApi — 四条方法与默认同源 fetch', () => {
   })
 
   it('listRoles 走 GET /roles；saveRole 走 POST /roles 带 JSON 体', async () => {
-    const role: RoleTemplate = { name: '前端', description: '' }
+    const role: RoleTemplate = { id: 'qianduan-1a2b3c', name: '前端', description: '' }
     const capture: Call[] = []
     const api = createCollaborationApi({ fetch: fakeFetch({ responses: [{ body: [role] }, { body: role }], capture }) })
     const listed = await api.listRoles()
@@ -92,9 +92,19 @@ describe('createCollaborationApi — 四条方法与默认同源 fetch', () => {
     expect(capture[1]!.init?.body).toBe(JSON.stringify({ name: '前端', description: 'UI' }))
   })
 
+  it('saveRole 带 id 时请求体含 id（按 ID 更新）；不带 id 时不含', async () => {
+    const capture: Call[] = []
+    const role: RoleTemplate = { id: 'qianduan-1a2b3c', name: '前端', description: 'UI' }
+    const api = createCollaborationApi({ fetch: fakeFetch({ responses: [{ body: role }, { body: role }], capture }) })
+    await api.saveRole({ id: 'qianduan-1a2b3c', name: '前端', description: 'UI' })
+    expect(capture[0]!.init!.body).toBe(JSON.stringify({ id: 'qianduan-1a2b3c', name: '前端', description: 'UI' }))
+    await api.saveRole({ name: '前端', description: 'UI' })
+    expect(capture[1]!.init!.body).toBe(JSON.stringify({ name: '前端', description: 'UI' }))
+  })
+
   it('saveRole 按名 upsert：POST 体只含 name/description', async () => {
     const capture: Call[] = []
-    const role: RoleTemplate = { name: '前端', description: 'UI' }
+    const role: RoleTemplate = { id: 'qianduan-1a2b3c', name: '前端', description: 'UI' }
     const api = createCollaborationApi({ fetch: fakeFetch({ body: role, capture }) })
     await api.saveRole({ name: '前端', description: 'UI' })
     expect(capture[0]!.init!.body).toBe(JSON.stringify({ name: '前端', description: 'UI' }))

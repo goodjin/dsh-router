@@ -5,7 +5,7 @@
  *   listRecords(rootSessionId, query?) → WorkRecord[]
  *   readRecord(rootSessionId, taskId, recordId) → SavedRecord
  *   listRoles() → RoleTemplate[]
- *   saveRole({name,description,models?}) → RoleTemplate（按名 upsert；models 缺省不写入请求体）
+ *   saveRole({id?,name,description,models?}) → RoleTemplate（带 id 按 ID 更新；models 缺省不写入请求体）
  *   listModelCatalog() → 已注册模型清单（GET /models）
  *
  * 浏览器半边纪律：fetch 可注入（缺省 globalThis.fetch，同源会话登录传输沿用宿主既有
@@ -59,7 +59,7 @@ export interface CollaborationApi {
   listRecords(rootSessionId: string, query?: RecordQuery): Promise<WorkRecord[]>
   readRecord(rootSessionId: string, taskId: string, recordId: string): Promise<SavedRecord>
   listRoles(): Promise<RoleTemplate[]>
-  saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate>
+  saveRole(input: { id?: string; name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate>
   listModelCatalog(): Promise<CollaborationModelCatalog>
 }
 
@@ -131,11 +131,12 @@ export function createCollaborationApi(deps: CollaborationApiDeps = {}): Collabo
       return body as RoleTemplate[]
     },
 
-    async saveRole(input: { name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate> {
-      const payload: { name: string; description: string; models?: RoleModelCandidate[] } = {
-        name: input.name,
-        description: input.description,
-      }
+    async saveRole(input: { id?: string; name: string; description: string; models?: RoleModelCandidate[] }): Promise<RoleTemplate> {
+      // 带 id = 按该角色 ID 更新（改名只改内容、文件路径不动）；不带 id = 新建。
+      const payload: { id?: string; name: string; description: string; models?: RoleModelCandidate[] } =
+        input.id !== undefined && input.id !== ''
+          ? { id: input.id, name: input.name, description: input.description }
+          : { name: input.name, description: input.description }
       if (input.models !== undefined) payload.models = input.models
       const body = await request(COLLABORATION_API_ROLES_PATH, {
         method: 'POST',

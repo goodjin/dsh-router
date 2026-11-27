@@ -8,15 +8,16 @@
  * 行级控件，编辑态里只有该块自己的「保存」「取消」。**页面上没有任何统一保存按钮**，
  * 「添加模型」清单面板里也没有「确定」。
  *
- * 分块保存的请求体（POST /roles 的形状，按名 upsert）：
- *   - 名称块保存：name（新名）+ 当前说明文字，**不带 models**（服务端保留既有候选）。
- *   - 说明块保存：name（当前名）+ 新说明，**不带 models**（服务端保留既有候选）。
- *   - 候选块保存：name（当前名）+ 当前说明 + models（该块编辑后的完整候选列表）。
+ * 分块保存的请求体（POST /roles 的形状）：
+ *   - 名称块保存：id（已有角色）+ name（新名）+ 当前说明文字，**不带 models**（服务端保留既有候选）。
+ *   - 说明块保存：id（已有角色）+ name（当前名）+ 新说明，**不带 models**（服务端保留既有候选）。
+ *   - 候选块保存：id（已有角色）+ name（当前名）+ 当前说明 + models（该块编辑后的完整候选列表）。
+ * 角色按**稳定 ID** 定位（文件名 = ID）：改名只改文件内容、文件路径不动，不会多出角色。
  * 省略 models 时服务端保留文件里既有的候选围栏；名称块/说明块保存绝不能发空候选数组。
  *
  * 「取消」丢弃该块未保存的改动、恢复该块只读显示值，不动其它块、不发请求。
  * 未保存提示按块给（块内「未保存」），没有全局提示。
- * 与模型共享同一 RoleStore（按名 upsert）；任一块保存成功后照旧刷新角色列表。
+ * 与模型共享同一 RoleStore；任一块保存成功后照旧刷新角色列表。
  */
 
 import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
@@ -351,7 +352,10 @@ function sameCandidates(left: readonly RoleModelCandidate[], right: readonly Rol
 export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
   // 默认收起编辑器：进入页面/切到本标签时不选中任何角色，右侧只显示引导占位。
+  // selected 是**角色 ID**（新建草稿用 NEW_SELECTION）：改名后 ID 不变，编辑不孤儿化。
   const [selected, setSelected] = useState<string | undefined>(undefined)
+  // 已保存角色的 ID（新建草稿还没有 ID；名称块首次保存后由服务端派生）。
+  const [baseId, setBaseId] = useState<string | undefined>(undefined)
   // 三块各自的「已保存值」：只读显示与脏判定的基准。
   const [baseName, setBaseName] = useState('')
   const [baseDesc, setBaseDesc] = useState('')
@@ -373,9 +377,9 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     void props.store.refreshModelCatalog()
   }, [props.store])
 
-  /** 选中角色（或新建草稿）：三块都回到只读，缓冲对齐到已保存值。 */
-  const select = (name: string | undefined, isDraft = false): void => {
-    setSelected(name)
+  /** 选中角色（按 ID）或新建草稿：三块都回到只读，缓冲对齐到已保存值。 */
+  const select = (roleId: string | undefined, isDraft = false): void => {
+    setSelected(roleId)
     setCatalogQuery('')
     setCatalogSelection(new Set())
     setCatalogOpen(false)
@@ -383,7 +387,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     setEditName(false)
     setEditDesc(false)
     setEditModels(false)
-    if (name === undefined || isDraft) {
+    if (roleId === undefined || isDraft) {
+      setBaseId(undefined)
       setBaseName('')
       setBaseDesc('')
       setBaseModels([])
@@ -393,10 +398,12 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       return
     }
     // 读 store 当前值而非渲染快照：保存成功后的回调里快照还是旧列表。
-    const role = props.store.get().templates.find((t) => t.name === name)
-    const nextName = role?.name ?? name
+    const role = props.store.get().templates.find((t) => t.id === roleId)
+    const nextId = role?.id ?? roleId
+    const nextName = role?.name ?? ''
     const nextDesc = role?.description ?? ''
     const nextModels = copyCandidates(role?.models ?? [])
+    setBaseId(nextId)
     setBaseName(nextName)
     setBaseDesc(nextDesc)
     setBaseModels(nextModels)
@@ -448,8 +455,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const rolesError = state.rolesError
   /** 角色列表读取失败时不让保存：避免把加载失败当成空候选写回去。 */
   const canSave = rolesError === null
-  /** 角色名还没落库时，说明块与候选块无从保存（服务端按名 upsert）。 */
-  const hasSavedName = baseName.trim() !== ''
+  /** 角色还没落库（新建草稿）时，说明块与候选块无从保存（服务端按 ID 更新）。 */
+  const hasSavedName = baseId !== undefined
 
   const nameDirty = nameDraft.trim() !== baseName
   const descDirty = descDraft !== baseDesc
@@ -514,42 +521,44 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
     setEditModels(false)
   }
 
-  /** 名称块保存：带新名 + 当前说明，**不带 models**（服务端保留既有候选）。 */
+  /** 名称块保存：带 id（已有角色）+ 新名 + 当前说明，**不带 models**（服务端保留既有候选）。 */
   const saveName = async (): Promise<void> => {
     if (!canSave) return
     const nextName = nameDraft.trim()
     if (nextName === '') return
-    const ok = await props.store.saveRole({ name: nextName, description: baseDesc })
+    const ok = await props.store.saveRole({
+      ...(baseId !== undefined ? { id: baseId } : {}),
+      name: nextName,
+      description: baseDesc,
+    })
     if (!ok) return
-    // 保存后按服务端落库结果同步已保存值（改名会新起一个文件，候选可能为空）。
+    // 保存后按服务端落库结果同步已保存值（名称唯一，按名回查得到那个角色）。
     const role = props.store.get().templates.find((t) => t.name === nextName)
-    setSelected(nextName)
+    setSelected(role?.id ?? baseId)
+    setBaseId(role?.id ?? baseId)
+    setBaseName(role?.name ?? nextName)
+    setNameDraft(role?.name ?? nextName)
     if (role !== undefined) {
-      setBaseName(role.name)
       setBaseDesc(role.description)
       setBaseModels(copyCandidates(role.models ?? []))
-      setNameDraft(role.name)
-    } else {
-      setBaseName(nextName)
-      setNameDraft(nextName)
     }
     setEditName(false)
   }
 
-  /** 说明块保存：带当前名 + 新说明，**不带 models**（服务端保留既有候选）。 */
+  /** 说明块保存：带 id + 当前名 + 新说明，**不带 models**（服务端保留既有候选）。 */
   const saveDesc = async (): Promise<void> => {
-    if (!canSave || !hasSavedName) return
-    const ok = await props.store.saveRole({ name: baseName, description: descDraft })
+    if (!canSave || !hasSavedName || baseId === undefined) return
+    const ok = await props.store.saveRole({ id: baseId, name: baseName, description: descDraft })
     if (!ok) return
     setBaseDesc(descDraft)
     setEditDesc(false)
   }
 
-  /** 候选块保存：带当前名 + 当前说明 + 该块编辑后的完整候选列表。 */
+  /** 候选块保存：带 id + 当前名 + 当前说明 + 该块编辑后的完整候选列表。 */
   const saveModels = async (): Promise<void> => {
-    if (!canSave || !hasSavedName) return
+    if (!canSave || !hasSavedName || baseId === undefined) return
     const models = copyCandidates(modelsDraft)
-    const ok = await props.store.saveRole({ name: baseName, description: baseDesc, models })
+    const ok = await props.store.saveRole({ id: baseId, name: baseName, description: baseDesc, models })
     if (!ok) return
     setBaseModels(models)
     setEditingIndex(undefined)
@@ -563,11 +572,12 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       <aside data-router-collab-role-list style={LIST_STYLE}>
         {state.templates.map((role) => (
           <button
-            key={role.name}
+            key={role.id}
             type="button"
             data-router-collab-role-item={role.name}
-            style={role.name === selected ? ITEM_SELECTED_STYLE : ITEM_STYLE}
-            onClick={() => { select(role.name) }}
+            data-router-collab-role-id={role.id}
+            style={role.id === selected ? ITEM_SELECTED_STYLE : ITEM_STYLE}
+            onClick={() => { select(role.id) }}
           >
             <span style={{ display: 'block', fontWeight: 500 }}>{role.name}</span>
             {role.description !== '' ? (
@@ -631,7 +641,9 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                 </div>
               )}
               <div style={HINT_STYLE}>
-                {baseName === '' ? '（新角色）先在名称块保存名字，才能保存说明与候选。' : `md 文件：${baseName}.md（可直接手工编辑）`}
+                {baseId === undefined
+                  ? '（新角色）先在名称块保存名字，才能保存说明与候选。'
+                  : `角色名：${baseName}（文件 ${baseId}.md，可直接手工编辑）`}
               </div>
             </div>
 

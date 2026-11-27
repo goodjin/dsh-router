@@ -167,6 +167,18 @@ describe('dispatch_signal — startActivation 必带真实 AbortSignal', () => {
 })
 
 describe('dispatch_failure_edges — 失败边界', () => {
+  it('角色参数也可传角色 ID（按名解析不到时按 ID 解析）；分工记录标签仍记角色名', async () => {
+    const { records, roles } = await makeDeps()
+    const saved = await roles.save({ name: '执行者', description: '职责' })
+    const taskId = await makeTask(records)
+    const sub = fakeSubagents('child-by-id')
+    const tool = buildDispatchTool({ records, roles, subagents: sub.face })
+    const result = (await run(tool, { ...BASE_ARGS, taskId, role: saved.id })) as { childId: string }
+    expect(result.childId).toBe('child-by-id')
+    const list = await records.list('root-1', { taskId, kind: 'assignment' })
+    expect(list[0]!.sessions).toEqual([{ sessionId: 'child-by-id', label: '执行者' }])
+  })
+
   it('角色不存在 → NOT_FOUND，不创建子会话', async () => {
     const { records, roles } = await makeDeps()
     const sub = fakeSubagents()

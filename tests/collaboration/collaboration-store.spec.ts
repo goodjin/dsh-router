@@ -39,7 +39,7 @@ function scriptedApi(): {
   let listRecordsImpl: (root: string) => Promise<WorkRecord[]> = async () => []
   let readRecordImpl: (root: string, taskId: string, recordId: string) => Promise<SavedRecord> = async () => ({ record: {} as WorkRecord, path: '' })
   let listRolesImpl: () => Promise<RoleTemplate[]> = async () => []
-  let saveRoleImpl: (input: { id?: string; name: string; description: string; models?: Array<{ provider: string; model: string }> }) => Promise<RoleTemplate> = async (input) => ({ name: input.name, description: input.description })
+  let saveRoleImpl: (input: { id?: string; name: string; description: string; models?: Array<{ provider: string; model: string }> }) => Promise<RoleTemplate> = async (input) => ({ id: input.id ?? `id-${input.name}`, name: input.name, description: input.description })
   let lastRoot: string | undefined
   const api: CollaborationApi = {
     listRecords: async (root) => { calls.listRecords += 1; lastRoot = root; return listRecordsImpl(root) },
@@ -365,7 +365,7 @@ describe('saveRole — 共享同一 RoleStore 路径；失败显示并保留草�
     let seen: { models?: unknown } | undefined
     setSaveRole(async (input) => {
       seen = input
-      return { name: input.name, description: input.description }
+      return { id: input.id ?? `id-${input.name}`, name: input.name, description: input.description }
     })
     const store = startCollaborationStore({ api })
     const models = [{ provider: 'p', model: 'm' }]

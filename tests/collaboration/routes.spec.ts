@@ -470,13 +470,17 @@ describe('POST /roles models', () => {
       models: [{ provider: 'not-registered', model: 'no-such' }],
     }))
     expect(created.status).toBe(200)
-    const kept = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '新职责' }))
+    const createdRole = JSON.parse(created.body) as { id: string; name: string }
+    expect(createdRole.id).not.toBe('')
+    // 带 id = 按该 ID 更新（省略 models 保留既有候选）。
+    const kept = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ id: createdRole.id, name: '执行者', description: '新职责' }))
     expect(kept.status).toBe(200)
     expect(JSON.parse(kept.body).models).toEqual([{ provider: 'not-registered', model: 'no-such' }])
     const path = (await roles.read('执行者')).description
     expect(path.startsWith('新职责')).toBe(true)
     const before = await roles.read('执行者')
     const bad = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({
+      id: createdRole.id,
       name: '执行者',
       description: '不该写上',
       models: [{ provider: 'p' }],
@@ -484,10 +488,38 @@ describe('POST /roles models', () => {
     expect(bad.status).toBe(400)
     expect(JSON.parse(bad.body).error.code).toBe('INVALID_INPUT')
     expect(await roles.read('执行者')).toEqual(before)
-    const cleared = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '清空', models: [] }))
+    const cleared = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ id: createdRole.id, name: '执行者', description: '清空', models: [] }))
     expect(cleared.status).toBe(200)
     expect(JSON.parse(cleared.body).models).toBeUndefined()
     expect((await roles.read('执行者')).description).toBe('清空')
+  })
+
+  it('不带 id 且名字已被占用 → 400（不静默产生两个同名角色）', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    const first = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '第一个' }))
+    expect(first.status).toBe(200)
+    const again = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '第二个' }))
+    expect(again.status).toBe(400)
+    expect(JSON.parse(again.body).error.code).toBe('INVALID_INPUT')
+    expect((await roles.read('执行者')).description).toBe('第一个')
+  })
+
+  it('带 id 改名：ID 与文件路径不变，列表里不多出角色', async () => {
+    const dataDir = await freshDir()
+    const roles = createRoleStore(dataDir)
+    const { invoke } = harness({ records: createRecordStore(dataDir), roles })
+    const created = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ name: '执行者', description: '职责' }))
+    const createdRole = JSON.parse(created.body) as { id: string }
+    const renamed = await invoke('POST', COLLABORATION_ROLES_PATH, JSON.stringify({ id: createdRole.id, name: '高级执行者', description: '职责' }))
+    expect(renamed.status).toBe(200)
+    expect(JSON.parse(renamed.body).id).toBe(createdRole.id)
+    const listed = await invoke('GET', COLLABORATION_ROLES_PATH)
+    const rolesJson = JSON.parse(listed.body) as Array<{ id: string; name: string }>
+    expect(rolesJson).toHaveLength(1)
+    expect(rolesJson[0]!.name).toBe('高级执行者')
+    expect(rolesJson[0]!.id).toBe(createdRole.id)
   })
 })
 

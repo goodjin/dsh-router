@@ -816,9 +816,13 @@ const ROLE_TEMPLATE_SCHEMA = {
 	type: "object",
 	additionalProperties: false,
 	properties: {
+		id: {
+			type: "string",
+			description: "角色 ID（=md 文件名；稳定，不随名称变）"
+		},
 		name: {
 			type: "string",
-			description: "角色名（=md 文件名）"
+			description: "角色名（可改；全局唯一）"
 		},
 		description: {
 			type: "string",
@@ -830,7 +834,11 @@ const ROLE_TEMPLATE_SCHEMA = {
 			items: ROLE_MODEL_SCHEMA
 		}
 	},
-	required: ["name", "description"]
+	required: [
+		"id",
+		"name",
+		"description"
+	]
 };
 /** render：输出与存储返回值一致的 JSON 文本（单文本块）。 */
 function jsonRender(_args, value) {
@@ -1110,13 +1118,13 @@ function buildCollaborationTools(deps) {
 		},
 		{
 			name: "router_role_read",
-			description: "按编号读取一个角色模板。",
+			description: "按角色名或角色 ID 读取一个角色模板。",
 			parameters: {
 				type: "object",
 				additionalProperties: false,
 				properties: { name: {
 					type: "string",
-					description: "角色名（=md 文件名）"
+					description: "角色名（也可传角色 ID）"
 				} },
 				required: ["name"]
 			},
@@ -1131,7 +1139,7 @@ function buildCollaborationTools(deps) {
 		},
 		{
 			name: "router_role_save",
-			description: "创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。models 可选：省略则保留盘上已有候选；空数组清空候选。",
+			description: "创建或修改角色模板（按名 upsert：同名覆盖职责说明，角色 ID 与文件路径不变）。角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色 ID），可直接手工编辑。带 id 时按该 ID 更新（改名只改内容）；名称全局唯一，与别的角色重名会报错。models 可选：省略则保留盘上已有候选；空数组清空候选。",
 			parameters: {
 				type: "object",
 				additionalProperties: false,
@@ -1140,9 +1148,13 @@ function buildCollaborationTools(deps) {
 					additionalProperties: false,
 					description: "模板入参",
 					properties: {
+						id: {
+							type: "string",
+							description: "角色 ID（可选；给了就按该 ID 更新，ID 与文件路径不变）"
+						},
 						name: {
 							type: "string",
-							description: "角色名（非空；同名即更新）"
+							description: "角色名（非空；与别的角色重名会报错）"
 						},
 						description: {
 							type: "string",
@@ -1164,7 +1176,28 @@ function buildCollaborationTools(deps) {
 			},
 			async execute(args) {
 				const input = asObject(asObject(args, "参数").input, "input");
-				return roles.save(input);
+				const name$1 = asNonEmptyString(input.name, "name");
+				const description = typeof input.description === "string" ? input.description : "";
+				const models = Object.prototype.hasOwnProperty.call(input, "models") ? input.models : void 0;
+				const id = typeof input.id === "string" && input.id.trim() !== "" ? input.id.trim() : void 0;
+				if (id !== void 0) return roles.save({
+					id,
+					name: name$1,
+					description,
+					...models !== void 0 ? { models } : {}
+				});
+				const existing = (await roles.list()).find((role) => role.name === name$1);
+				if (existing !== void 0) return roles.save({
+					id: existing.id,
+					name: name$1,
+					description,
+					...models !== void 0 ? { models } : {}
+				});
+				return roles.save({
+					name: name$1,
+					description,
+					...models !== void 0 ? { models } : {}
+				});
 			}
 		},
 		buildCompactTool({ records })

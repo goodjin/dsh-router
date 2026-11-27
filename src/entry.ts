@@ -101,6 +101,16 @@ export function apply(ctx: EntryContext, rawConfig: unknown): () => void {
   // 旧 JSON 角色一次性迁成 md，再幂等种入预置角色（按名判断，不覆盖用户改动）。
   // fire-and-forget 必须就地兜底（宿主把未捕获 rejection 当致命错误）；失败只告警不挡装载。
   runtime.roles.migrateLegacyJson()
+    .then(() => runtime.roles.migrateToIds())
+    .then((report) => {
+      // 迁移只发生一次（有备份、幂等）；把备份路径打出来，用户要回滚时找得到。
+      if (report.migrated > 0 || report.removed > 0) {
+        console.log(
+          `[dsh-router] roles migrated to id-named files: ${report.migrated} migrated, ${report.removed} leftovers removed` +
+            (report.backupPath !== undefined ? `, backup: ${report.backupPath}` : ''),
+        )
+      }
+    })
     .then(() => seedPresetRoles(runtime.roles))
     .catch((error: unknown) => {
       console.warn('[dsh-router] migrate/seed roles failed:', error instanceof Error ? error.message : String(error))

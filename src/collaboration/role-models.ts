@@ -1,19 +1,63 @@
 /**
- * 角色 md 文末候选围栏的读写与派发序列。
+ * 角色 md 文件的三段结构（角色围栏 / 职责正文 / 候选围栏）与派发序列。
  *
- * 无围栏时文件字节就是职责正文。有围栏时职责只取开始标记之前的切片，
- * 标记与 JSON 不进入 description。坏围栏是 INVALID_INPUT，不当成「没配候选」。
+ * 文件名 = 角色 ID（稳定，不随名称变）；文件内容：
+ *
+ *     <!-- dsh-router:role -->
+ *     {"id":"<id>","name":"<角色名>"}
+ *     <!-- /dsh-router:role -->
+ *     <职责正文>
+ *     <!-- dsh-router:models -->      ← 可选
+ *     {"provider":"p","model":"m"}
+ *     <!-- /dsh-router:models -->
+ *
+ * 角色围栏缺省 = 旧格式文件（文件名当角色名），解析时按旧口径兼容，
+ * 由一次性迁移改写成新格式。职责正文 = 角色围栏之后、候选围栏之前的切片；
+ * 坏围栏是 INVALID_INPUT，不当成「没配候选」。候选围栏语义不动。
  */
+
+import { createHash } from 'node:crypto'
 
 import { CollaborationError, type RoleModelCandidate } from './types.ts'
 
 export const MODEL_FENCE_START = '<!-- dsh-router:models -->'
 export const MODEL_FENCE_END = '<!-- /dsh-router:models -->'
 
+/** 角色元数据围栏：记 id 与 name（文件名是 id，name 可变）。 */
+export const ROLE_FENCE_START = '<!-- dsh-router:role -->'
+export const ROLE_FENCE_END = '<!-- /dsh-router:role -->'
+
 export interface ParsedRoleDocument {
+  /** 角色围栏里的 id（新格式）；旧格式文件缺省（调用方用文件名兜底）。 */
+  id?: string
+  /** 角色围栏里的 name（新格式）；旧格式文件缺省（调用方用文件名兜底）。 */
+  name?: string
   description: string
   /** 有围栏才出现（含合法的空围栏）。没有围栏则缺省。 */
   models?: RoleModelCandidate[]
+}
+
+/**
+ * 按角色原始名称派生稳定 ID：同一名称永远得到同一 ID（改名不变）。
+ * 形式是「名字的可读片段 + 名称哈希前 6 位」——可读片段方便用户认文件，
+ * 哈希保证不同名字几乎不会撞；真撞了由存储层加后缀避让。
+ */
+export function deriveRoleId(name: string): string {
+  const trimmed = name.trim()
+  const hash = createHash('sha256').update(trimmed).digest('hex').slice(0, 6)
+  const slug = trimmed
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\-_]+/gu, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 32)
+    .replace(/-+$/g, '')
+  return `${slug === '' ? 'role' : slug}-${hash}`
+}
+
+/** 角色围栏块（写文件时放在最前面）。 */
+export function roleFenceBlock(id: string, name: string): string {
+  return `${ROLE_FENCE_START}\n${JSON.stringify({ id, name })}\n${ROLE_FENCE_END}\n`
 }
 
 interface TextLine {
@@ -66,15 +110,48 @@ export function validateRoleModels(name: string, raw: unknown): RoleModelCandida
   return raw.map((item, index) => parseCandidate(name, item, `models[${index}]`))
 }
 
-/** 读角色文件字节。没有单独成行的开始标记时 models 缺省，description 等于原文。 */
-export function parseRoleDocument(name: string, text: string): ParsedRoleDocument {
+/** 读角色文件字节。fileBase 是文件名主干（新格式是 id，旧格式是角色名）。 */
+export function parseRoleDocument(fileBase: string, text: string): ParsedRoleDocument {
+  const lines = linesOf(text)
+  let body = text
+  let id: string | undefined
+  let name: string | undefined
+  const roleStart = lines.findIndex((line) => line.text === ROLE_FENCE_START)
+  if (roleStart >= 0) {
+    const roleEnd = lines.findIndex((line, index) => index > roleStart && line.text === ROLE_FENCE_END)
+    if (roleEnd < 0) throw invalid(fileBase, '缺少角色围栏的结束标记')
+    const payload = lines.slice(roleStart + 1, roleEnd).map((line) => line.text).join('\n').trim()
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(payload)
+    } catch (error) {
+      throw invalid(fileBase, `角色围栏不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw invalid(fileBase, '角色围栏必须是对象')
+    }
+    const record = parsed as { id?: unknown; name?: unknown }
+    if (typeof record.id !== 'string' || record.id.trim() === '') throw invalid(fileBase, '角色围栏缺 id')
+    if (typeof record.name !== 'string' || record.name.trim() === '') throw invalid(fileBase, '角色围栏缺 name')
+    id = record.id.trim()
+    name = record.name.trim()
+    // 正文从角色围栏结束行之后开始（围栏本身不进入职责）。
+    body = roleEnd + 1 < lines.length ? text.slice(lines[roleEnd + 1]!.start) : ''
+  }
+  const { description, models } = parseModelsSection(fileBase, body)
+  if (id === undefined) return { description, models }
+  return { id, name, description, models }
+}
+
+/** 正文段与候选围栏：没有围栏时正文就是全部字节。 */
+function parseModelsSection(fileBase: string, text: string): { description: string; models?: RoleModelCandidate[] } {
   const lines = linesOf(text)
   const startIndex = lines.findIndex((line) => line.text === MODEL_FENCE_START)
   if (startIndex < 0) return { description: text }
   const start = lines[startIndex]!
   const endIndex = lines.findIndex((line, index) => index > startIndex && line.text === MODEL_FENCE_END)
-  if (endIndex < 0) throw invalid(name, '缺少结束标记')
-  if (lines.slice(endIndex + 1).length > 0) throw invalid(name, '结束标记之后还有内容')
+  if (endIndex < 0) throw invalid(fileBase, '缺少结束标记')
+  if (lines.slice(endIndex + 1).length > 0) throw invalid(fileBase, '结束标记之后还有内容')
   const models: RoleModelCandidate[] = []
   for (let index = startIndex + 1; index < endIndex; index++) {
     const line = lines[index]!.text
@@ -82,29 +159,30 @@ export function parseRoleDocument(name: string, text: string): ParsedRoleDocumen
     try {
       parsed = JSON.parse(line)
     } catch (error) {
-      throw invalid(name, `第 ${index - startIndex} 行不是合法 JSON（${error instanceof Error ? error.message : String(error)}）`)
+      throw invalid(fileBase, `第 ${index - startIndex} 行不是合法 JSON：${error instanceof Error ? error.message : String(error)}`)
     }
-    try {
-      models.push(parseCandidate(name, parsed, `围栏第 ${index - startIndex} 行`))
-    } catch (error) {
-      if (error instanceof CollaborationError) {
-        throw invalid(name, error.message)
-      }
-      throw error
-    }
+    models.push(parseCandidate(fileBase, parsed, `models[${index - startIndex}]`))
   }
   return { description: text.slice(0, start.start), models }
 }
 
 /**
- * 写回文件字节。无候选不写围栏。有候选时正文不以换行结尾就先补一个，
- * 再写独占一行的标记。读出来的 description 再写回是稳定的。
+ * 写回文件字节。角色围栏在最前面（id + name）；无候选不写候选围栏。
+ * 有候选时正文不以换行结尾就先补一个，再写独占一行的标记。
+ * 读出来的 description 再写回是稳定的。
  */
-export function serializeRoleFile(description: string, models: readonly RoleModelCandidate[] | undefined): string {
-  if (models === undefined || models.length === 0) return description
-  const body = description.endsWith('\n') ? description : `${description}\n`
-  const rows = models.map((candidate) => JSON.stringify({ provider: candidate.provider, model: candidate.model }))
-  return `${body}${MODEL_FENCE_START}\n${rows.join('\n')}\n${MODEL_FENCE_END}\n`
+export function serializeRoleFile(input: {
+  id: string
+  name: string
+  description: string
+  models?: readonly RoleModelCandidate[] | undefined
+}): string {
+  const head = roleFenceBlock(input.id, input.name)
+  const body = input.description
+  if (input.models === undefined || input.models.length === 0) return `${head}${body}`
+  const text = body.endsWith('\n') ? body : `${body}\n`
+  const rows = input.models.map((candidate) => JSON.stringify({ provider: candidate.provider, model: candidate.model }))
+  return `${head}${text}${MODEL_FENCE_START}\n${rows.join('\n')}\n${MODEL_FENCE_END}\n`
 }
 
 /**

@@ -110,7 +110,7 @@ function makeFakeStores(): {
     path: '/x/y.json',
   }
   const workRecord: WorkRecord = { ...savedRecord.record }
-  const roleTemplate = { name: '编码', description: '写代码' }
+  const roleTemplate = { id: 'bianma-1a2b3c', name: '编码', description: '写代码' }
   const records: RecordStore = {
     create: rec('create', savedRecord),
     read: rec('read', savedRecord),
@@ -123,6 +123,7 @@ function makeFakeStores(): {
     save: role('save', roleTemplate),
     remove: async () => false,
     migrateLegacyJson: async () => {},
+    migrateToIds: async () => ({ migrated: 0, removed: 0 }),
   }
   return { records, roles, calls }
 }
@@ -301,17 +302,25 @@ describe('buildCollaborationTools — execute forwards to store', () => {
     expect(calls).toEqual([{ method: 'roles.read', args: ['主管'] }])
   })
 
-  it('router_role_save forwards (input) to roles.save', async () => {
+  it('router_role_save 按名 upsert：先按名找已有角色，找到就带 id 原地更新（ID 与文件路径不变）', async () => {
     const { tool, calls } = find('router_role_save')
-    const input = { name: '编码', description: '写代码' }
-    await tool.execute({ input }, {})
-    expect(calls).toEqual([{ method: 'roles.save', args: [input] }])
+    await tool.execute({ input: { name: '编码', description: '写代码' } }, {})
+    expect(calls).toEqual([
+      { method: 'roles.list', args: [] },
+      { method: 'roles.save', args: [{ id: 'bianma-1a2b3c', name: '编码', description: '写代码' }] },
+    ])
   })
 
-  it('no save-triggered side effect: role_save calls only roles.save once', async () => {
+  it('router_role_save 带 id 时直接按该 ID 更新（不先查名字）', async () => {
+    const { tool, calls } = find('router_role_save')
+    await tool.execute({ input: { id: 'bianma-1a2b3c', name: '编码', description: '新说明' } }, {})
+    expect(calls).toEqual([{ method: 'roles.save', args: [{ id: 'bianma-1a2b3c', name: '编码', description: '新说明' }] }])
+  })
+
+  it('no save-triggered side effect: role_save 只写一次（不重复保存）', async () => {
     const { tool, calls } = find('router_role_save')
     await tool.execute({ input: { name: 'n', description: 'd' } }, {})
-    expect(calls).toHaveLength(1)
+    expect(calls.filter((call) => call.method === 'roles.save')).toHaveLength(1)
   })
 
   it('subagents 缺席时其余七条照常注册（派发工具在调用时才明确报错）', () => {
@@ -341,6 +350,9 @@ describe('buildCollaborationTools — error propagation & boundary guards', () =
       },
     } as RecordStore
     const roles = {
+      migrateToIds: async () => {
+        throw err
+      },
       remove: async () => {
         throw err
       },

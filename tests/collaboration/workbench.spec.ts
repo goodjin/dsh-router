@@ -15,6 +15,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { existsSync, readFileSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -138,7 +140,9 @@ describe('workbench apply — 假 webServer 上注册四条路由（路径与方
 
 describe('workbench apply — 路由用注入的 routerCollaboration 同一 store', () => {
   it('注入 store 存角色、路由读出来（不是新建副本）', async () => {
-    const runtime = createCollaborationRuntime({ dataDir: '/tmp/router-workbench-samestore' })
+    // 每次用独立临时目录：角色名全局唯一，复用固定目录会撞名。
+    const dataDir = await mkdtemp(join(tmpdir(), 'router-workbench-samestore-'))
+    const runtime = createCollaborationRuntime({ dataDir })
     await runtime.roles.save({ name: 'router-workbench-执行者', description: '通用执行角色' })
 
     const { ctx, routes } = workbenchCtx(runtime)

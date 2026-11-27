@@ -149,7 +149,13 @@ D6 按桌面版理解：不传 `agentOptions` 时，子会话用主会话最近�
 
 `src/collaboration/types.ts` 65–68 行：`RoleTemplate` 只有 `name` 与 `description`。`RoleStore.save`（79–82 行）入参同样只有这两项。文件头 7 行和 64 行的注释仍写 json / 「正文 = 职责说明」，实现已经是 md；改存储时把注释改到与行为一致。
 
-`src/collaboration/roles.ts`：`ROLE_EXT = '.md'`（25 行）。`readRoleFile`（103–115 行）把整个文件当 `description`。`save`（144–154 行）把 `description` 整段写入。一个角色一个文件，文件名 = 角色名。
+`src/collaboration/roles.ts`：`ROLE_EXT = '.md'`（25 行）。一个角色一个文件。
+
+**存储现状（2026-11-27 起）**：文件名 = **角色 ID**（稳定，不随名称变），文件内容三段——角色围栏
+`<!-- dsh-router:role -->`（一行 JSON：`{"id":…,"name":…}`）+ 职责正文 + 可选候选围栏。ID 按角色
+**原始名称**确定性派生（可读片段 + 名称哈希前 6 位，同名永远同 ID，冲突加后缀避让），一经分配永不变化。
+旧格式文件（文件名 = 角色名、无角色围栏）由启动时的一次性迁移改写：派生 ID → 写新文件 → 校验正文逐字保留
+→ 删旧文件；迁移前整个 roles 目录备份到 `collaboration/roles.bak-<时间戳>/`（只备一次）。
 
 `seedPresetRoles`（235–257 行）用整段 `description` 对 `PRESET_ROLE_TEMPLATES` 和 `HISTORICAL_PRESET_DESCRIPTIONS` 做精确相等：缺则新建，等于历史文本则升级，用户改过的永远不动。退役角色（如「主管」）只在精确命中历史文本时删除。预置模板只有职责，没有候选。本方案不给预置角色发明候选。
 
@@ -414,10 +420,12 @@ interface ChildModelRun {
 该块自己的「保存」「取消」——**页面上没有任何统一保存按钮**，「添加模型」清单面板里也没有
 「确定」。分块保存的请求体（POST `/roles`，按名 upsert）：
 
-- 名称块保存：`{ name: 新名, description: 当前说明 }`，**不带 `models`**——服务端保留文件里既有的候选围栏。
-- 说明块保存：`{ name: 当前名, description: 新说明 }`，**不带 `models`**——同上。
-- 候选块保存：`{ name: 当前名, description: 当前说明, models: 该块编辑后的完整候选数组 }`；
+- 名称块保存：`{ id: 角色 ID, name: 新名, description: 当前说明 }`，**不带 `models`**——服务端保留文件里既有的候选围栏。
+- 说明块保存：`{ id: 角色 ID, name: 当前名, description: 新说明 }`，**不带 `models`**——同上。
+- 候选块保存：`{ id: 角色 ID, name: 当前名, description: 当前说明, models: 该块编辑后的完整候选数组 }`；
   用户在候选块里删光候选就送 `[]`（服务端清空围栏）。
+- 带 `id` = 按该角色 ID 更新（**改名只改文件内容、文件路径不动**，不会多出同名角色）；不带 `id` = 新建
+  （服务端按名称派生 ID）。名称全局唯一：与别的角色重名报错，不静默产生两个同名角色。
 - 「取消」丢弃该块未保存的改动、恢复该块只读显示值，不动其它块、不发请求。
 - 名称块/说明块保存**绝不能**发送空候选数组（否则会把既有候选清掉）；省略 `models` 字段即可。
   `rolesError` 时不把坏角色再保存一遍。
@@ -426,6 +434,7 @@ interface ChildModelRun {
 其余约束：
 
 - 列表仍显示角色名和职责前 40 字。预览只用 `description`，不拼接 provider。
+- 编辑按角色 **ID** 定位（改名不孤儿化）；文件提示显示角色名，小字给出 ID（文件现在是 ID 命名）。
 - 候选区在候选块编辑态里是「从清单添加」面板，数据来自 `GET /router/collaboration/models`；
   面板里保留搜索框、分组清单、添加所选（N）/清空选择/收起。
 - 手工填写始终可用：清单为空、请求失败、或 `unavailable: true` 时，面板显示状态，候选行仍可手工改值。

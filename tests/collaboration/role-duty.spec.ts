@@ -119,8 +119,9 @@ describe('角色职责进系统提示词', () => {
     const duties = createRoleDutyService({ dataDir: dir, records, roles })
     const childId = await dispatchChild({ records, roles, roleDuties: duties, childId: 'child-gone', role: '执行者' })
 
-    // 角色文件被删（用户改过/清理）：冷服务解析不到职责。
-    await rm(join(dir, 'collaboration', 'roles', '执行者.md'), { force: true })
+    // 角色文件被删（用户改过/清理）：冷服务解析不到职责。文件名 = 角色 ID。
+    const roleId = (await roles.read('执行者')).id
+    await rm(join(dir, 'collaboration', 'roles', `${roleId}.md`), { force: true })
     const cold = createRoleDutyService({ dataDir: dir, records, roles })
     await expect(cold.refresh(childId)).resolves.toBeUndefined()
 

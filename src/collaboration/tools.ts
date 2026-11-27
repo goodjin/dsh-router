@@ -135,7 +135,8 @@ const ROLE_TEMPLATE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    name: { type: 'string', description: '角色名（=md 文件名）' },
+    id: { type: 'string', description: '角色 ID（=md 文件名；稳定，不随名称变）' },
+    name: { type: 'string', description: '角色名（可改；全局唯一）' },
     description: { type: 'string', description: '职责说明（不含候选围栏）' },
     models: {
       type: 'array',
@@ -143,7 +144,7 @@ const ROLE_TEMPLATE_SCHEMA = {
       items: ROLE_MODEL_SCHEMA,
     },
   },
-  required: ['name', 'description'],
+  required: ['id', 'name', 'description'],
 }
 
 /* ───────────────────────── 工具定义构建 ───────────────────────── */
@@ -351,11 +352,11 @@ export function buildCollaborationTools(deps: {
     },
     {
       name: 'router_role_read',
-      description: '按编号读取一个角色模板。',
+      description: '按角色名或角色 ID 读取一个角色模板。',
       parameters: {
         type: 'object',
         additionalProperties: false,
-        properties: { name: { type: 'string', description: '角色名（=md 文件名）' } },
+        properties: { name: { type: 'string', description: '角色名（也可传角色 ID）' } },
         required: ['name'],
       },
       output: { schema: ROLE_TEMPLATE_SCHEMA, render: jsonRender },
@@ -368,8 +369,9 @@ export function buildCollaborationTools(deps: {
     {
       name: 'router_role_save',
       description:
-        '创建或修改角色模板（按名 upsert：同名覆盖职责说明）。角色模板是职责文本，' +
-        '一个角色一个 md 文件（文件名 = 角色名），可直接手工编辑。' +
+        '创建或修改角色模板（按名 upsert：同名覆盖职责说明，角色 ID 与文件路径不变）。' +
+        '角色模板是职责文本，一个角色一个 md 文件（文件名 = 角色 ID），可直接手工编辑。' +
+        '带 id 时按该 ID 更新（改名只改内容）；名称全局唯一，与别的角色重名会报错。' +
         'models 可选：省略则保留盘上已有候选；空数组清空候选。',
       parameters: {
         type: 'object',
@@ -380,7 +382,8 @@ export function buildCollaborationTools(deps: {
             additionalProperties: false,
             description: '模板入参',
             properties: {
-              name: { type: 'string', description: '角色名（非空；同名即更新）' },
+              id: { type: 'string', description: '角色 ID（可选；给了就按该 ID 更新，ID 与文件路径不变）' },
+              name: { type: 'string', description: '角色名（非空；与别的角色重名会报错）' },
               description: { type: 'string', description: '职责说明' },
               models: {
                 type: 'array',
@@ -397,7 +400,19 @@ export function buildCollaborationTools(deps: {
       async execute(args: unknown): Promise<unknown> {
         const a = asObject(args, '参数')
         const input = asObject(a.input, 'input')
-        return roles.save(input as unknown as { name: string; description: string })
+        const name = asNonEmptyString(input.name, 'name')
+        const description = typeof input.description === 'string' ? input.description : ''
+        const models = Object.prototype.hasOwnProperty.call(input, 'models') ? input.models : undefined
+        const id = typeof input.id === 'string' && input.id.trim() !== '' ? input.id.trim() : undefined
+        if (id !== undefined) {
+          return roles.save({ id, name, description, ...(models !== undefined ? { models } : {}) })
+        }
+        // 按名 upsert：找到同名角色就原地更新（ID 与文件路径不变），找不到才新建。
+        const existing = (await roles.list()).find((role) => role.name === name)
+        if (existing !== undefined) {
+          return roles.save({ id: existing.id, name, description, ...(models !== undefined ? { models } : {}) })
+        }
+        return roles.save({ name, description, ...(models !== undefined ? { models } : {}) })
       },
     },
     // 压缩工具放最后：与 COLLABORATION_TOOL_NAMES 的顺序一致。

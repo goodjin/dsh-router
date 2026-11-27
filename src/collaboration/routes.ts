@@ -5,7 +5,7 @@
  *   GET  /records?rootSessionId=&taskId=&kind=  → WorkRecord[]（复用 RecordStore.list）
  *   GET  /record?rootSessionId=&taskId=&recordId= → SavedRecord（复用 RecordStore.read）
  *   GET  /roles                                 → RoleTemplate[]（复用 RoleStore.list）
- *   POST /roles {name,description,models?}      → RoleTemplate（按名 upsert，复用 RoleStore.save）
+ *   POST /roles {id?,name,description,models?}  → RoleTemplate（带 id 按 ID 更新、不带 id 新建）
  *   GET  /models                                → 可路由模型清单（sessionController.modelCatalog；缺席时 200 且 unavailable）
  *
  * 第一版工作台只读任务资料：记录修改由模型工具负责，宿主不挂任务写/控制路由
@@ -280,13 +280,15 @@ export function registerCollaborationRoutes(
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       throw new CollaborationError('INVALID_INPUT', '请求体须为 JSON 对象')
     }
-    const body = parsed as { name?: unknown; description?: unknown; models?: unknown }
-    const input: { name: string; description: string; models?: unknown } = {
+    const body = parsed as { id?: unknown; name?: unknown; description?: unknown; models?: unknown }
+    const input: { id?: string; name: string; description: string; models?: unknown } = {
       name: typeof body.name === 'string' ? body.name : '',
       description: typeof body.description === 'string' ? body.description : '',
     }
+    // 带 id = 按该角色 ID 更新（改名只改内容、文件路径不动）；不带 id = 新建。
+    if (typeof body.id === 'string' && body.id.trim() !== '') input.id = body.id.trim()
     if (Object.prototype.hasOwnProperty.call(body, 'models')) input.models = body.models
-    // name 非空与文件名安全由 RoleStore.save 校验（INVALID_INPUT）。
+    // name 非空、名称唯一与 id 合法性由 RoleStore.save 校验（INVALID_INPUT）。
     const saved = await deps.roles.save(input)
     return { status: 200, body: JSON.stringify(saved) }
   })
