@@ -3,8 +3,9 @@
  *
  * 左侧：角色列表（名称 + 职责预览）+「新建角色」入口；新建即在列表里出现一条
  * 未保存草稿项并在右侧打开空编辑器。右侧：名称输入 + 职责多行编辑框（内容可能
- * 很长）+「保存」——**保存才生效**，改动未保存时显示未保存标记；保存失败显示
- * 错误并保留草稿。与模型共享同一 RoleStore（按名 upsert）。
+ * 很长）+ 候选模型区（独立边框盒）+「添加模型」面板——**面板展开时**面板底部才有
+ * 「确定」按钮，点它才**保存生效**（名称、说明、候选模型）；改动未保存时显示未保存
+ * 标记；保存失败显示错误并保留草稿。与模型共享同一 RoleStore（按名 upsert）。
  */
 
 import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
@@ -85,6 +86,18 @@ const TEXTAREA_STYLE: CSSProperties = {
   whiteSpace: 'pre-wrap',
 }
 
+/**
+ * 候选模型区：与名称输入框、职责文本域同一套视觉语言（边框 / 圆角 / 内边距），
+ * 自己是一个独立的盒子，不再是裸的一堆行。
+ */
+const MODELS_BOX_STYLE: CSSProperties = {
+  marginTop: 12,
+  padding: 10,
+  borderRadius: 6,
+  border: '1px solid var(--dsw-alias-border-l2, #d0d4dd)',
+  background: 'var(--dsw-alias-bg-l1, #fff)',
+}
+
 const ROW_STYLE: CSSProperties = {
   display: 'flex',
   gap: 6,
@@ -112,6 +125,14 @@ const BUTTON_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
+/** 主操作按钮（「确定」）：描边 + 主色文字，与面板里其他小按钮区分。 */
+const PRIMARY_BUTTON_STYLE: CSSProperties = {
+  ...BUTTON_STYLE,
+  border: '1px solid var(--dsw-alias-accent-primary, #3b6ef6)',
+  color: 'var(--dsw-alias-accent-primary, #3b6ef6)',
+  fontWeight: 500,
+}
+
 const ERROR_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
@@ -124,12 +145,13 @@ const ERROR_STYLE: CSSProperties = {
   fontSize: 12,
 }
 
+/** 清单面板：嵌在候选模型盒子里，用更浅的底色与边框区分层级。 */
 const CATALOG_STYLE: CSSProperties = {
   marginTop: 8,
   padding: 8,
   border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
   borderRadius: 6,
-  background: 'var(--dsw-alias-bg-l1, #fff)',
+  background: 'var(--dsw-alias-bg-l2, #f7f9fb)',
 }
 
 const CATALOG_RESULTS_STYLE: CSSProperties = {
@@ -379,7 +401,10 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       setDirty(true)
       setModelsTouched(true)
     }
-    closeCatalog()
+    // 添加后清空勾选与搜索词，但**面板保持展开**：保存按钮（「确定」）在面板里，
+    // 收起就够不着保存了；用户点「收起」才收起。
+    setCatalogSelection(new Set())
+    setCatalogQuery('')
   }
 
   return (
@@ -431,8 +456,8 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
               value={draftDesc}
               onChange={(event) => { setDraftDesc(event.target.value); setDirty(true) }}
             />
-            <div data-router-collab-role-models style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 12, marginBottom: 6 }}>候选模型</div>
+            <div data-router-collab-role-models style={MODELS_BOX_STYLE}>
+              <div style={{ fontSize: 12, marginBottom: 8, fontWeight: 500 }}>候选模型</div>
               {draftModels.map((candidate, index) => {
                 const isEditing = editingIndex === index
                 return (
@@ -548,7 +573,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                       ))}
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
                     <button
                       type="button"
                       data-router-collab-catalog-add
@@ -575,33 +600,33 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
                     >
                       收起
                     </button>
+                    <button
+                      type="button"
+                      data-router-collab-role-save
+                      style={{ ...PRIMARY_BUTTON_STYLE, marginLeft: 'auto', opacity: canSave ? 1 : 0.5 }}
+                      disabled={!canSave}
+                      onClick={() => {
+                        if (props.store.get().rolesError !== null) return
+                        const input: { name: string; description: string; models?: RoleModelCandidate[] } = {
+                          name: draftName.trim(),
+                          description: draftDesc,
+                        }
+                        // 候选列表被本次编辑动过才带 models；否则省略字段，由服务端保留既有候选围栏。
+                        if (modelsTouched) {
+                          input.models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
+                        }
+                        void props.store.saveRole(input).then((ok) => {
+                          if (ok) select(draftName.trim())
+                        })
+                      }}
+                    >
+                      确定
+                    </button>
                   </div>
                 </div>
               ) : null}
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-              <button
-                type="button"
-                data-router-collab-role-save
-                style={{ ...BUTTON_STYLE, opacity: canSave ? 1 : 0.5 }}
-                disabled={!canSave}
-                onClick={() => {
-                  if (props.store.get().rolesError !== null) return
-                  const input: { name: string; description: string; models?: RoleModelCandidate[] } = {
-                    name: draftName.trim(),
-                    description: draftDesc,
-                  }
-                  // 候选列表被本次编辑动过才带 models；否则省略字段，由服务端保留既有候选围栏。
-                  if (modelsTouched) {
-                    input.models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
-                  }
-                  void props.store.saveRole(input).then((ok) => {
-                    if (ok) select(draftName.trim())
-                  })
-                }}
-              >
-                保存
-              </button>
               {dirty ? (
                 <span data-router-collab-role-dirty style={{ fontSize: 12, color: '#e08a1e' }}>未保存</span>
               ) : currentRole !== undefined ? (

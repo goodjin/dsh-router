@@ -154,6 +154,15 @@ function openCatalog(container: HTMLElement): void {
   click(container.querySelector('[data-router-collab-catalog-open]')!)
 }
 
+/**
+ * 保存角色：保存按钮（「确定」）只在「添加模型」面板展开时存在，
+ * 所以保存前先确保面板是展开的。
+ */
+function saveRole(container: HTMLElement): void {
+  if (container.querySelector('[data-router-collab-role-save]') === null) openCatalog(container)
+  click(container.querySelector('[data-router-collab-role-save]')!)
+}
+
 async function mountRolesNew(api: CollaborationApi): Promise<{ root: Root; container: HTMLElement }> {
   const store = startCollaborationStore({ api })
   const props = baseProps(store)
@@ -320,7 +329,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       descInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
     expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     const items = container.querySelectorAll('[data-router-collab-role-item]')
@@ -358,7 +367,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       descInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
     expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     expect((container.querySelector('[data-router-collab-role-desc]') as HTMLTextAreaElement).value).toContain('第二行：汇总结果')
@@ -387,7 +396,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       setter.call(nameInput, '草稿角色')
       nameInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('保存失败')
     expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('草稿角色')
@@ -458,7 +467,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     expect(container.querySelector('[data-router-collab-model-provider]')).toBeNull()
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('manual-provider')
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     expect(posted?.models).toEqual([{ provider: 'manual-provider', model: 'manual-model' }])
@@ -501,7 +510,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
     await act(async () => { setFieldValue(descInput, '新说明') })
     await flush()
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     // 请求体不带 models；存储里候选未丢。
@@ -537,7 +546,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelectorAll('[data-router-collab-model-delete]')[0]!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     expect(posted?.models).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
@@ -579,13 +588,61 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
     expect(container.querySelector('[data-router-collab-catalog-query]')).toBeNull()
+    // 面板收起：保存按钮（「确定」）不渲染。
+    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
     openCatalog(container)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     expect(container.querySelector('[data-router-collab-catalog-query]')).toBeTruthy()
+    // 面板展开：有且只有一个「确定」，文字是「确定」。
+    const saves = container.querySelectorAll('[data-router-collab-role-save]')
+    expect(saves).toHaveLength(1)
+    expect(saves[0]!.textContent).toBe('确定')
     click(container.querySelector('[data-router-collab-catalog-close]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
+    // 收起后保存按钮一并消失。
+    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('候选模型区是独立的边框盒：有自己的边框、圆角与内边距', async () => {
+    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+    const box = container.querySelector<HTMLElement>('[data-router-collab-role-models]')!
+    expect(box.style.border).toContain('1px solid')
+    expect(box.style.borderRadius).not.toBe('')
+    expect(box.style.padding).not.toBe('')
+    await act(async () => { root.unmount() })
+  })
+
+  it('保存按钮只在添加模型面板展开时出现：展开时文字是「确定」，点它保存成功', async () => {
+    let saved: { name: string; description: string } | undefined
+    let roles: RoleTemplate[] = []
+    const api = catalogApi(catalogFixture, {
+      listRoles: async () => roles,
+      saveRole: async (input) => {
+        saved = input
+        roles = [{ name: input.name, description: input.description, models: input.models }]
+        return roles[0]!
+      },
+    })
+    const { root, container } = await mountRolesNew(api)
+    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
+    await act(async () => { setFieldValue(nameInput, '执行者') })
+    await flush()
+    // 面板收起：页面里没有保存按钮。
+    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
+    openCatalog(container)
+    await flush()
+    const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-save]')!
+    expect(save.textContent).toBe('确定')
+    expect(save.disabled).toBe(false)
+    click(save)
+    await flush()
+    await flush()
+    expect(saved?.name).toBe('执行者')
+    // 保存成功后角色进列表。
+    expect(container.querySelector('[data-router-collab-role-item="执行者"]')).toBeTruthy()
     await act(async () => { root.unmount() })
   })
 
@@ -644,7 +701,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('deepseek-chat')
     fail = true
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('候选无效')
     expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('执行者')
@@ -652,7 +709,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await act(async () => { root.unmount() })
   })
 
-  it('多选按清单顺序一次追加，添加后自动收起并清空搜索与选择', async () => {
+  it('多选按清单顺序一次追加；添加后面板保持展开并清空搜索与选择', async () => {
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
     openCatalog(container)
     await flush()
@@ -666,11 +723,10 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect(texts).toHaveLength(2)
     expect(texts[0]).toContain('deepseek-chat')
     expect(texts[1]).toContain('deepseek-reasoner')
-    // 添加后面板自动收起。
-    expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
-    // 重新展开：搜索词清空、无勾选。
-    openCatalog(container)
-    await flush()
+    // 添加后面板保持展开（保存按钮在面板里，收起就够不着保存）。
+    expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-save]')).toBeTruthy()
+    // 搜索词清空、无勾选。
     expect((container.querySelector('[data-router-collab-catalog-query]') as HTMLInputElement).value).toBe('')
     expect((container.querySelector('[data-router-collab-catalog-add]') as HTMLButtonElement).disabled).toBe(true)
     await act(async () => { root.unmount() })
@@ -685,8 +741,8 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelector('[data-router-collab-catalog-add]')!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
-    openCatalog(container)
-    await flush()
+    // 添加后面板仍展开，直接看清单状态。
+    expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     const added = catalogOptionRow(container, 'deepseek', 'deepseek-chat')
     expect(catalogCheckbox(added).disabled).toBe(true)
     expect(added.querySelector('[data-router-collab-catalog-added]')?.textContent).toContain('已加入')
@@ -731,8 +787,8 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     })
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
-    openCatalog(container)
-    await flush()
+    // 添加后面板仍展开，直接看清单状态。
+    expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     const row = catalogOptionRow(container, 'deepseek', 'deepseek-chat')
     expect(catalogCheckbox(row).disabled).toBe(true)
     expect(row.querySelector('[data-router-collab-catalog-added]')?.textContent).toContain('已加入')
@@ -838,7 +894,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     })
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
-    click(container.querySelector('[data-router-collab-role-save]')!)
+    saveRole(container)
     await flush()
     await flush()
     expect(posted?.models).toEqual([{ provider: 'manual-provider-2', model: 'manual-model-2' }])
@@ -868,6 +924,9 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(nameInput, '执行者')
       nameInput.dispatchEvent(new Event('input', { bubbles: true }))
     })
+    // 保存按钮只在「添加模型」面板展开时出现：先展开面板再取按钮。
+    openCatalog(container)
+    await flush()
     const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-save]')!
     expect(save.disabled).toBe(true)
     click(save)
