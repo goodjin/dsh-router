@@ -1,11 +1,22 @@
 /**
- * 角色标签页（左列表 + 右编辑，显式保存）。
+ * 角色标签页（左列表 + 右侧**分块独立编辑**）。
  *
  * 左侧：角色列表（名称 + 职责预览）+「新建角色」入口；新建即在列表里出现一条
- * 未保存草稿项并在右侧打开空编辑器。右侧：名称输入 + 职责多行编辑框（内容可能
- * 很长）+ 候选模型区（独立边框盒）+「添加模型」面板——**面板展开时**面板底部才有
- * 「确定」按钮，点它才**保存生效**（名称、说明、候选模型）；改动未保存时显示未保存
- * 标记；保存失败显示错误并保留草稿。与模型共享同一 RoleStore（按名 upsert）。
+ * 未保存草稿项并在右侧打开空编辑器。右侧三块各自独立：
+ *   1. 角色名称　2. 职责说明　3. 候选模型
+ * 三块**默认只读**（不渲染任何可编辑控件）；每块点自己的「编辑」才出现该块的输入与
+ * 行级控件，编辑态里只有该块自己的「保存」「取消」。**页面上没有任何统一保存按钮**，
+ * 「添加模型」清单面板里也没有「确定」。
+ *
+ * 分块保存的请求体（POST /roles 的形状，按名 upsert）：
+ *   - 名称块保存：name（新名）+ 当前说明文字，**不带 models**（服务端保留既有候选）。
+ *   - 说明块保存：name（当前名）+ 新说明，**不带 models**（服务端保留既有候选）。
+ *   - 候选块保存：name（当前名）+ 当前说明 + models（该块编辑后的完整候选列表）。
+ * 省略 models 时服务端保留文件里既有的候选围栏；名称块/说明块保存绝不能发空候选数组。
+ *
+ * 「取消」丢弃该块未保存的改动、恢复该块只读显示值，不动其它块、不发请求。
+ * 未保存提示按块给（块内「未保存」），没有全局提示。
+ * 与模型共享同一 RoleStore（按名 upsert）；任一块保存成功后照旧刷新角色列表。
  */
 
 import { useEffect, useSyncExternalStore, useState, type CSSProperties, type ReactNode } from 'react'
@@ -40,7 +51,7 @@ const ITEM_STYLE: CSSProperties = {
   borderRadius: 6,
   border: '1px solid transparent',
   background: 'transparent',
-  color: 'var(--dsw-alias-label-primary, inherit)',
+  color: 'var(--dsh-alias-label-primary, inherit)',
   cursor: 'pointer',
   fontSize: 12,
   lineHeight: 1.4,
@@ -48,19 +59,19 @@ const ITEM_STYLE: CSSProperties = {
 
 const ITEM_SELECTED_STYLE: CSSProperties = {
   ...ITEM_STYLE,
-  border: '1px solid var(--dsw-alias-accent-primary, #3b6ef6)',
-  background: 'color-mix(in srgb, var(--dsw-alias-accent-primary, #3b6ef6) 6%, transparent)',
+  border: '1px solid var(--dsh-alias-accent-primary, #3b6ef6)',
+  background: 'color-mix(in srgb, var(--dsh-alias-accent-primary, #3b6ef6) 6%, transparent)',
 }
 
 const NEW_BUTTON_STYLE: CSSProperties = {
   ...ITEM_STYLE,
-  color: 'var(--dsw-alias-accent-primary, #3b6ef6)',
+  color: 'var(--dsh-alias-accent-primary, #3b6ef6)',
 }
 
 const EDITOR_STYLE: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  border: '1px solid var(--dsh-alias-border-l2, #e4e7ec)',
   borderRadius: 8,
   background: 'var(--dsw-alias-bg-layer-2, #fff)',
   padding: 12,
@@ -72,30 +83,61 @@ const INPUT_STYLE: CSSProperties = {
   boxSizing: 'border-box',
   padding: '5px 8px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-l2, #d0d4dd)',
+  border: '1px solid var(--dsh-alias-border-l2, #d0d4dd)',
   background: 'var(--dsw-alias-bg-l1, #fff)',
-  color: 'var(--dsw-alias-label-primary, inherit)',
+  color: 'var(--dsh-alias-label-primary, inherit)',
   fontSize: 12,
 }
 
 const TEXTAREA_STYLE: CSSProperties = {
   ...INPUT_STYLE,
-  minHeight: 440,
+  minHeight: 240,
   resize: 'vertical',
   fontFamily: 'inherit',
   whiteSpace: 'pre-wrap',
 }
 
-/**
- * 候选模型区：与名称输入框、职责文本域同一套视觉语言（边框 / 圆角 / 内边距），
- * 自己是一个独立的盒子，不再是裸的一堆行。
- */
-const MODELS_BOX_STYLE: CSSProperties = {
-  marginTop: 12,
+/** 每一块（名称 / 说明 / 候选）自己的盒子：同一套视觉语言（边框 / 圆角 / 内边距）。 */
+const BLOCK_STYLE: CSSProperties = {
+  marginBottom: 12,
   padding: 10,
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-l2, #d0d4dd)',
+  border: '1px solid var(--dsh-alias-border-l2, #d0d4dd)',
   background: 'var(--dsw-alias-bg-l1, #fff)',
+}
+
+/** 候选模型区：与名称块、说明块同一套视觉语言，自己是一个独立的盒子。 */
+const MODELS_BOX_STYLE: CSSProperties = {
+  ...BLOCK_STYLE,
+  marginBottom: 0,
+}
+
+const BLOCK_HEAD_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  marginBottom: 8,
+  fontSize: 12,
+  fontWeight: 500,
+}
+
+/** 只读展示值：像输入框但不可编辑（浅底 + 无焦点态）。 */
+const READONLY_TEXT_STYLE: CSSProperties = {
+  padding: '5px 8px',
+  borderRadius: 6,
+  border: '1px solid var(--dsh-alias-border-l2, #e4e7ec)',
+  background: 'var(--dsw-alias-bg-l2, #f7f9fb)',
+  color: 'var(--dsh-alias-label-primary, inherit)',
+  fontSize: 12,
+  lineHeight: 1.5,
+  whiteSpace: 'pre-wrap',
+  overflowWrap: 'anywhere',
+}
+
+const HINT_STYLE: CSSProperties = {
+  marginTop: 6,
+  fontSize: 11,
+  color: '#6b7078',
 }
 
 const ROW_STYLE: CSSProperties = {
@@ -108,9 +150,9 @@ const ROW_STYLE: CSSProperties = {
 const SMALL_BUTTON_STYLE: CSSProperties = {
   padding: '3px 8px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-l2, #d8dbe0)',
+  border: '1px solid var(--dsh-alias-border-l2, #d8dbe0)',
   background: 'var(--dsw-alias-bg-layer-2, #fff)',
-  color: 'var(--dsw-alias-label-primary, inherit)',
+  color: 'var(--dsh-alias-label-primary, inherit)',
   cursor: 'pointer',
   fontSize: 12,
 }
@@ -118,19 +160,24 @@ const SMALL_BUTTON_STYLE: CSSProperties = {
 const BUTTON_STYLE: CSSProperties = {
   padding: '4px 14px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-border-l2, #d8dbe0)',
+  border: '1px solid var(--dsh-alias-border-l2, #d8dbe0)',
   background: 'var(--dsw-alias-bg-layer-2, #fff)',
-  color: 'var(--dsw-alias-label-primary, inherit)',
+  color: 'var(--dsh-alias-label-primary, inherit)',
   cursor: 'pointer',
   fontSize: 12,
 }
 
-/** 主操作按钮（「确定」）：描边 + 主色文字，与面板里其他小按钮区分。 */
+/** 块内「保存」：描边 + 主色文字，与其它小按钮区分。 */
 const PRIMARY_BUTTON_STYLE: CSSProperties = {
   ...BUTTON_STYLE,
-  border: '1px solid var(--dsw-alias-accent-primary, #3b6ef6)',
-  color: 'var(--dsw-alias-accent-primary, #3b6ef6)',
+  border: '1px solid var(--dsh-alias-accent-primary, #3b6ef6)',
+  color: 'var(--dsh-alias-accent-primary, #3b6ef6)',
   fontWeight: 500,
+}
+
+const DIRTY_STYLE: CSSProperties = {
+  fontSize: 12,
+  color: '#e08a1e',
 }
 
 const ERROR_STYLE: CSSProperties = {
@@ -139,9 +186,9 @@ const ERROR_STYLE: CSSProperties = {
   gap: 6,
   padding: '6px 8px',
   borderRadius: 6,
-  border: '1px solid var(--dsw-alias-state-error-primary, #d93025)',
-  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #d93025) 8%, transparent)',
-  color: 'var(--dsw-alias-state-error-primary, #d93025)',
+  border: '1px solid var(--dsh-alias-state-error-primary, #d93025)',
+  background: 'color-mix(in srgb, var(--dsh-alias-state-error-primary, #d93025) 8%, transparent)',
+  color: 'var(--dsh-alias-state-error-primary, #d93025)',
   fontSize: 12,
 }
 
@@ -149,7 +196,7 @@ const ERROR_STYLE: CSSProperties = {
 const CATALOG_STYLE: CSSProperties = {
   marginTop: 8,
   padding: 8,
-  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  border: '1px solid var(--dsh-alias-border-l2, #e4e7ec)',
   borderRadius: 6,
   background: 'var(--dsw-alias-bg-l2, #f7f9fb)',
 }
@@ -158,7 +205,7 @@ const CATALOG_RESULTS_STYLE: CSSProperties = {
   marginTop: 6,
   maxHeight: 220,
   overflow: 'auto',
-  border: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  border: '1px solid var(--dsh-alias-border-l2, #e4e7ec)',
   borderRadius: 6,
 }
 
@@ -167,7 +214,7 @@ const CATALOG_OPTION_STYLE: CSSProperties = {
   alignItems: 'flex-start',
   gap: 7,
   padding: '6px 8px',
-  borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)',
+  borderBottom: '1px solid var(--dsh-alias-border-l2, #e4e7ec)',
   cursor: 'pointer',
   overflowWrap: 'anywhere',
 }
@@ -287,57 +334,84 @@ function resolveModelLabel(candidate: RoleModelCandidate, catalog: Collaboration
   )
 }
 
-/** 角色标签页：左列表右编辑，保存才生效。 */
+function copyCandidates(rows: readonly RoleModelCandidate[]): RoleModelCandidate[] {
+  return rows.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
+}
+
+/** 两份候选列表是否逐项相同（顺序也算）。 */
+function sameCandidates(left: readonly RoleModelCandidate[], right: readonly RoleModelCandidate[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((candidate, index) => {
+    const other = right[index]
+    return other !== undefined && other.provider === candidate.provider && other.model === candidate.model
+  })
+}
+
+/** 角色标签页：左列表右编辑，三块各自只读/编辑/保存。 */
 export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const state = useSyncExternalStore(props.store.subscribe, props.store.get)
   // 默认收起编辑器：进入页面/切到本标签时不选中任何角色，右侧只显示引导占位。
   const [selected, setSelected] = useState<string | undefined>(undefined)
-  const [draftName, setDraftName] = useState('')
-  const [draftDesc, setDraftDesc] = useState('')
-  const [draftModels, setDraftModels] = useState<RoleModelCandidate[]>([])
+  // 三块各自的「已保存值」：只读显示与脏判定的基准。
+  const [baseName, setBaseName] = useState('')
+  const [baseDesc, setBaseDesc] = useState('')
+  const [baseModels, setBaseModels] = useState<RoleModelCandidate[]>([])
+  // 三块各自的编辑缓冲：只在该块处于编辑态时有效。
+  const [nameDraft, setNameDraft] = useState('')
+  const [descDraft, setDescDraft] = useState('')
+  const [modelsDraft, setModelsDraft] = useState<RoleModelCandidate[]>([])
+  // 每块独立进入/退出编辑态。
+  const [editName, setEditName] = useState(false)
+  const [editDesc, setEditDesc] = useState(false)
+  const [editModels, setEditModels] = useState(false)
   const [catalogQuery, setCatalogQuery] = useState('')
   const [catalogSelection, setCatalogSelection] = useState<Set<string>>(() => new Set())
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [editingIndex, setEditingIndex] = useState<number | undefined>(undefined)
-  const [dirty, setDirty] = useState(false)
-  // 候选列表本次是否被动过：新增/删除/上移/下移/编辑取值都算；只改名称或职责不算。
-  // 保存时据此决定是否带 models——没动过就省略字段，由服务端保留文件里已有的候选。
-  const [modelsTouched, setModelsTouched] = useState(false)
 
   useEffect(() => {
     void props.store.refreshModelCatalog()
   }, [props.store])
 
+  /** 选中角色（或新建草稿）：三块都回到只读，缓冲对齐到已保存值。 */
   const select = (name: string | undefined, isDraft = false): void => {
     setSelected(name)
     setCatalogQuery('')
     setCatalogSelection(new Set())
     setCatalogOpen(false)
     setEditingIndex(undefined)
-    setModelsTouched(false)
+    setEditName(false)
+    setEditDesc(false)
+    setEditModels(false)
     if (name === undefined || isDraft) {
-      setDraftName('')
-      setDraftDesc('')
-      setDraftModels([])
-    } else {
-      // 读 store 当前值而非渲染快照：保存成功后的回调里快照还是旧列表。
-      const role = props.store.get().templates.find((t) => t.name === name)
-      setDraftName(role?.name ?? '')
-      setDraftDesc(role?.description ?? '')
-      setDraftModels((role?.models ?? []).map((candidate) => ({ provider: candidate.provider, model: candidate.model })))
+      setBaseName('')
+      setBaseDesc('')
+      setBaseModels([])
+      setNameDraft('')
+      setDescDraft('')
+      setModelsDraft([])
+      return
     }
-    setDirty(false)
+    // 读 store 当前值而非渲染快照：保存成功后的回调里快照还是旧列表。
+    const role = props.store.get().templates.find((t) => t.name === name)
+    const nextName = role?.name ?? name
+    const nextDesc = role?.description ?? ''
+    const nextModels = copyCandidates(role?.models ?? [])
+    setBaseName(nextName)
+    setBaseDesc(nextDesc)
+    setBaseModels(nextModels)
+    setNameDraft(nextName)
+    setDescDraft(nextDesc)
+    setModelsDraft(nextModels)
   }
 
   const patchModel = (index: number, patch: Partial<RoleModelCandidate>): void => {
-    setDraftModels((rows) => rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)))
-    setDirty(true)
-    setModelsTouched(true)
+    setModelsDraft((rows) => rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)))
   }
 
   const moveModel = (index: number, delta: number): void => {
     const target = index + delta
-    setDraftModels((rows) => {
+    setModelsDraft((rows) => {
       if (target < 0 || target >= rows.length) return rows
       const next = rows.slice()
       const [item] = next.splice(index, 1)
@@ -350,20 +424,16 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
       if (current === target) return index
       return current
     })
-    setDirty(true)
-    setModelsTouched(true)
   }
 
   const deleteModel = (index: number): void => {
-    setDraftModels((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
+    setModelsDraft((rows) => rows.filter((_, rowIndex) => rowIndex !== index))
     setEditingIndex((current) => {
       if (current === undefined) return current
       if (current === index) return undefined
       if (current > index) return current - 1
       return current
     })
-    setDirty(true)
-    setModelsTouched(true)
   }
 
   const toggleEdit = (index: number): void => {
@@ -371,12 +441,19 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   }
 
   const isNew = selected === NEW_SELECTION
-  const currentRole = isNew ? undefined : state.templates.find((t) => t.name === selected)
-  const canSave = draftName.trim() !== '' && state.rolesError === null
   const catalogOptions = collectCatalogOptions(state.modelCatalog)
   const catalogGroups = collectCatalogGroups(state.modelCatalog, catalogQuery)
   const totalFiltered = catalogGroups.reduce((sum, group) => sum + group.options.length, 0)
-  const addedKeys = new Set(draftModels.map((candidate) => candidateKey(candidate.provider, candidate.model)))
+  const addedKeys = new Set(modelsDraft.map((candidate) => candidateKey(candidate.provider, candidate.model)))
+  const rolesError = state.rolesError
+  /** 角色列表读取失败时不让保存：避免把加载失败当成空候选写回去。 */
+  const canSave = rolesError === null
+  /** 角色名还没落库时，说明块与候选块无从保存（服务端按名 upsert）。 */
+  const hasSavedName = baseName.trim() !== ''
+
+  const nameDirty = nameDraft.trim() !== baseName
+  const descDirty = descDraft !== baseDesc
+  const modelsDirty = !sameCandidates(modelsDraft, baseModels)
 
   /** 收起清单面板并清空搜索词与勾选（两种收起方式共用同一行为）。 */
   const closeCatalog = (): void => {
@@ -394,18 +471,92 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
   const addSelected = (): void => {
     const ordered = catalogOptions.filter((option) => catalogSelection.has(option.key))
     const toAdd = ordered.filter(
-      (option) => !draftModels.some((candidate) => candidate.provider.trim() === option.providerId.trim() && candidate.model.trim() === option.modelId.trim()),
+      (option) => !modelsDraft.some((candidate) => candidate.provider.trim() === option.providerId.trim() && candidate.model.trim() === option.modelId.trim()),
     )
     if (toAdd.length > 0) {
-      setDraftModels((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
-      setDirty(true)
-      setModelsTouched(true)
+      setModelsDraft((rows) => [...rows, ...toAdd.map((option) => ({ provider: option.providerId, model: option.modelId }))])
     }
-    // 添加后清空勾选与搜索词，但**面板保持展开**：保存按钮（「确定」）在面板里，
-    // 收起就够不着保存了；用户点「收起」才收起。
+    // 添加后清空勾选与搜索词，但**面板保持展开**：用户点「收起」才收。
     setCatalogSelection(new Set())
     setCatalogQuery('')
   }
+
+  /** 进入某块的编辑态：缓冲从已保存值开始。 */
+  const startNameEdit = (): void => {
+    setNameDraft(baseName)
+    setEditName(true)
+  }
+  const startDescEdit = (): void => {
+    setDescDraft(baseDesc)
+    setEditDesc(true)
+  }
+  const startModelsEdit = (): void => {
+    setModelsDraft(copyCandidates(baseModels))
+    setEditingIndex(undefined)
+    setEditModels(true)
+  }
+
+  /** 「取消」：丢弃该块未保存的改动、恢复只读显示值；不动其它块、不发请求。 */
+  const cancelName = (): void => {
+    setNameDraft(baseName)
+    setEditName(false)
+  }
+  const cancelDesc = (): void => {
+    setDescDraft(baseDesc)
+    setEditDesc(false)
+  }
+  const cancelModels = (): void => {
+    setModelsDraft(copyCandidates(baseModels))
+    setEditingIndex(undefined)
+    setCatalogOpen(false)
+    setCatalogSelection(new Set())
+    setCatalogQuery('')
+    setEditModels(false)
+  }
+
+  /** 名称块保存：带新名 + 当前说明，**不带 models**（服务端保留既有候选）。 */
+  const saveName = async (): Promise<void> => {
+    if (!canSave) return
+    const nextName = nameDraft.trim()
+    if (nextName === '') return
+    const ok = await props.store.saveRole({ name: nextName, description: baseDesc })
+    if (!ok) return
+    // 保存后按服务端落库结果同步已保存值（改名会新起一个文件，候选可能为空）。
+    const role = props.store.get().templates.find((t) => t.name === nextName)
+    setSelected(nextName)
+    if (role !== undefined) {
+      setBaseName(role.name)
+      setBaseDesc(role.description)
+      setBaseModels(copyCandidates(role.models ?? []))
+      setNameDraft(role.name)
+    } else {
+      setBaseName(nextName)
+      setNameDraft(nextName)
+    }
+    setEditName(false)
+  }
+
+  /** 说明块保存：带当前名 + 新说明，**不带 models**（服务端保留既有候选）。 */
+  const saveDesc = async (): Promise<void> => {
+    if (!canSave || !hasSavedName) return
+    const ok = await props.store.saveRole({ name: baseName, description: descDraft })
+    if (!ok) return
+    setBaseDesc(descDraft)
+    setEditDesc(false)
+  }
+
+  /** 候选块保存：带当前名 + 当前说明 + 该块编辑后的完整候选列表。 */
+  const saveModels = async (): Promise<void> => {
+    if (!canSave || !hasSavedName) return
+    const models = copyCandidates(modelsDraft)
+    const ok = await props.store.saveRole({ name: baseName, description: baseDesc, models })
+    if (!ok) return
+    setBaseModels(models)
+    setEditingIndex(undefined)
+    setEditModels(false)
+  }
+
+  const rows = editModels ? modelsDraft : baseModels
 
   return (
     <div data-router-collab-roles-tab style={LAYOUT_STYLE}>
@@ -428,7 +579,7 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
         ))}
         {isNew ? (
           <div data-router-collab-role-item="__draft__" style={{ ...ITEM_SELECTED_STYLE, cursor: 'default' }}>
-            <span style={{ display: 'block', fontWeight: 500 }}>{draftName.trim() === '' ? '新角色（未保存）' : `${draftName.trim()}（未保存）`}</span>
+            <span style={{ display: 'block', fontWeight: 500 }}>{nameDraft.trim() === '' ? '新角色（未保存）' : `${nameDraft.trim()}（未保存）`}</span>
           </div>
         ) : null}
         <button type="button" data-router-collab-role-new style={NEW_BUTTON_STYLE} onClick={() => { select(NEW_SELECTION, true) }}>
@@ -440,197 +591,271 @@ export function RolesTab(props: { store: CollaborationStore }): ReactNode {
           <div style={{ fontSize: 12, color: '#6b7078' }}>在左侧选择一个角色查看，或新建角色。</div>
         ) : (
           <>
-            <label style={{ display: 'block', fontSize: 12, marginBottom: 4 }}>角色名称</label>
-            <input
-              data-router-collab-role-name
-              style={INPUT_STYLE}
-              placeholder="角色名称（必填；同名保存即更新）"
-              value={draftName}
-              onChange={(event) => { setDraftName(event.target.value); setDirty(true) }}
-            />
-            <label style={{ display: 'block', fontSize: 12, margin: '10px 0 4px' }}>职责说明（派发时注入子会话初始指令）</label>
-            <textarea
-              data-router-collab-role-desc
-              style={TEXTAREA_STYLE}
-              placeholder="职责说明：做什么、报告给谁、边界是什么。支持多行，可直接手工编辑同名 md 文件。"
-              value={draftDesc}
-              onChange={(event) => { setDraftDesc(event.target.value); setDirty(true) }}
-            />
-            <div data-router-collab-role-models style={MODELS_BOX_STYLE}>
-              <div style={{ fontSize: 12, marginBottom: 8, fontWeight: 500 }}>候选模型</div>
-              {draftModels.map((candidate, index) => {
-                const isEditing = editingIndex === index
-                return (
-                  <div key={index} data-router-collab-model-row style={ROW_STYLE}>
-                    {isEditing ? (
-                      <>
-                        <input
-                          data-router-collab-model-provider
-                          style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
-                          placeholder="provider"
-                          aria-label={`候选 ${index + 1} provider`}
-                          value={candidate.provider}
-                          onChange={(event) => { patchModel(index, { provider: event.target.value }) }}
-                        />
-                        <input
-                          data-router-collab-model-model
-                          style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
-                          placeholder="model"
-                          aria-label={`候选 ${index + 1} model`}
-                          value={candidate.model}
-                          onChange={(event) => { patchModel(index, { model: event.target.value }) }}
-                        />
-                      </>
-                    ) : (
-                      <span data-router-collab-model-text style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: 'anywhere' }}>
-                        {resolveModelLabel(candidate, state.modelCatalog)}
-                      </span>
-                    )}
-                    <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }}>
-                      <button type="button" data-router-collab-model-up style={SMALL_BUTTON_STYLE} disabled={index === 0} onClick={() => { moveModel(index, -1) }}>上移</button>
-                      <button type="button" data-router-collab-model-down style={SMALL_BUTTON_STYLE} disabled={index === draftModels.length - 1} onClick={() => { moveModel(index, 1) }}>下移</button>
-                      <button type="button" data-router-collab-model-delete style={SMALL_BUTTON_STYLE} onClick={() => { deleteModel(index) }}>删除</button>
-                      <button type="button" data-router-collab-model-edit style={SMALL_BUTTON_STYLE} onClick={() => { toggleEdit(index) }}>
-                        {isEditing ? '收起' : '编辑'}
-                      </button>
-                    </span>
-                  </div>
-                )
-              })}
-              <div style={ROW_STYLE}>
-                <button
-                  type="button"
-                  data-router-collab-catalog-open
-                  style={SMALL_BUTTON_STYLE}
-                  onClick={toggleCatalog}
-                >
-                  添加模型
-                </button>
+            {/* ---- 名称块 ---- */}
+            <div data-router-collab-role-name-block style={BLOCK_STYLE}>
+              <div style={BLOCK_HEAD_STYLE}>
+                <span style={{ flex: 1 }}>角色名称</span>
+                {editName ? (
+                  <>
+                    {nameDirty ? <span data-router-collab-role-name-dirty style={DIRTY_STYLE}>未保存</span> : null}
+                    <button
+                      type="button"
+                      data-router-collab-role-name-save
+                      style={PRIMARY_BUTTON_STYLE}
+                      disabled={!canSave || nameDraft.trim() === ''}
+                      onClick={() => { void saveName() }}
+                    >
+                      保存
+                    </button>
+                    <button type="button" data-router-collab-role-name-cancel style={BUTTON_STYLE} onClick={cancelName}>
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" data-router-collab-role-name-edit style={SMALL_BUTTON_STYLE} onClick={startNameEdit}>
+                    编辑
+                  </button>
+                )}
               </div>
-              {catalogOpen ? (
-                <div data-router-collab-catalog-panel style={CATALOG_STYLE}>
-                  <div style={{ fontSize: 12, marginBottom: 6 }}>从清单添加（搜索 provider / model 的名称或 ID）</div>
-                  <input
-                    data-router-collab-catalog-query
-                    style={INPUT_STYLE}
-                    placeholder="搜索 provider / model"
-                    aria-label="搜索清单"
-                    value={catalogQuery}
-                    onChange={(event) => { setCatalogQuery(event.target.value) }}
-                  />
-                  {state.modelCatalog.unavailable ? (
-                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单不可用</div>
-                  ) : catalogOptions.length === 0 ? (
-                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单为空</div>
-                  ) : totalFiltered === 0 ? (
-                    <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>无匹配</div>
-                  ) : (
-                    <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
-                      {catalogGroups.map((group) => (
-                        <div key={group.providerId} data-router-collab-catalog-group data-router-collab-catalog-provider={group.providerId}>
-                          <div style={{ padding: '6px 8px', fontWeight: 500, fontSize: 12, background: 'var(--dsw-alias-bg-l2, #f5f7fa)', borderBottom: '1px solid var(--dsw-alias-border-l2, #e4e7ec)' }}>
-                            {group.providerName}
-                            <span style={{ color: '#6b7078', fontWeight: 400 }}>（{group.providerId}）</span>
-                            <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.total} 个模型</span>
-                            {group.options.length < group.total ? (
-                              <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.options.length} 个匹配</span>
-                            ) : null}
-                          </div>
-                          {group.options.map((option) => {
-                            const isAdded = addedKeys.has(candidateKey(option.providerId, option.modelId))
-                            return (
-                              <label
-                                key={option.key}
-                                data-router-collab-catalog-option
-                                data-router-collab-catalog-model={option.modelId}
-                                style={{ ...CATALOG_OPTION_STYLE, cursor: isAdded ? 'default' : 'pointer' }}
-                              >
-                                <input
-                                  type="checkbox"
-                                  data-router-collab-catalog-checkbox
-                                  checked={catalogSelection.has(option.key)}
-                                  disabled={isAdded}
-                                  onChange={() => {
-                                    setCatalogSelection((prev) => {
-                                      const next = new Set(prev)
-                                      if (next.has(option.key)) next.delete(option.key)
-                                      else next.add(option.key)
-                                      return next
-                                    })
-                                  }}
-                                />
-                                <span style={{ fontSize: 12 }}>
-                                  <span style={{ fontWeight: 500 }}>{option.modelName}</span>
-                                  <span style={{ color: '#6b7078' }}>（{option.modelId}）</span>
-                                </span>
-                                {isAdded ? (
-                                  <span data-router-collab-catalog-added style={{ marginLeft: 'auto', fontSize: 12, color: '#6b7078' }}>已加入</span>
-                                ) : null}
-                              </label>
-                            )
-                          })}
-                        </div>
-                      ))}
+              {editName ? (
+                <input
+                  data-router-collab-role-name
+                  style={INPUT_STYLE}
+                  placeholder="角色名称（必填；同名保存即更新）"
+                  value={nameDraft}
+                  onChange={(event) => { setNameDraft(event.target.value) }}
+                />
+              ) : (
+                <div data-router-collab-role-name-text style={READONLY_TEXT_STYLE}>
+                  {baseName === '' ? '（未命名，点「编辑」起名）' : baseName}
+                </div>
+              )}
+              <div style={HINT_STYLE}>
+                {baseName === '' ? '（新角色）先在名称块保存名字，才能保存说明与候选。' : `md 文件：${baseName}.md（可直接手工编辑）`}
+              </div>
+            </div>
+
+            {/* ---- 职责说明块 ---- */}
+            <div data-router-collab-role-desc-block style={BLOCK_STYLE}>
+              <div style={BLOCK_HEAD_STYLE}>
+                <span style={{ flex: 1 }}>职责说明（派发时注入子会话初始指令）</span>
+                {editDesc ? (
+                  <>
+                    {descDirty ? <span data-router-collab-role-desc-dirty style={DIRTY_STYLE}>未保存</span> : null}
+                    <button
+                      type="button"
+                      data-router-collab-role-desc-save
+                      style={PRIMARY_BUTTON_STYLE}
+                      disabled={!canSave || !hasSavedName}
+                      onClick={() => { void saveDesc() }}
+                    >
+                      保存
+                    </button>
+                    <button type="button" data-router-collab-role-desc-cancel style={BUTTON_STYLE} onClick={cancelDesc}>
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" data-router-collab-role-desc-edit style={SMALL_BUTTON_STYLE} onClick={startDescEdit}>
+                    编辑
+                  </button>
+                )}
+              </div>
+              {editDesc ? (
+                <textarea
+                  data-router-collab-role-desc
+                  style={TEXTAREA_STYLE}
+                  placeholder="职责说明：做什么、报告给谁、边界是什么。支持多行，可直接手工编辑同名 md 文件。"
+                  value={descDraft}
+                  onChange={(event) => { setDescDraft(event.target.value) }}
+                />
+              ) : (
+                <div data-router-collab-role-desc-text style={READONLY_TEXT_STYLE}>
+                  {baseDesc === '' ? '（未填写）' : baseDesc}
+                </div>
+              )}
+            </div>
+
+            {/* ---- 候选模型块 ---- */}
+            <div data-router-collab-role-models style={MODELS_BOX_STYLE}>
+              <div style={BLOCK_HEAD_STYLE}>
+                <span style={{ flex: 1 }}>候选模型</span>
+                {editModels ? (
+                  <>
+                    {modelsDirty ? <span data-router-collab-role-models-dirty style={DIRTY_STYLE}>未保存</span> : null}
+                    <button
+                      type="button"
+                      data-router-collab-role-models-save
+                      style={PRIMARY_BUTTON_STYLE}
+                      disabled={!canSave || !hasSavedName}
+                      onClick={() => { void saveModels() }}
+                    >
+                      保存
+                    </button>
+                    <button type="button" data-router-collab-role-models-cancel style={BUTTON_STYLE} onClick={cancelModels}>
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button type="button" data-router-collab-role-models-edit style={SMALL_BUTTON_STYLE} onClick={startModelsEdit}>
+                    编辑
+                  </button>
+                )}
+              </div>
+              {rows.length === 0 ? (
+                <div style={{ fontSize: 12, color: '#6b7078' }}>（未配置候选模型）</div>
+              ) : (
+                rows.map((candidate, index) => {
+                  const isEditing = editModels && editingIndex === index
+                  return (
+                    <div key={index} data-router-collab-model-row style={ROW_STYLE}>
+                      {isEditing ? (
+                        <>
+                          <input
+                            data-router-collab-model-provider
+                            style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
+                            placeholder="provider"
+                            aria-label={`候选 ${index + 1} provider`}
+                            value={candidate.provider}
+                            onChange={(event) => { patchModel(index, { provider: event.target.value }) }}
+                          />
+                          <input
+                            data-router-collab-model-model
+                            style={{ ...INPUT_STYLE, flex: 1, minWidth: 0 }}
+                            placeholder="model"
+                            aria-label={`候选 ${index + 1} model`}
+                            value={candidate.model}
+                            onChange={(event) => { patchModel(index, { model: event.target.value }) }}
+                          />
+                        </>
+                      ) : (
+                        <span data-router-collab-model-text style={{ flex: 1, minWidth: 0, fontSize: 12, overflowWrap: 'anywhere' }}>
+                          {resolveModelLabel(candidate, state.modelCatalog)}
+                        </span>
+                      )}
+                      {editModels ? (
+                        <span style={{ display: 'inline-flex', gap: 4, flexShrink: 0 }}>
+                          <button type="button" data-router-collab-model-up style={SMALL_BUTTON_STYLE} disabled={index === 0} onClick={() => { moveModel(index, -1) }}>上移</button>
+                          <button type="button" data-router-collab-model-down style={SMALL_BUTTON_STYLE} disabled={index === rows.length - 1} onClick={() => { moveModel(index, 1) }}>下移</button>
+                          <button type="button" data-router-collab-model-delete style={SMALL_BUTTON_STYLE} onClick={() => { deleteModel(index) }}>删除</button>
+                          <button type="button" data-router-collab-model-edit style={SMALL_BUTTON_STYLE} onClick={() => { toggleEdit(index) }}>
+                            {isEditing ? '收起' : '编辑'}
+                          </button>
+                        </span>
+                      ) : null}
                     </div>
-                  )}
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
+                  )
+                })
+              )}
+              {editModels ? (
+                <>
+                  <div style={ROW_STYLE}>
                     <button
                       type="button"
-                      data-router-collab-catalog-add
+                      data-router-collab-catalog-open
                       style={SMALL_BUTTON_STYLE}
-                      disabled={catalogSelection.size === 0}
-                      onClick={addSelected}
+                      onClick={toggleCatalog}
                     >
-                      添加所选（{catalogSelection.size}）
-                    </button>
-                    <button
-                      type="button"
-                      data-router-collab-catalog-clear
-                      style={SMALL_BUTTON_STYLE}
-                      disabled={catalogSelection.size === 0}
-                      onClick={() => { setCatalogSelection(new Set()) }}
-                    >
-                      清空选择
-                    </button>
-                    <button
-                      type="button"
-                      data-router-collab-catalog-close
-                      style={SMALL_BUTTON_STYLE}
-                      onClick={closeCatalog}
-                    >
-                      收起
-                    </button>
-                    <button
-                      type="button"
-                      data-router-collab-role-save
-                      style={{ ...PRIMARY_BUTTON_STYLE, marginLeft: 'auto', opacity: canSave ? 1 : 0.5 }}
-                      disabled={!canSave}
-                      onClick={() => {
-                        if (props.store.get().rolesError !== null) return
-                        const input: { name: string; description: string; models?: RoleModelCandidate[] } = {
-                          name: draftName.trim(),
-                          description: draftDesc,
-                        }
-                        // 候选列表被本次编辑动过才带 models；否则省略字段，由服务端保留既有候选围栏。
-                        if (modelsTouched) {
-                          input.models = draftModels.map((candidate) => ({ provider: candidate.provider, model: candidate.model }))
-                        }
-                        void props.store.saveRole(input).then((ok) => {
-                          if (ok) select(draftName.trim())
-                        })
-                      }}
-                    >
-                      确定
+                      添加模型
                     </button>
                   </div>
-                </div>
-              ) : null}
-            </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
-              {dirty ? (
-                <span data-router-collab-role-dirty style={{ fontSize: 12, color: '#e08a1e' }}>未保存</span>
-              ) : currentRole !== undefined ? (
-                <span style={{ fontSize: 11, color: '#6b7078' }}>md 文件：{currentRole.name}.md（可直接手工编辑）</span>
+                  {catalogOpen ? (
+                    <div data-router-collab-catalog-panel style={CATALOG_STYLE}>
+                      <div style={{ fontSize: 12, marginBottom: 6 }}>从清单添加（搜索 provider / model 的名称或 ID）</div>
+                      <input
+                        data-router-collab-catalog-query
+                        style={INPUT_STYLE}
+                        placeholder="搜索 provider / model"
+                        aria-label="搜索清单"
+                        value={catalogQuery}
+                        onChange={(event) => { setCatalogQuery(event.target.value) }}
+                      />
+                      {state.modelCatalog.unavailable ? (
+                        <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单不可用</div>
+                      ) : catalogOptions.length === 0 ? (
+                        <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>清单为空</div>
+                      ) : totalFiltered === 0 ? (
+                        <div data-router-collab-catalog-status role="status" style={CATALOG_STATUS_STYLE}>无匹配</div>
+                      ) : (
+                        <div data-router-collab-catalog-results style={CATALOG_RESULTS_STYLE}>
+                          {catalogGroups.map((group) => (
+                            <div key={group.providerId} data-router-collab-catalog-group data-router-collab-catalog-provider={group.providerId}>
+                              <div style={{ padding: '6px 8px', fontWeight: 500, fontSize: 12, background: 'var(--dsw-alias-bg-l2, #f5f7fa)', borderBottom: '1px solid var(--dsh-alias-border-l2, #e4e7ec)' }}>
+                                {group.providerName}
+                                <span style={{ color: '#6b7078', fontWeight: 400 }}>（{group.providerId}）</span>
+                                <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.total} 个模型</span>
+                                {group.options.length < group.total ? (
+                                  <span style={{ color: '#6b7078', fontWeight: 400 }}> · {group.options.length} 个匹配</span>
+                                ) : null}
+                              </div>
+                              {group.options.map((option) => {
+                                const isAdded = addedKeys.has(candidateKey(option.providerId, option.modelId))
+                                return (
+                                  <label
+                                    key={option.key}
+                                    data-router-collab-catalog-option
+                                    data-router-collab-catalog-model={option.modelId}
+                                    style={{ ...CATALOG_OPTION_STYLE, cursor: isAdded ? 'default' : 'pointer' }}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      data-router-collab-catalog-checkbox
+                                      checked={catalogSelection.has(option.key)}
+                                      disabled={isAdded}
+                                      onChange={() => {
+                                        setCatalogSelection((prev) => {
+                                          const next = new Set(prev)
+                                          if (next.has(option.key)) next.delete(option.key)
+                                          else next.add(option.key)
+                                          return next
+                                        })
+                                      }}
+                                    />
+                                    <span style={{ fontSize: 12 }}>
+                                      <span style={{ fontWeight: 500 }}>{option.modelName}</span>
+                                      <span style={{ color: '#6b7078' }}>（{option.modelId}）</span>
+                                    </span>
+                                    {isAdded ? (
+                                      <span data-router-collab-catalog-added style={{ marginLeft: 'auto', fontSize: 12, color: '#6b7078' }}>已加入</span>
+                                    ) : null}
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', marginTop: 6 }}>
+                        <button
+                          type="button"
+                          data-router-collab-catalog-add
+                          style={SMALL_BUTTON_STYLE}
+                          disabled={catalogSelection.size === 0}
+                          onClick={addSelected}
+                        >
+                          添加所选（{catalogSelection.size}）
+                        </button>
+                        <button
+                          type="button"
+                          data-router-collab-catalog-clear
+                          style={SMALL_BUTTON_STYLE}
+                          disabled={catalogSelection.size === 0}
+                          onClick={() => { setCatalogSelection(new Set()) }}
+                        >
+                          清空选择
+                        </button>
+                        <button
+                          type="button"
+                          data-router-collab-catalog-close
+                          style={SMALL_BUTTON_STYLE}
+                          onClick={closeCatalog}
+                        >
+                          收起
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                </>
               ) : null}
             </div>
             {state.rolesError !== null ? (

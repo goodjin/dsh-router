@@ -149,18 +149,24 @@ function catalogCheckbox(row: HTMLElement): HTMLInputElement {
   return checkbox
 }
 
-/** 点「添加模型」展开清单面板（新交互默认收起，旧用例先点开再查）。 */
-function openCatalog(container: HTMLElement): void {
-  click(container.querySelector('[data-router-collab-catalog-open]')!)
+/** 进入某块的编辑态：三块默认只读，点「编辑」才出现该块的输入与保存/取消。 */
+function startEdit(container: HTMLElement, block: 'name' | 'desc' | 'models'): void {
+  const button = container.querySelector(`[data-router-collab-role-${block}-edit]`)
+  if (button === null) throw new Error(`edit button not found: ${block}`)
+  click(button)
 }
 
-/**
- * 保存角色：保存按钮（「确定」）只在「添加模型」面板展开时存在，
- * 所以保存前先确保面板是展开的。
- */
-function saveRole(container: HTMLElement): void {
-  if (container.querySelector('[data-router-collab-role-save]') === null) openCatalog(container)
-  click(container.querySelector('[data-router-collab-role-save]')!)
+/** 点某块的「保存」（每块只有自己的保存按钮）。 */
+function saveBlock(container: HTMLElement, block: 'name' | 'desc' | 'models'): void {
+  const button = container.querySelector(`[data-router-collab-role-${block}-save]`)
+  if (button === null) throw new Error(`save button not found: ${block}`)
+  click(button)
+}
+
+/** 点「添加模型」展开清单面板（清单入口只在候选块编辑态出现）。 */
+function openCatalog(container: HTMLElement): void {
+  if (container.querySelector('[data-router-collab-catalog-open]') === null) startEdit(container, 'models')
+  click(container.querySelector('[data-router-collab-catalog-open]')!)
 }
 
 async function mountRolesNew(api: CollaborationApi): Promise<{ root: Root; container: HTMLElement }> {
@@ -291,63 +297,47 @@ describe('view_task_selection — 多任务切换', () => {
   })
 })
 
-describe('role edit shared manual/model — 视图页保存与模型工具共享同一 RoleStore', () => {
-  it('切到角色标签：左侧列表；新建 → 右侧编辑 → 保存后进入列表并保持选中', async () => {
-    const saved: RoleTemplate = { name: '测试工程师', description: '写测试' }
-    let roles: RoleTemplate[] = []
-    const api: CollaborationApi = {
-      listRecords: async () => [],
-      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
-      listRoles: async () => roles,
-      saveRole: async (input) => { roles = [saved]; return saved },
-      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
-    }
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    // 默认任务标签：角色编辑器不可见。
-    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    expect(container.querySelectorAll('[data-router-collab-role-item]')).toHaveLength(0)
-    // 默认收起编辑器：未选角色前只有占位引导。
-    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
-    expect(container.querySelector('[data-router-collab-role-editor]')).toBeTruthy()
-    click(container.querySelector('[data-router-collab-role-new]')!)
-    await flush()
-    expect(container.querySelector('[data-router-collab-role-item="__draft__"]')).toBeTruthy()
-    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
-    await act(async () => {
-      const inputSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-      inputSetter.call(nameInput, '测试工程师')
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
-      const areaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
-      areaSetter.call(descInput, '写测试')
-      descInput.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
-    saveRole(container)
-    await flush()
-    await flush()
-    const items = container.querySelectorAll('[data-router-collab-role-item]')
-    expect([...items].some((t) => t.textContent!.includes('测试工程师'))).toBe(true)
-    expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('测试工程师')
-    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeNull()
-    await act(async () => { root.unmount() })
-  })
+describe('role edit shared manual/model — 角色编辑区分块独立编辑与保存', () => {
+  interface RolePost {
+    name: string
+    description: string
+    models?: Array<{ provider: string; model: string }>
+  }
 
-  it('编辑既有角色：职责为多行编辑框，保存即更新且未保存标记消失', async () => {
-    let roles: RoleTemplate[] = [{ name: '主管', description: '旧说明' }]
+  /** 角色列表可变、保存请求留痕的 API（复刻服务端语义：models 缺省时保留盘上候选）。 */
+  function rolesApi(
+    initial: RoleTemplate[],
+    catalog: CollaborationModelCatalog = { unavailable: true, providers: [] },
+  ): { api: CollaborationApi; posts: RolePost[]; roles: RoleTemplate[] } {
+    const roles: RoleTemplate[] = [...initial]
+    const posts: RolePost[] = []
     const api: CollaborationApi = {
       listRecords: async () => [],
       readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
       listRoles: async () => roles,
-      saveRole: async (input) => { roles = [{ name: input.name, description: input.description }]; return { name: input.name, description: input.description } },
-      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
+      listModelCatalog: async () => catalog,
+      saveRole: async (input) => {
+        posts.push({
+          name: input.name,
+          description: input.description,
+          ...(input.models !== undefined ? { models: input.models } : {}),
+        })
+        const merged = input.models !== undefined ? input.models : roles.find((r) => r.name === input.name)?.models
+        const next: RoleTemplate = {
+          name: input.name,
+          description: input.description,
+          ...(merged !== undefined ? { models: merged } : {}),
+        }
+        const index = roles.findIndex((r) => r.name === input.name)
+        if (index >= 0) roles[index] = next
+        else roles.push(next)
+        return next
+      },
     }
+    return { api, posts, roles }
+  }
+
+  async function mountRoles(api: CollaborationApi, roleName?: string): Promise<{ root: Root; container: HTMLElement }> {
     const store = startCollaborationStore({ api })
     const props = baseProps(store)
     const { root, container } = render(props)
@@ -355,105 +345,260 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     click(container.querySelector('[data-router-collab-tab="roles"]')!)
     await flush()
-    click(container.querySelector('[data-router-collab-role-item="主管"]')!)
+    if (roleName !== undefined) {
+      click(container.querySelector(`[data-router-collab-role-item="${roleName}"]`)!)
+      await flush()
+    }
+    return { root, container }
+  }
+
+  it('三块默认只读：页面上没有可编辑输入，也没有统一保存按钮', async () => {
+    const { api } = rolesApi([{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '测试工程师')
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-model-provider]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-model-up]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
+    // 编辑器里一个 input/textarea 都没有。
+    expect(container.querySelectorAll('[data-router-collab-role-editor] input, [data-router-collab-role-editor] textarea')).toHaveLength(0)
+    // 只读文本在。
+    expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('测试工程师')
+    expect(container.querySelector('[data-router-collab-role-desc-text]')?.textContent).toContain('写测试用例并报告')
+    expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('deepseek-chat')
+    await act(async () => { root.unmount() })
+  })
+
+  it('点各块的「编辑」才出现该块的输入与保存/取消，其它块仍只读', async () => {
+    const { api } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    // 名称块。
+    startEdit(container, 'name')
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-name-save]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-name-cancel]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeNull()
+    click(container.querySelector('[data-router-collab-role-name-cancel]')!)
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    // 说明块。
+    startEdit(container, 'desc')
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-desc-save]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-desc-cancel]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    click(container.querySelector('[data-router-collab-role-desc-cancel]')!)
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeNull()
+    // 候选块。
+    startEdit(container, 'models')
+    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-model-up]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-model-down]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-model-delete]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-model-edit]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-models-save]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-models-cancel]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('名称块保存：请求体是新名 + 当前说明，不带 models', async () => {
+    const { api, posts, roles } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'name')
+    await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '新名字') })
+    saveBlock(container, 'name')
     await flush()
-    const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
-    expect(descInput.value).toBe('旧说明')
-    // 编辑框高度翻倍（440px）。
-    expect(descInput.style.minHeight).toBe('440px')
-    await act(async () => {
-      const areaSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
-      areaSetter.call(descInput, '第一行：拆解任务\n第二行：汇总结果')
-      descInput.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-    expect(container.querySelector('[data-router-collab-role-dirty]')).toBeTruthy()
-    saveRole(container)
+    await flush()
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.name).toBe('新名字')
+    expect(posts[0]!.description).toBe('旧说明')
+    expect('models' in posts[0]!).toBe(false)
+    // 原角色的候选没被动过（服务端保留既有候选）。
+    expect(roles.find((r) => r.name === '主管')?.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+    // 保存后该块回到只读，显示新名字。
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('新名字')
+    await act(async () => { root.unmount() })
+  })
+
+  it('说明块保存：请求体是当前名 + 新说明，不带 models', async () => {
+    const { api, posts, roles } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'desc')
+    await act(async () => { setFieldValue(container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!, '新说明') })
+    saveBlock(container, 'desc')
     await flush()
     await flush()
-    expect((container.querySelector('[data-router-collab-role-desc]') as HTMLTextAreaElement).value).toContain('第二行：汇总结果')
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.name).toBe('主管')
+    expect(posts[0]!.description).toBe('新说明')
+    expect('models' in posts[0]!).toBe(false)
+    // 既有候选没丢。
+    expect(roles.find((r) => r.name === '主管')?.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+    expect(container.querySelector('[data-router-collab-role-desc]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-desc-text]')?.textContent).toContain('新说明')
+    await act(async () => { root.unmount() })
+  })
+
+  it('候选块保存：请求体带当前名、当前说明与该块编辑后的完整候选', async () => {
+    const { api, posts, roles } = rolesApi([{ name: '执行者', description: '职责', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'openai', model: 'gpt-4o' }] }])
+    const { root, container } = await mountRoles(api, '执行者')
+    startEdit(container, 'models')
+    click(container.querySelectorAll('[data-router-collab-model-delete]')[0]!)
+    await flush()
+    saveBlock(container, 'models')
+    await flush()
+    await flush()
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.name).toBe('执行者')
+    expect(posts[0]!.description).toBe('职责')
+    expect(posts[0]!.models).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
+    expect(roles.find((r) => r.name === '执行者')?.models).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
+    expect(container.querySelector('[data-router-collab-model-delete]')).toBeNull()
+    await act(async () => { root.unmount() })
+  })
+
+  it('取消：丢弃该块改动、恢复只读显示值，不发请求也不动其它块', async () => {
+    const { api, posts } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'name')
+    await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '改坏了') })
+    click(container.querySelector('[data-router-collab-role-name-cancel]')!)
+    await flush()
+    expect(posts).toHaveLength(0)
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('主管')
+    expect(container.querySelector('[data-router-collab-role-desc-text]')?.textContent).toContain('旧说明')
+    await act(async () => { root.unmount() })
+  })
+
+  it('页面上不存在统一保存按钮：只有三块各自的「保存」「取消」', async () => {
+    const { api } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    // 三块都进编辑态。
+    startEdit(container, 'name')
+    startEdit(container, 'desc')
+    startEdit(container, 'models')
+    // 旧的统一保存选择器不复用。
+    expect(container.querySelectorAll('[data-router-collab-role-save]')).toHaveLength(0)
+    const saves = [...container.querySelectorAll('button')].filter((button) => button.textContent === '保存')
+    expect(saves).toHaveLength(3)
+    for (const button of saves) {
+      const owned = button.hasAttribute('data-router-collab-role-name-save')
+        || button.hasAttribute('data-router-collab-role-desc-save')
+        || button.hasAttribute('data-router-collab-role-models-save')
+      expect(owned).toBe(true)
+    }
+    const cancels = [...container.querySelectorAll('button')].filter((button) => button.textContent === '取消')
+    expect(cancels).toHaveLength(3)
+    await act(async () => { root.unmount() })
+  })
+
+  it('「添加模型」面板里没有「确定」：只有添加所选/清空选择/收起', async () => {
+    const { api } = rolesApi([{ name: '主管', description: '旧说明' }], catalogFixture)
+    const { root, container } = await mountRoles(api, '主管')
+    openCatalog(container)
+    await flush()
+    const panel = container.querySelector('[data-router-collab-catalog-panel]')!
+    expect(panel.textContent).not.toContain('确定')
+    expect(panel.querySelectorAll('[data-router-collab-role-save]')).toHaveLength(0)
+    const labels = [...panel.querySelectorAll('button')].map((button) => button.textContent!.trim())
+    expect(labels).toEqual(['添加所选（0）', '清空选择', '收起'])
+    await act(async () => { root.unmount() })
+  })
+
+  it('新建角色：名称块保存后进列表，说明块与候选块各自再保存', async () => {
+    const { api, posts, roles } = rolesApi([], catalogFixture)
+    const { root, container } = await mountRoles(api)
+    click(container.querySelector('[data-router-collab-role-new]')!)
+    await flush()
+    // 新角色也是三块只读。
+    expect(container.querySelector('[data-router-collab-role-name]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('未命名')
+    // 名称块保存 → 角色进列表。
+    startEdit(container, 'name')
+    await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '执行者') })
+    saveBlock(container, 'name')
+    await flush()
+    await flush()
+    expect(roles.map((r) => r.name)).toContain('执行者')
+    expect(container.querySelector('[data-router-collab-role-item="执行者"]')).toBeTruthy()
+    expect(container.querySelector('[data-router-collab-role-name-text]')?.textContent).toContain('执行者')
+    // 说明块保存。
+    startEdit(container, 'desc')
+    await act(async () => { setFieldValue(container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!, '做执行') })
+    saveBlock(container, 'desc')
+    await flush()
+    await flush()
+    expect(posts[1]).toMatchObject({ name: '执行者', description: '做执行' })
+    expect('models' in posts[1]!).toBe(false)
+    // 候选块保存。
+    startEdit(container, 'models')
+    openCatalog(container)
+    await flush()
+    click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
+    await flush()
+    click(container.querySelector('[data-router-collab-catalog-add]')!)
+    await flush()
+    saveBlock(container, 'models')
+    await flush()
+    await flush()
+    expect(posts[2]!.name).toBe('执行者')
+    expect(posts[2]!.description).toBe('做执行')
+    expect(posts[2]!.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
+    await act(async () => { root.unmount() })
+  })
+
+  it('未保存提示按块给：只有动过的那块显示「未保存」', async () => {
+    const { api } = rolesApi([{ name: '主管', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }])
+    const { root, container } = await mountRoles(api, '主管')
+    startEdit(container, 'desc')
+    expect(container.querySelector('[data-router-collab-role-desc-dirty]')).toBeNull()
+    await act(async () => { setFieldValue(container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!, '新说明') })
+    expect(container.querySelector('[data-router-collab-role-desc-dirty]')?.textContent).toContain('未保存')
+    expect(container.querySelector('[data-router-collab-role-name-dirty]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-role-models-dirty]')).toBeNull()
+    // 没有全局未保存提示。
     expect(container.querySelector('[data-router-collab-role-dirty]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 
-  it('保存失败显示错误并保留草稿', async () => {
-    const { api } = scriptedApi({})
-    const failingApi: CollaborationApi = {
-      ...api,
-      saveRole: async () => { throw new Error('保存失败：网络') },
-    }
-    const store = startCollaborationStore({ api: failingApi })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-new]')!)
-    await flush()
-    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    await act(async () => {
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
-      setter.call(nameInput, '草稿角色')
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
-    })
-    saveRole(container)
+  it('保存失败：块内显示错误，草稿还在该块的编辑态里', async () => {
+    const { api } = rolesApi([{ name: '主管', description: '旧说明' }])
+    const failingApi: CollaborationApi = { ...api, saveRole: async () => { throw new Error('保存失败：网络') } }
+    const { root, container } = await mountRoles(failingApi, '主管')
+    startEdit(container, 'name')
+    await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!, '草稿角色') })
+    saveBlock(container, 'name')
     await flush()
     expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('保存失败')
     expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('草稿角色')
     await act(async () => { root.unmount() })
   })
 
-  it('左侧预览只用职责；候选文本态一行一个，名称取清单，查不到显示 ID', async () => {
-    const roles: RoleTemplate[] = [{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'prov-secret', model: 'hidden-model' }] }]
-    const api = catalogApi(catalogFixture, { listRoles: async () => roles })
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
+  it('左侧预览只用职责；候选只读显示名称，查不到显示 ID', async () => {
+    const { api } = rolesApi([{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'prov-secret', model: 'hidden-model' }] }], catalogFixture)
+    const { root, container } = await mountRoles(api, '测试工程师')
     const item = container.querySelector('[data-router-collab-role-item="测试工程师"]')!
     expect(item.textContent).toContain('写测试用例并报告')
     expect(item.textContent).not.toContain('deepseek-chat')
-    click(item)
-    await flush()
     // 文本态：无输入框，一行一个模型。
     expect(container.querySelector('[data-router-collab-model-provider]')).toBeNull()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(2)
     const texts = [...container.querySelectorAll('[data-router-collab-model-text]')].map((el) => el.textContent)
     expect(texts[0]).toContain('DeepSeek'); expect(texts[0]).toContain('deepseek-chat')
-    // 清单查不到：只显示 ID 文本，不报错、不空行。
     expect(texts[1]).toContain('prov-secret'); expect(texts[1]).toContain('hidden-model')
     await act(async () => { root.unmount() })
   })
 
-  it('候选行点「编辑」切成两个输入框，改值收起后保存带 models', async () => {
-    let roles: RoleTemplate[] = [{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'prov-secret', model: 'hidden-model' }] }]
-    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
-    const api: CollaborationApi = {
-      listRecords: async () => [],
-      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
-      listRoles: async () => roles,
-      listModelCatalog: async () => ({ unavailable: true, providers: [] }),
-      saveRole: async (input) => {
-        posted = input
-        roles = [{ name: input.name, description: input.description, models: input.models }]
-        return roles[0]!
-      },
-    }
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="测试工程师"]')!)
-    await flush()
-    // 文本态显示 ID。
+  it('候选行点「编辑」切成两个输入框，改值收起后由候选块保存带 models', async () => {
+    const { api, posts } = rolesApi([{ name: '测试工程师', description: '写测试用例并报告', models: [{ provider: 'prov-secret', model: 'hidden-model' }] }])
+    const { root, container } = await mountRoles(api, '测试工程师')
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('prov-secret')
-    // 点「编辑」→ 切成两个输入框。
+    startEdit(container, 'models')
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
     const provider = container.querySelector<HTMLInputElement>('[data-router-collab-model-provider]')!
@@ -462,121 +607,42 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
       setFieldValue(provider, 'manual-provider')
       setFieldValue(model, 'manual-model')
     })
-    // 收起回文本态。
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-model-provider]')).toBeNull()
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('manual-provider')
-    saveRole(container)
+    saveBlock(container, 'models')
     await flush()
     await flush()
-    expect(posted?.models).toEqual([{ provider: 'manual-provider', model: 'manual-model' }])
+    expect(posts[0]!.models).toEqual([{ provider: 'manual-provider', model: 'manual-model' }])
     await act(async () => { root.unmount() })
   })
 
-  it('不再提供「添加空行」入口，只能从清单添加', async () => {
-    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
-    expect(container.querySelector('[data-router-collab-model-add]')).toBeNull()
-    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeTruthy()
-    await act(async () => { root.unmount() })
-  })
-
-  it('只改职责说明保存，候选未动则不带 models，保留既有候选', async () => {
-    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
-    let roles: RoleTemplate[] = [{ name: '测试工程师', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }]
-    const api: CollaborationApi = {
-      listRecords: async () => [],
-      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
-      listRoles: async () => roles,
-      listModelCatalog: async () => catalogFixture,
-      saveRole: async (input) => {
-        posted = input
-        // 复刻服务端语义：models 缺省时保留盘上既有候选。
-        const merged = input.models !== undefined ? input.models : roles.find((r) => r.name === input.name)?.models
-        roles = [{ name: input.name, description: input.description, ...(merged !== undefined ? { models: merged } : {}) }]
-        return roles[0]!
-      },
-    }
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="测试工程师"]')!)
-    await flush()
-    // 只改职责说明，不碰候选。
-    const descInput = container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!
-    await act(async () => { setFieldValue(descInput, '新说明') })
-    await flush()
-    saveRole(container)
+  it('只改说明块保存，候选未动则不带 models，保留既有候选', async () => {
+    const { api, posts, roles } = rolesApi([{ name: '测试工程师', description: '旧说明', models: [{ provider: 'deepseek', model: 'deepseek-chat' }] }], catalogFixture)
+    const { root, container } = await mountRoles(api, '测试工程师')
+    startEdit(container, 'desc')
+    await act(async () => { setFieldValue(container.querySelector<HTMLTextAreaElement>('[data-router-collab-role-desc]')!, '新说明') })
+    saveBlock(container, 'desc')
     await flush()
     await flush()
-    // 请求体不带 models；存储里候选未丢。
-    expect('models' in posted!).toBe(false)
+    expect('models' in posts[0]!).toBe(false)
     expect(roles[0]!.models).toEqual([{ provider: 'deepseek', model: 'deepseek-chat' }])
     await act(async () => { root.unmount() })
   })
 
-  it('动过候选（删除一条）后保存，候选按新列表更新', async () => {
-    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
-    let roles: RoleTemplate[] = [{ name: '执行者', description: '职责', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'openai', model: 'gpt-4o' }] }]
-    const api: CollaborationApi = {
-      listRecords: async () => [],
-      readRecord: async () => ({ record: {} as WorkRecord, path: '' }),
-      listRoles: async () => roles,
-      listModelCatalog: async () => catalogFixture,
-      saveRole: async (input) => {
-        posted = input
-        roles = [{ name: input.name, description: input.description, ...(input.models !== undefined ? { models: input.models } : {}) }]
-        return roles[0]!
-      },
-    }
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="执行者"]')!)
-    await flush()
-    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(2)
-    click(container.querySelectorAll('[data-router-collab-model-delete]')[0]!)
-    await flush()
-    expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
-    saveRole(container)
-    await flush()
-    await flush()
-    expect(posted?.models).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
-    expect(roles[0]!.models).toEqual([{ provider: 'openai', model: 'gpt-4o' }])
-    await act(async () => { root.unmount() })
-  })
-
-  it('候选行上移、下移、删除改变顺序', async () => {
-    const roles: RoleTemplate[] = [{ name: '执行者', description: '职责', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'openai', model: 'gpt-4o' }, { provider: 'deepseek', model: 'deepseek-reasoner' }] }]
-    const api = catalogApi(catalogFixture, { listRoles: async () => roles })
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="执行者"]')!)
-    await flush()
+  it('候选行上移、下移、删除改变顺序（候选块编辑态内）', async () => {
+    const { api } = rolesApi([{ name: '执行者', description: '职责', models: [{ provider: 'deepseek', model: 'deepseek-chat' }, { provider: 'openai', model: 'gpt-4o' }, { provider: 'deepseek', model: 'deepseek-reasoner' }] }], catalogFixture)
+    const { root, container } = await mountRoles(api, '执行者')
     const texts = () => [...container.querySelectorAll('[data-router-collab-model-text]')].map((el) => el.textContent)
     expect(texts()[0]).toContain('deepseek-chat')
-    // 下移第 1 行。
+    startEdit(container, 'models')
     click(container.querySelectorAll('[data-router-collab-model-down]')[0]!)
     await flush()
     expect(texts()[1]).toContain('deepseek-chat')
-    // 上移回原位。
     click(container.querySelectorAll('[data-router-collab-model-up]')[1]!)
     await flush()
     expect(texts()[0]).toContain('deepseek-chat')
-    // 删除第 1 行。
     click(container.querySelectorAll('[data-router-collab-model-delete]')[0]!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(2)
@@ -584,25 +650,21 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await act(async () => { root.unmount() })
   })
 
-  it('添加面板默认收起，点「添加模型」展开，可收起', async () => {
-    const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
+  it('添加面板默认收起，候选块编辑态里点「添加模型」展开，可收起', async () => {
+    const { api } = rolesApi([{ name: '执行者', description: '职责' }], catalogFixture)
+    const { root, container } = await mountRoles(api, '执行者')
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
     expect(container.querySelector('[data-router-collab-catalog-query]')).toBeNull()
-    // 面板收起：保存按钮（「确定」）不渲染。
-    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
+    // 只读态没有清单入口。
+    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeNull()
+    startEdit(container, 'models')
     openCatalog(container)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     expect(container.querySelector('[data-router-collab-catalog-query]')).toBeTruthy()
-    // 面板展开：有且只有一个「确定」，文字是「确定」。
-    const saves = container.querySelectorAll('[data-router-collab-role-save]')
-    expect(saves).toHaveLength(1)
-    expect(saves[0]!.textContent).toBe('确定')
     click(container.querySelector('[data-router-collab-catalog-close]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
-    // 收起后保存按钮一并消失。
-    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
     await act(async () => { root.unmount() })
   })
 
@@ -612,37 +674,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect(box.style.border).toContain('1px solid')
     expect(box.style.borderRadius).not.toBe('')
     expect(box.style.padding).not.toBe('')
-    await act(async () => { root.unmount() })
-  })
-
-  it('保存按钮只在添加模型面板展开时出现：展开时文字是「确定」，点它保存成功', async () => {
-    let saved: { name: string; description: string } | undefined
-    let roles: RoleTemplate[] = []
-    const api = catalogApi(catalogFixture, {
-      listRoles: async () => roles,
-      saveRole: async (input) => {
-        saved = input
-        roles = [{ name: input.name, description: input.description, models: input.models }]
-        return roles[0]!
-      },
-    })
-    const { root, container } = await mountRolesNew(api)
-    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    await act(async () => { setFieldValue(nameInput, '执行者') })
-    await flush()
-    // 面板收起：页面里没有保存按钮。
-    expect(container.querySelector('[data-router-collab-role-save]')).toBeNull()
-    openCatalog(container)
-    await flush()
-    const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-save]')!
-    expect(save.textContent).toBe('确定')
-    expect(save.disabled).toBe(false)
-    click(save)
-    await flush()
-    await flush()
-    expect(saved?.name).toBe('执行者')
-    // 保存成功后角色进列表。
-    expect(container.querySelector('[data-router-collab-role-item="执行者"]')).toBeTruthy()
     await act(async () => { root.unmount() })
   })
 
@@ -659,7 +690,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect(groups[0]!.querySelectorAll('[data-router-collab-catalog-option]')).toHaveLength(2)
     expect(groups[1]!.getAttribute('data-router-collab-catalog-provider')).toBe('openai')
     expect(groups[1]!.querySelectorAll('[data-router-collab-catalog-option]')).toHaveLength(1)
-    // 组内选项只显示模型名（ID）。
     const opt = groups[0]!.querySelector('[data-router-collab-catalog-option]')!
     expect(opt.textContent).toContain('Chat')
     expect(opt.textContent).toContain('（deepseek-chat）')
@@ -682,17 +712,18 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await act(async () => { root.unmount() })
   })
 
-  it('从清单多选添加；400 时 saveError 可见且草稿还在', async () => {
+  it('从清单多选添加；保存失败时 saveError 可见且草稿还在', async () => {
     let fail = false
-    const api = catalogApi(catalogFixture, {
+    const { api } = rolesApi([{ name: '执行者', description: '职责' }], catalogFixture)
+    const failingApi: CollaborationApi = {
+      ...api,
       saveRole: async (input) => {
         if (fail) throw new Error('候选无效')
         return { name: input.name, description: input.description, models: input.models }
       },
-    })
-    const { root, container } = await mountRolesNew(api)
-    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
-    await act(async () => { setFieldValue(nameInput, '执行者') })
+    }
+    const { root, container } = await mountRoles(failingApi, '执行者')
+    startEdit(container, 'models')
     openCatalog(container)
     await flush()
     click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
@@ -701,10 +732,9 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('deepseek-chat')
     fail = true
-    saveRole(container)
+    saveBlock(container, 'models')
     await flush()
     expect(container.querySelector('[data-router-collab-role-error]')!.textContent).toContain('候选无效')
-    expect((container.querySelector('[data-router-collab-role-name]') as HTMLInputElement).value).toBe('执行者')
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('deepseek-chat')
     await act(async () => { root.unmount() })
   })
@@ -713,7 +743,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
     openCatalog(container)
     await flush()
-    // 反向点击：证明追加顺序来自清单而非点击顺序。
     click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-reasoner')))
     click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
     await flush()
@@ -723,10 +752,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     expect(texts).toHaveLength(2)
     expect(texts[0]).toContain('deepseek-chat')
     expect(texts[1]).toContain('deepseek-reasoner')
-    // 添加后面板保持展开（保存按钮在面板里，收起就够不着保存）。
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
-    expect(container.querySelector('[data-router-collab-role-save]')).toBeTruthy()
-    // 搜索词清空、无勾选。
     expect((container.querySelector('[data-router-collab-catalog-query]') as HTMLInputElement).value).toBe('')
     expect((container.querySelector('[data-router-collab-catalog-add]') as HTMLButtonElement).disabled).toBe(true)
     await act(async () => { root.unmount() })
@@ -741,7 +767,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelector('[data-router-collab-catalog-add]')!)
     await flush()
     expect(container.querySelectorAll('[data-router-collab-model-row]')).toHaveLength(1)
-    // 添加后面板仍展开，直接看清单状态。
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     const added = catalogOptionRow(container, 'deepseek', 'deepseek-chat')
     expect(catalogCheckbox(added).disabled).toBe(true)
@@ -772,7 +797,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
 
   it('候选值带首尾空格时，清单按 trim 判为已加入且不可勾选', async () => {
     const { root, container } = await mountRolesNew(catalogApi(catalogFixture))
-    // 先从清单添加 deepseek-chat，再点「编辑」改成带首尾空格的同值。
     openCatalog(container)
     await flush()
     click(catalogCheckbox(catalogOptionRow(container, 'deepseek', 'deepseek-chat')))
@@ -787,7 +811,6 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     })
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
-    // 添加后面板仍展开，直接看清单状态。
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeTruthy()
     const row = catalogOptionRow(container, 'deepseek', 'deepseek-chat')
     expect(catalogCheckbox(row).disabled).toBe(true)
@@ -812,17 +835,8 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
   })
 
   it('切换角色重置面板展开状态、勾选与搜索词', async () => {
-    const roles: RoleTemplate[] = [{ name: '执行者', description: '职责', models: [] }, { name: '评审员', description: '评审' }]
-    const api = catalogApi(catalogFixture, { listRoles: async () => roles })
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="执行者"]')!)
-    await flush()
+    const { api } = rolesApi([{ name: '执行者', description: '职责', models: [] }, { name: '评审员', description: '评审' }], catalogFixture)
+    const { root, container } = await mountRoles(api, '执行者')
     openCatalog(container)
     await flush()
     await act(async () => { setFieldValue(container.querySelector<HTMLInputElement>('[data-router-collab-catalog-query]')!, 'deepseek') })
@@ -832,6 +846,7 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     click(container.querySelector('[data-router-collab-role-item="评审员"]')!)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-panel]')).toBeNull()
+    expect(container.querySelector('[data-router-collab-catalog-open]')).toBeNull()
     openCatalog(container)
     await flush()
     expect((container.querySelector('[data-router-collab-catalog-query]') as HTMLInputElement).value).toBe('')
@@ -860,32 +875,14 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
   })
 
   it('清单不可用显示状态，既有手工候选行仍可编辑保存', async () => {
-    let posted: { name: string; description: string; models?: Array<{ provider: string; model: string }> } | undefined
-    const roles: RoleTemplate[] = [{ name: '执行者', description: '职责', models: [{ provider: 'manual-provider', model: 'manual-model' }] }]
-    const api = catalogApi({ unavailable: true, providers: [] }, {
-      listRoles: async () => roles,
-      saveRole: async (input) => {
-        posted = input
-        return { name: input.name, description: input.description, models: input.models }
-      },
-    })
-    const store = startCollaborationStore({ api })
-    const props = baseProps(store)
-    const { root, container } = render(props)
-    await act(async () => { root.render(createElement(CollaborationView, props)) })
-    await flush()
-    click(container.querySelector('[data-router-collab-tab="roles"]')!)
-    await flush()
-    click(container.querySelector('[data-router-collab-role-item="执行者"]')!)
-    await flush()
-    // 清单不可用，既有手工候选以 ID 文本态显示。
+    const { api, posts } = rolesApi([{ name: '执行者', description: '职责', models: [{ provider: 'manual-provider', model: 'manual-model' }] }])
+    const { root, container } = await mountRoles(api, '执行者')
     expect(container.querySelector('[data-router-collab-model-text]')?.textContent).toContain('manual-provider')
     openCatalog(container)
     await flush()
     expect(container.querySelector('[data-router-collab-catalog-status]')?.textContent).toContain('清单不可用')
     click(container.querySelector('[data-router-collab-catalog-close]')!)
     await flush()
-    // 编辑取值后保存，候选按新值发送。
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
     await act(async () => {
@@ -894,10 +891,10 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     })
     click(container.querySelector('[data-router-collab-model-edit]')!)
     await flush()
-    saveRole(container)
+    saveBlock(container, 'models')
     await flush()
     await flush()
-    expect(posted?.models).toEqual([{ provider: 'manual-provider-2', model: 'manual-model-2' }])
+    expect(posts[0]!.models).toEqual([{ provider: 'manual-provider-2', model: 'manual-model-2' }])
     await act(async () => { root.unmount() })
   })
 
@@ -919,20 +916,16 @@ describe('role edit shared manual/model — 视图页保存与模型工具共享
     await flush()
     click(container.querySelector('[data-router-collab-role-new]')!)
     await flush()
-    const nameInput = container.querySelector<HTMLInputElement>('[data-router-collab-role-name]')!
+    startEdit(container, 'name')
     await act(async () => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(nameInput, '执行者')
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }))
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(container.querySelector('[data-router-collab-role-name]')!, '执行者')
+      container.querySelector('[data-router-collab-role-name]')!.dispatchEvent(new Event('input', { bubbles: true }))
     })
-    // 保存按钮只在「添加模型」面板展开时出现：先展开面板再取按钮。
-    openCatalog(container)
-    await flush()
-    const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-save]')!
+    const save = container.querySelector<HTMLButtonElement>('[data-router-collab-role-name-save]')!
     expect(save.disabled).toBe(true)
     click(save)
     await flush()
     expect(saves).toBe(0)
-    expect(nameInput.value).toBe('执行者')
     await act(async () => { root.unmount() })
   })
 })
